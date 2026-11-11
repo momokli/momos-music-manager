@@ -1,8 +1,10 @@
 # Active Plans
 
-**57 done** · **0 in progress** · **26 proposed**
+**57 done** · **1 in progress** · **26 proposed**
 
 ## Proposed
+
+- [runner-release-flow](proposed/runner-release-flow.md) — **in progress** (Betriebs-Plan: Runner-Release-Deadlock + Versions-Regression gefixt, Log-Flut beseitigt; offen: #480, Milestone-Buchhaltung, Deploy nach dem Infra-Umzug — Stand 2026-10-17)
 
 - [unified-work-queue](proposed/unified-work-queue.md) — `feat/music-api-work-queue` (one priority queue in music-api for download/transcode/analyze/`crawl:<source>` leads; `next(kind)` applies priority; `MAX_INFLIGHT` per kind — primitive + `/work` API + first consumer landed; see §Open decisions)
 - [hub-crawl-everything](proposed/hub-crawl-everything.md) — `feat/music-api-catalogue` + `feat/hub-catalogue-client` (music-api as authority: permanent request log + idle catalogue growth + default BPM/key analysis; hub orders & reads; now-playing shows BPM/key; needs decisions in §12)
