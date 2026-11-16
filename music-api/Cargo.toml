@@ -4,7 +4,7 @@
 name = "music-api"
 version = "0.5.0"
 edition = "2021"
-description = "ISRC order/consume API in front of deemix — resolves, downloads and transcodes by ISRC"
+description = "ISRC order/consume API — resolves and downloads Deezer audio natively by ISRC"
 
 [dependencies]
 axum = "0.8"

@@ -1,24 +1,26 @@
 # music-api
 
-An **ISRC order/consume API** in front of deemix. Consumers (Momo's Music
-Manager) place _orders_ of ISRCs; this service resolves them on Deezer,
-downloads the best available quality through a dedicated deemix instance,
-derives the lossy variants and serves the files back by ISRC.
+An **ISRC order/consume API** that downloads Deezer audio natively. Consumers
+(Momo's Music Manager) place _orders_ of ISRCs; this service resolves them on
+Deezer, downloads the best available quality **itself** (tagging the ISRC),
+derives the lossy variants and serves the files back by ISRC. Non-Deezer sources
+(SoundCloud, YouTube) go through yt-dlp.
 
 ```
 MMM ──POST /orders {isrc…}──▶ music-api ──▶ api.deezer.com  (ISRC → track, no auth)
                                   │
-                                  ├──▶ deemix (FLAC, bitrate fallback)  ──▶ /downloads
+                                  ├──▶ native Deezer download (deezer_dl, ISRC tag)  ──▶ store
                                   │
                                   └──▶ ffmpeg  → flac + 320 + 128  ──▶ GET /isrc/{isrc}/{format}
 ```
 
-Why this shape: **deemix cannot ingest Spotify links** any more (its
-client-credentials Spotify app gets the playlist name but no songs, plus an
-app-wide quota), and Spotify URL ingestion was the fragile part of the old flow.
-MMM already knows the ISRCs of every track it cares about, so the whole Spotify
+Why this shape: **Spotify URLs cannot be ingested** any more (the old
+client-credentials app gets the playlist name but no songs, plus an app-wide
+quota), and Spotify URL ingestion was the fragile part of the old flow. MMM
+already knows the ISRCs of every track it cares about, so the whole Spotify
 problem disappears if orders are keyed by ISRC. Deezer's public ISRC lookup needs
-no credentials at all.
+no credentials at all, and the download is a single Rust path — no sidecar, no
+Node, no Docker.
 
 ## Contract (v1)
 
@@ -79,8 +81,8 @@ final file is resolved by yt-dlp (`api.soundcloud.com/tracks/<id>` /
 ```
 
 `sourceFormat` is `flac`, `mp3-320` or `mp3-128` — classified from the delivered
-file (ffprobe), not from what was requested, because deemix's bitrate fallback
-lands on whatever the ARL's Deezer tier allows.
+file (ffprobe), not from what was requested, because the tier fallback lands on
+whatever the ARL's Deezer tier allows.
 
 ### `GET /orders/{orderId}/archive[?format=flac|320|128]` — whole order as one ZIP (#358)
 
@@ -175,17 +177,17 @@ existing object never wipes these: group/stem columns are merged with `COALESCE`
 
 | Method | Path                      | Use                                                        |
 | ------ | ------------------------- | ---------------------------------------------------------- |
-| `GET`  | `/queue`                  | live deemix queue (`items`) + per-state `counts`           |
+| `GET`  | `/queue`                  | native queue view: `items` (empty hull) + per-state `counts` |
 | `GET`  | `/worker`                 | `{paused, intervalSecs, maxAttempts, maxInflight}`         |
 | `POST` | `/worker/pause` `/resume` | pause/resume the worker                                    |
 | `POST` | `/isrc/{isrc}/retry`      | reset a failed/stranded ISRC to `pending` (`409` if ready) |
 | `GET`  | `/logs?limit=n`           | recent service events, newest first                        |
 | `GET`  | `/tracks?isrcs=a,b,c`     | bulk metadata/state for many ISRCs                         |
-| `GET`  | `/account`                | Deezer account tier behind `DEEMIX_ARL`                    |
+| `GET`  | `/account`                | Deezer account tier behind `DEEZER_ARL`                    |
 
 ### Deezer account tier (`GET /account`)
 
-Returns the tier of the account behind `DEEMIX_ARL`, so the hub can warn when
+Returns the tier of the account behind `DEEZER_ARL`, so the hub can warn when
 FLAC is impossible:
 
 ```json
@@ -202,40 +204,8 @@ FLAC is impossible:
 The tier is probed once at startup (spawned, off the boot path) and cached; the
 handler re-probes on demand if the cache is still empty. FLAC downloads require
 a Premium/HiFi ARL — a Free ARL (`lossless: false`) silently falls back to a
-lower bitrate, and `DEEMIX_BITRATE=9` then logs a startup warning. Responses:
-`409` when `DEEMIX_ARL` is unset, `502` when the tier probe fails.
-
-### Artist orders (whole discography)
-
-An **artist order** downloads a whole Deezer artist's discography through deemix
-and loads the produced files into the vault. deemix accepts artist URLs
-(`https://www.deezer.com/artist/<id>`) and expands them to the full catalogue.
-
-| Method | Path                  | Use                                                        |
-| ------ | --------------------- | ---------------------------------------------------------- | ------- | ---- | -------- |
-| `POST` | `/artist-orders`      | `{ "artist": "<deezer-artist-id-or-url>", "priority": 0 }` |
-| `GET`  | `/artist-orders`      | list artist orders (`?status=open                          | running | done | failed`) |
-| `GET`  | `/artist-orders/{id}` | status + `added`/`error` + the ingested ISRCs              |
-
-`artist` is a bare Deezer artist id (`12345`) or a URL; a Deezer artist URL is
-canonicalised, any other URL is passed to deemix unchanged. The order is stored
-in `artist_orders` (additive) and submitted to deemix at `DEEMIX_BITRATE`.
-
-Status is `open` (created, not yet accepted by deemix — the worker retries),
-`running` (submitted, downloading), `done` (finished and ingested) or `failed`
-(rejected/errored, with a reason). Priority and the per-tick batch bound mirror
-the ISRC queue.
-
-**Ingest.** When an artist order reaches a terminal deemix success, the worker
-scans the deemix download dir (bounded: files newer than the order, capped at 2000) and, per file, reads its tags with **`ffprobe`** (`format.tags` → ISRC,
-title, artist, album; `format.duration` → ms). A file with an ISRC is loaded into
-the vault (`hub_track` + `sat_track_meta` with duration + `hub_artist`/`hub_album`
-
-- links, via the existing `vault::*` loaders), copied into the store
-  (`flac`/`320`/`128`, keyed by ISRC) and written to the operational `tracks` ledger
-  as `ready` with its `path_flac` — so the analysis worker picks it up on the next
-  tick. A file **without** an ISRC is a best-effort skip (the vault is keyed by
-  ISRC), never a hard failure.
+lower quality, and `DOWNLOAD_QUALITY=flac` then logs a startup warning. Responses:
+`409` when `DEEZER_ARL` is unset, `502` when the tier probe fails.
 
 ### Per-ISRC metadata (BPM/key authority)
 
@@ -379,25 +349,24 @@ DATABASE_URL=sqlite:… VAULT_BACKFILL_BATCH=500 music-api backfill-vault
 | state         | meaning                                                          |
 | ------------- | ---------------------------------------------------------------- |
 | `pending`     | ordered, not yet resolved                                        |
-| `downloading` | submitted to deemix, waiting                                     |
+| `downloading` | native download dispatched, waiting on its background task       |
 | `ready`       | at least one format is on disk (`formats` lists them)            |
 | `absent`      | Deezer has no match, or it is not streamable for the ARL account |
-| `failed`      | transport/timeout/deemix rejection                               |
+| `failed`      | transport/timeout/hard download error                            |
 
 Order status is derived: `open` while any item is pending/downloading, `done`
 when all are `ready`, otherwise `partial`.
 
 Transient failures are retried with exponential backoff up to `QUEUE_MAX_ATTEMPTS`
 (default 3); only then does a track become `failed`. `absent` (no streamable match)
-stays terminal. A row in `downloading` holds a **lease** that the worker refreshes
-while deemix reports progress; if the lease lapses (dead process, evicted item) the
-row is re-queued by the reaper at the start of the next tick.
+stays terminal. A row in `downloading` holds a **lease**; if the lease lapses (dead
+process) the row is re-queued by the reaper at the start of the next tick.
 
 **In-flight cap.** Orders are accepted without limit, but only `MAX_INFLIGHT`
-(default 5) rows are dispatched to deemix at once — the `downloading` rows _are_
-the in-flight set. Each tick the worker pulls at most `max_inflight - inflight`
-rows from the priority-ordered due set, so priority decides _which_ pending rows
-fill the free slots and the queue cannot flood deemix.
+(default 5) rows are dispatched at once — the `downloading` rows _are_ the
+in-flight set. Each tick the worker pulls at most `max_inflight - inflight` rows
+from the priority-ordered due set, so priority decides _which_ pending rows fill
+the free slots.
 
 ## Pipeline (one worker, no external queue)
 
@@ -405,51 +374,47 @@ The `tracks.state` column _is_ the queue; the worker runs a flat tick (skipped w
 globally paused):
 
 0. **reap** — re-queue any `downloading` row whose lease lapsed (crash/restart recovery).
-1. **resolve+enqueue** — pull at most `max_inflight - inflight` _due_ `pending`
+1. **resolve + download** — pull at most `max_inflight - inflight` _due_ `pending`
    ISRCs (highest order priority first, then oldest): look each up on Deezer, then
-   submit `https://www.deezer.com/track/<id>` to deemix at `DEEMIX_BITRATE`.
-   `CantStream` → `absent`; other rejections become a bounded, backoff retry.
-2. **advance** — poll the deemix queue for the in-flight UUIDs; on a terminal
-   success status, locate the file, copy it into the store and transcode. While the
-   item is still downloading its lease is refreshed.
+   start a native `deezer_dl` download at `DOWNLOAD_QUALITY` on a background task
+   (the ISRC tag is written before the file is stored). A non-Deezer source is
+   handed to a bounded yt-dlp task instead.
+2. **transcode** — derive the missing lossy formats (`320`/`128`) from the primary
+   file on the bounded `transcode` queue.
 3. **analyze** — for each `ready` track with a FLAC and no `essentia` metadata
    yet, call the analyzer (bounded, off the tick loop) and upsert BPM/key. Skipped
    entirely when `ANALYZER_URL` is unset.
-4. **artist orders** — submit `open` artist orders to deemix and, on terminal
-   success, ingest the produced files into the vault (see _Artist orders_ above).
 
-Lossless source → `flac/` + `320/` + `128/`. When deemix had to fall back to
-MP3 (no lossless master, or a Deezer tier that caps quality), the delivered file
-is probed with ffprobe: a ≥256 kbps MP3 becomes the 320 source (and 128 is
-derived from it), a lower one is stored as 128 only. The dedicated deemix
-download dir is ours, so the source file is removed after it has been collected.
+Lossless source → `flac/` + `320/` + `128/`. When the tier caps quality (no
+lossless master, or a Free ARL), the delivered file is probed with ffprobe: a
+≥256 kbps MP3 becomes the 320 source (and 128 is derived from it), a lower one is
+stored as 128 only.
 
 ## Configuration
 
 See [`.env.example`](.env.example). Everything is env-driven; `MUSIC_API_TOKEN`
-and `DEEMIX_ARL` are the only required secrets. Response bodies from
-`loginArl` are never logged — deemix echoes the ARL back.
+and `DEEZER_ARL` are the only required secrets. The ARL is only ever handed to
+the download module — it never reaches a log line or an error message (warnings
+name the variable, never its value).
 
-Download backend: `DOWNLOAD_BACKEND` selects where Deezer audio comes from —
-`native` downloads via the vendored `deezer_dl` module, `sidecar` hands the
-track to the deemix instance behind `DEEMIX_URL`, and `auto` (the **default**)
-resolves per environment: native when `DEEMIX_ARL` is set, sidecar when only
-`DEEMIX_URL` is set, and native when `DEEMIX_URL` is empty. `DEEMIX_URL` has
-**no default** since 0.5.0 (#511) — an unset/blank value disables the sidecar
-entirely. An explicit `DOWNLOAD_BACKEND=sidecar` without `DEEMIX_URL` is a
-startup error (fail-fast, never a silent network call against an empty URL).
+Download: `DOWNLOAD_QUALITY` selects the requested quality — `flac` (default),
+`mp3-320` or `mp3-128`. An invalid value is a startup error (fail-fast, never a
+silent default). The tier fallback steps down FLAC → 320 → 128 when the ARL's
+account cannot stream the wanted tier. There is no download backend switch: the
+native `deezer_dl` path is the only one. `DEEZER_ARL` is the ARL variable; the
+pre-0.6 name is still accepted as a fallback with a one-time warning.
 
-> **Upgrade note (0.5.0).** Before 0.5.0 every download went through the deemix
-> sidecar and `DEEMIX_URL` defaulted to `http://127.0.0.1:6595`. An existing
-> installation therefore switches to the native path on upgrade without any
-> operator action. The sidecar stays available as an explicit fallback: set
-> `DOWNLOAD_BACKEND=sidecar` (and `DEEMIX_URL`) to keep the old pipeline.
+> **Upgrade note (0.6.0).** The old sidecar (a deemix instance behind
+> `DEEMIX_URL`/`DEEMIX_ARL`/`DEEMIX_BITRATE`) is gone. Existing hosts that still
+> export the old ARL variable keep working (it is read as a fallback), but should
+> rename it to `DEEZER_ARL`; `DEEMIX_URL`/`DEEMIX_BITRATE`/
+> `DEEMIX_DOWNLOAD_DIR`/`DOWNLOAD_BACKEND` are dropped and no longer read.
 
 Queue tuning: `QUEUE_MAX_ATTEMPTS` (default `3`), `QUEUE_RETRY_BASE_SECS` (`60`)
 and `QUEUE_RETRY_MAX_SECS` (`1800`) shape the bounded retry backoff. The download
 lease reuses `DOWNLOAD_TIMEOUT_SECS` (refreshed as a heartbeat). `MAX_INFLIGHT`
-(default `5`) caps how many downloads are dispatched to deemix at once; order
-intake itself is unbounded.
+(default `5`) caps how many downloads are dispatched at once; order intake
+itself is unbounded.
 
 Analysis: `ANALYZER_URL` (fallback `HUB_ANALYZER_URL`) enables the BPM/key job;
 unset/blank disables it. `ANALYSIS_CONCURRENCY` (default `1`) caps concurrent
@@ -459,8 +424,8 @@ the vault resolver's per-field precedence. The one-shot backfill reads
 
 Deezer tier probe: `DEEZER_GW_BASE` (default
 `https://www.deezer.com/ajax/gw-light.php`) is the gw-light endpoint used to read
-the account tier behind `DEEMIX_ARL`. FLAC requires a Premium/HiFi ARL; with a
-Free ARL and `DEEMIX_BITRATE=9` the service logs a warning at startup. See
+the account tier behind `DEEZER_ARL`. FLAC requires a Premium/HiFi ARL; with a
+Free ARL and `DOWNLOAD_QUALITY=flac` the service logs a warning at startup. See
 [`GET /account`](#deezer-account-tier-get-account).
 
 ## Deploy
@@ -476,33 +441,24 @@ cargo build --release --target x86_64-unknown-linux-musl
 On the host:
 
 ```bash
-install -d /opt/music-api/{data,deemix-config}
-install -d /data/public/media/music-api/{incoming,flac,320,128}   # the BIG volume
+install -d /opt/music-api/data
+install -d /data/public/media/music-api/{flac,320,128}   # the BIG volume
 install -m755 music-api /opt/music-api/music-api
-install -m600 .env.example /opt/music-api/music-api.env   # then edit + chmod
+install -m600 .env.example /opt/music-api/music-api.env   # then edit + chmod (set DEEZER_ARL)
 install -m644 deploy/music-api.service /etc/systemd/system/music-api.service
 systemctl daemon-reload && systemctl enable --now music-api
+# or: deploy/setup.sh <binary> does the above idempotently
+# .149: add deploy/Caddyfile.snippet to the Caddyfile, export MUSIC_API_TOKEN, reload Caddy
 ```
 
-**Storage**: the file store (`flac/320/128/incoming`) must sit on a large
-volume — a full library is hundreds of GB. `/opt/music-api/data` holds only the
-small ledger DB. `deploy/relocate-data.sh` moves an existing store and rewrites
-the stored paths.
-
-docker compose -f deploy/deemix-api.compose.yml up -d
-
-# once: SSH-tunnel to :6599, log in with the ARL, set Quality = FLAC + Bitrate fallback ON
-
-# (deploy/setup.sh seeds this config and picks a usable ARL from an existing instance)
-
-# .149: add deploy/Caddyfile.snippet to the Caddyfile, export MUSIC_API_TOKEN, reload Caddy
-
-````
+**Storage**: the file store (`flac/320/128`) must sit on a large volume — a full
+library is hundreds of GB. `/opt/music-api/data` holds only the small ledger DB.
+`deploy/relocate-data.sh` moves an existing store and rewrites the stored paths.
 
 **ARL tier matters.** FLAC and 320 need a Deezer Premium/HiFi account; a Free ARL
-makes deemix fall back to what the account may stream (128) — the service still
-serves the track, but `sourceFormat` is `mp3-128` and there is no `flac`/`320`.
-The tier is a property of the ARL, not of this service.
+makes the service fall back to what the account may stream (128) — the service
+still serves the track, but `sourceFormat` is `mp3-128` and there is no
+`flac`/`320`. The tier is a property of the ARL, not of this service.
 
 `/health` is the only unauthenticated route and is safe for Caddy/uptime checks.
 
@@ -512,13 +468,14 @@ The tier is a property of the ARL, not of this service.
 cargo test
 ````
 
-62 tests: unit tests for ISRC normalisation, order-status derivation, retry
-backoff, deemix and Deezer payload parsing, constant-time token compare,
-download-file matching, the vault hashing/normalisation primitives and the
-`ffprobe` tag parser; plus integration tests over the real router (auth, order
-create/read/list, `/isrc` status, file delivery, order flipping to `done`, the
-durable queue: retry, lease recovery, worker status and queue counts, the
-per-ISRC metadata upsert/merge/range read, artist-order create/read, the
+Unit tests for ISRC normalisation, order-status derivation, retry backoff,
+Deezer payload parsing, constant-time token compare, quality parsing, the ARL
+alias resolver, the vault hashing/normalisation primitives and the `ffprobe` tag
+parser; plus integration tests over the real router (auth, order create/read/
+list, `/isrc` status, file delivery, order flipping to `done`, the durable
+queue: retry, lease recovery, worker status and queue counts, the native
+download path end-to-end with a loopback Deezer mock, the per-ISRC metadata
+upsert/merge/range read, the `deemix_uuid`→`download_ref` migration, the
 ffprobe-fixture ingest into the vault, and the Data Vault: precedence
 resolution, hub/link/satellite ingest and the batched, idempotent backfill).
 

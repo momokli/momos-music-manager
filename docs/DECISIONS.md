@@ -2075,3 +2075,65 @@ Entscheidungen in §10 offen; Issue **#361** war das ADR-Gate, das den Fokus-Mil
   Pairing-Fensters abfängt, kann das Device an sich binden — akzeptiert; nach dem Binden
   ist Re-Hijack durch Token-Entwertung ausgeschlossen.
 - kellner bleibt ohne Provider-Credentials; er spricht nur Hub + music-api.
+
+## ADR-082: music-api — native Deezer download is the only path; deemix removed (#518)
+
+**Date**: 2026-11-16
+**Status**: Accepted (ersetzt den Sidecar-Ansatz aus ADR-038/064/067; Issue #518)
+**Relates**: ADR-038 (music-api Frontend/Stack), ADR-064 (deemix-Sidecar),
+ADR-065 (music-api = Download-Autorität), ADR-067 (deprecated Tabellen bleiben),
+ADR-078 (music-api Queue-Engine), ADR-079 (ISRC→{BPM,Key}-Autorität)
+
+**Context**: music-api hatte seit #510 einen nativen Download-Pfad (`deezer_dl`,
+vendored Rusteer, MIT) und seit #511 den deemix-Sidecar optional gemacht
+(`DEEMIX_URL`, `DOWNLOAD_BACKEND=auto|native|sidecar`). Damit existierten zwei
+parallele Download-Implementierungen, zwei Env-Oberflächen und eine
+Artist-Order-Phase, die nur über den Sidecar funktioniert (ein Container mit
+Node). Der Plan `plans/proposed/native-deezer-download.md` (M3) sah vor, den
+Sidecar als Zwischenschritt zu behalten; **#517 wurde verworfen**. Entscheidung
+(2026-11-16): der native Pfad ist erprobt genug, der Sidecar verschwindet
+ersatzlos.
+
+**Decision**:
+
+1. **Ein Pfad.** `deezer_dl` ist die **einzige** Deezer-Download-Implementierung.
+   `src/deemix.rs`, `DownloadBackend`, `effective_backend`, `sidecar_configured`
+   und `DOWNLOAD_BACKEND` werden gelöscht. Kein Fallback, kein Schalter.
+2. **Env.** `DEEMIX_ARL` → **`DEEZER_ARL`** (der alte Name bleibt als **einzige,
+   markierte Zeile** — `legacy-env-alias` — als Fallback mit einmaliger Warnung
+   lesbar; die Warnung nennt nur den Variablennamen, nie den Wert).
+   `DEEMIX_BITRATE` (1/3/9) → **`DOWNLOAD_QUALITY`** (`flac|mp3-320|mp3-128`,
+   Default `flac`); ein ungültiger Wert ist ein Fail-fast beim Start.
+   `DEEMIX_URL` und `DEEMIX_DOWNLOAD_DIR` fallen ersatzlos weg.
+3. **Ledger.** `tracks.deemix_uuid` → **`download_ref`**; idempotente
+   `ALTER TABLE ... RENAME COLUMN`-Migration (`PRAGMA table_info`, kein `DROP`).
+   Bestehende Werte bleiben stehen.
+4. **Artist-Order-API entfernt.** `POST/GET /artist-orders`, `ArtistOrder`,
+   `artist_state`, die DB-Helfer und die Worker-Phase fallen weg (kein Aufrufer
+   in `music-hub`/`kellner`). Die physischen Tabellen (`artist_orders`,
+   `artist_order_items`, `hub_deemix_downloads`) bleiben in Bestands-DBs stehen
+   und werden nicht mehr gelesen (analog ADR-067).
+5. **`crawl:*`.** `POST /work` lehnt Kinds mit `crawl:`-Präfix mit `409` ab
+   („no crawl worker configured") — statt Leads in eine tote Queue zu legen.
+   Der native Artist-Crawl ist ein eigener, späterer Schritt.
+6. **HTTP-Vertrag.** `GET /queue` ist eine native Zählansicht; `/health` und
+   `/worker` tragen **kein** `backend`/`sidecarConfigured` mehr (der gecachte
+   `arlTier` bleibt). Die Hub-Ops-Seite rendert ohne „Quelle"-Badge.
+7. **Deploy.** Die `deemix-api`-Compose-Datei und alle Sidecar-Schritte in
+   `setup.sh`/`relocate-data.sh`/`music-api.service` entfallen; ein Deploy
+   braucht kein Docker/Node mehr.
+8. **Kein Versionsbump** in diesem PR (der `api-v*`-Tag ist die Release-Wahrheit;
+   der Milestone-Release setzt `0.6.0`).
+
+**Consequences**:
+
+- **Breaking (Env):** Hosts mit `DEEMIX_URL`/`DEEMIX_BITRATE`/`DOWNLOAD_BACKEND`
+  verlieren diese Variablen; `DEEMIX_ARL` wird weiter akzeptiert (Warnung), sollte
+  aber zu `DEEZER_ARL` umbenannt werden.
+- **Breaking (API):** `POST/GET /artist-orders` → `404`; `POST /work
+  {"kind":"crawl:deezer"}` → `409`; `/queue`,`/health`,`/worker` verlieren
+  `backend`/`sidecarConfigured`. Im CHANGELOG als entfernt markiert.
+- **Ein Codepfad, ein Deploy:** keine zweite Wartungsfläche, kein Container, kein
+  Node; yt-dlp bleibt der Pfad für Nicht-Deezer-Quellen.
+- **Historie bleibt lesbar:** die alten Tabellen werden nicht gelöscht; die
+  historischen ADRs 038/064/065/067 werden nicht umgeschrieben.

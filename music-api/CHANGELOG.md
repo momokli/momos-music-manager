@@ -6,6 +6,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: per-component tag line `api-v<x.y.z>` (see
 [`docs/stack-versioning.md`](../docs/stack-versioning.md)).
 
+## [Unreleased]
+
+Native Deezer download is the only path — the deemix sidecar is removed
+entirely (#518).
+
+### Added
+
+- **Native download is the only path** (#518) — one download implementation
+  (`deezer_dl`); the ISRC tag is written before the file is stored.
+- New `DOWNLOAD_QUALITY` env (`flac` | `mp3-320` | `mp3-128`, default `flac`),
+  fail-fast on an invalid value.
+
+### Changed
+
+- **Env rename** — `DEEMIX_ARL` → `DEEZER_ARL`. The old name is still read as a
+  fallback with a one-time warning (variable name only, never the value).
+- `GET /queue` is a native counts view; `GET /health` and `GET /worker` no
+  longer carry `backend`/`sidecarConfigured` (the cached `arlTier` stays).
+- DB column `tracks.deemix_uuid` renamed to `download_ref` via an idempotent
+  in-place migration (no `DROP`); existing values are preserved.
+- `POST /work` rejects `kind` values with a `crawl:` prefix with `409` (there is
+  no crawl worker any more).
+
+### Removed
+
+- **The deemix sidecar, entirely** — `DEEMIX_URL`, `DEEMIX_BITRATE`,
+  `DEEMIX_DOWNLOAD_DIR` and `DOWNLOAD_BACKEND`; `src/deemix.rs`; the
+  `deploy/deemix-api.compose.yml` container and every deploy step around it.
+- **Artist-order API** — `POST/GET /artist-orders` and the underlying
+  `artist_orders` persistence. Pre-existing `artist_orders` /
+  `hub_deemix_downloads` tables stay in old databases (never dropped) but are no
+  longer read or written.
+- The `backend`/`sidecarConfigured` fields and the hub ops "Quelle" badge.
+
 ## [0.5.0]
 
 Native Deezer downloads — music-api fetches the audio itself (128/320/FLAC). No
