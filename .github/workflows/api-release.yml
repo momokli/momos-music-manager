@@ -80,18 +80,17 @@ jobs:
       - name: Compile the tests
         run: cargo test --locked --target x86_64-unknown-linux-musl --no-run
 
-      # `MUSIC_API_VERSION` from the tag is what build.rs embeds.
+      # `MUSIC_API_VERSION` from the tag is what build.rs embeds. Off a tag it must
+      # stay unset: passing an empty string would override the dev fallback and
+      # make `--version` report an empty version.
       - name: Build
         shell: bash
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF}" == refs/tags/api-v* ]]; then
-            VERSION="${GITHUB_REF_NAME#api-v}"
-          else
-            VERSION=""
+            export MUSIC_API_VERSION="${GITHUB_REF_NAME#api-v}"
           fi
-          MUSIC_API_VERSION="$VERSION" cargo build --release --locked \
-            --target x86_64-unknown-linux-musl
+          cargo build --release --locked --target x86_64-unknown-linux-musl
           BIN="target/x86_64-unknown-linux-musl/release/music-api"
           echo "BIN=$BIN" >> "$GITHUB_ENV"
           ls -l "$BIN" | awk '{print "size:", $5, "bytes"}'
