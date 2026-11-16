@@ -13,6 +13,9 @@
 
 use std::path::Path;
 
+use lofty::config::WriteOptions;
+use lofty::prelude::*;
+use lofty::tag::{ItemKey, Tag};
 use serde::Deserialize;
 
 /// The tags the vault ingest cares about, read from one audio file.
@@ -103,9 +106,100 @@ pub async fn read_tags(ffprobe: &str, path: &Path) -> Option<AudioTags> {
     Some(parse_ffprobe(&String::from_utf8_lossy(&output.stdout)))
 }
 
+/// Write the ISRC into `path`'s primary tag, creating the tag when the file has
+/// none. One code path for both containers: `lofty` maps [`ItemKey::Isrc`] to
+/// ID3v2 `TSRC` (MP3) and the Vorbis comment `ISRC` (FLAC). Blocking file I/O is
+/// offloaded to a worker thread. Idempotent — an existing ISRC is replaced.
+pub async fn write_isrc(path: &Path, isrc: &str) -> anyhow::Result<()> {
+    let path = path.to_path_buf();
+    let isrc = isrc.to_string();
+    tokio::task::spawn_blocking(move || write_isrc_blocking(&path, &isrc))
+        .await
+        .map_err(|e| anyhow::anyhow!("write_isrc task failed: {e}"))?
+}
+
+fn write_isrc_blocking(path: &Path, isrc: &str) -> anyhow::Result<()> {
+    let mut tagged =
+        lofty::read_from_path(path).map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+    if tagged.primary_tag_mut().is_none() {
+        let tag_type = tagged.primary_tag_type();
+        tagged.insert_tag(Tag::new(tag_type));
+    }
+    let tag = tagged
+        .primary_tag_mut()
+        .ok_or_else(|| anyhow::anyhow!("no primary tag for {}", path.display()))?;
+    tag.insert_text(ItemKey::Isrc, isrc.to_string());
+    tagged
+        .save_to_path(path, WriteOptions::default())
+        .map_err(|e| anyhow::anyhow!("save {}: {e}", path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    /// A private copy of a fixture (never mutate the checked-in file).
+    fn fixture_copy(name: &str) -> PathBuf {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        let dst = std::env::temp_dir().join(format!(
+            "music-api-fixture-{}-{name}",
+            std::process::id()
+        ));
+        std::fs::copy(&src, &dst).expect("copy fixture");
+        dst
+    }
+
+    /// Read the ISRC back with `lofty` directly (ffprobe may be absent in CI).
+    fn read_isrc_lofty(path: &Path) -> Option<String> {
+        let f = lofty::read_from_path(path).ok()?;
+        f.primary_tag()
+            .and_then(|t| t.get_string(&ItemKey::Isrc))
+            .map(str::to_string)
+    }
+
+    #[tokio::test]
+    async fn write_isrc_round_trips_mp3_tsrc() {
+        let path = fixture_copy("tiny.mp3");
+        assert_eq!(read_isrc_lofty(&path), None, "fixture should start untagged");
+
+        write_isrc(&path, "GBKQU2538819").await.unwrap();
+        assert_eq!(
+            read_isrc_lofty(&path).as_deref(),
+            Some("GBKQU2538819"),
+            "MP3 ISRC (ID3 TSRC) not readable"
+        );
+
+        // Idempotent: a second write replaces, does not duplicate.
+        write_isrc(&path, "USQX91201487").await.unwrap();
+        assert_eq!(read_isrc_lofty(&path).as_deref(), Some("USQX91201487"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn write_isrc_round_trips_flac_vorbis() {
+        let path = fixture_copy("tiny.flac");
+        write_isrc(&path, "FRZ039800054").await.unwrap();
+        assert_eq!(
+            read_isrc_lofty(&path).as_deref(),
+            Some("FRZ039800054"),
+            "FLAC ISRC (Vorbis ISRC) not readable"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_isrc_rejects_a_missing_file() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let missing = std::env::temp_dir().join("music-api-does-not-exist.mp3");
+        assert!(rt.block_on(write_isrc(&missing, "X")).is_err());
+    }
 
     /// A realistic `ffprobe -show_format -show_streams -print_format json` body.
     const FIXTURE: &str = r#"{
