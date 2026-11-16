@@ -10,9 +10,16 @@ name: music-api release
 # * `workflow_dispatch` allows a manual run from the default branch.
 #
 # Why musl: the host (music-catalog) has no Rust toolchain and no Docker, so the
-# deploy ships one static binary (`music-api/deploy/setup.sh`). The target
-# x86_64-unknown-linux-musl is the one we install; ffmpeg/ffprobe/flac stay
-# host-provided binaries, they are not linked into the crate.
+# deploy ships one static binary (`music-api/deploy/setup.sh`). ffmpeg/ffprobe/
+# flac stay host-provided binaries, they are not linked into the crate.
+#
+# Why the explicit baseline (`RUSTFLAGS`/`CFLAGS_*` below): the host is a
+# `Common KVM processor` — SSE2 only, no SSE4.2, no AVX. The first release
+# (api-v0.6.0) died on startup with `SIGILL` in a `vpcmpeqd %ymm…` instruction
+# inside SQLite's amalgamation, i.e. the bundled C had been auto-vectorised with
+# AVX. Pinning `target-cpu=x86-64` for rustc and `-march=x86-64` for the C
+# compiler removes the guesswork: the artefact targets the baseline the host
+# actually has.
 
 on:
   push:
@@ -32,6 +39,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Both are needed: rustc for the crate, CFLAGS for the bundled SQLite (`cc`
+  # crate). `-mno-*` is belt and braces in case an earlier flag re-enables them.
+  RUSTFLAGS: "-C target-cpu=x86-64"
+  CFLAGS_x86_64_unknown_linux_musl: "-O2 -march=x86-64 -mtune=generic -mno-avx -mno-avx2 -mno-avx512f"
 
 jobs:
   build:
@@ -60,25 +71,45 @@ jobs:
         with:
           workspaces: music-api -> target
 
+      - name: Show the codegen baseline
+        run: |
+          rustc --print cfg --target x86_64-unknown-linux-musl | grep target_feature
+          echo "RUSTFLAGS=$RUSTFLAGS"
+
       # A tag must not publish code that does not even compile its tests.
       - name: Compile the tests
         run: cargo test --locked --target x86_64-unknown-linux-musl --no-run
 
-      # `MUSIC_API_VERSION` from the tag is what build.rs embeds.
+      # `MUSIC_API_VERSION` from the tag is what build.rs embeds. Off a tag it must
+      # stay unset: passing an empty string would override the dev fallback and
+      # make `--version` report an empty version.
       - name: Build
         shell: bash
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF}" == refs/tags/api-v* ]]; then
-            VERSION="${GITHUB_REF_NAME#api-v}"
-          else
-            VERSION=""
+            export MUSIC_API_VERSION="${GITHUB_REF_NAME#api-v}"
           fi
-          MUSIC_API_VERSION="$VERSION" cargo build --release --locked \
-            --target x86_64-unknown-linux-musl
+          cargo build --release --locked --target x86_64-unknown-linux-musl
           BIN="target/x86_64-unknown-linux-musl/release/music-api"
           echo "BIN=$BIN" >> "$GITHUB_ENV"
           ls -l "$BIN" | awk '{print "size:", $5, "bytes"}'
+
+      # The host cannot execute AVX, and a SIGILL on startup is how that shows up
+      # (api-v0.6.0, in SQLite's amalgamation). This reports any remaining
+      # ymm-register code together with the symbol it lives in — runtime-gated
+      # assembly (ring's perlasm) is fine, unguarded compiler vectorisation is not.
+      # It is informational because only running the artefact on the host decides.
+      - name: Report AVX codegen
+        shell: bash
+        run: |
+          set -euo pipefail
+          if objdump -d "$BIN" | grep -qE 'v[a-z0-9]+\s+%ymm'; then
+            echo "::warning::ymm-register code present — check the enclosing symbols below"
+            objdump -d "$BIN" | awk '/^[0-9a-f]+ <.*>:/{sym=$0} /\s%ymm/{if (sym!=last) { print sym; last=sym } print; c++} c>=8{exit}'
+          else
+            echo "no ymm-register code found"
+          fi
 
       - name: Smoke test (run the binary)
         shell: bash
@@ -115,6 +146,8 @@ jobs:
           name: music-api-linux-x86_64-musl
           path: music-api/dist/*
           if-no-files-found: error
+          # `.env.example` is a dotfile; without this the loose copy is dropped.
+          include-hidden-files: true
 
   # Attaches everything to the release — tag builds only.
   release:
@@ -136,8 +169,10 @@ jobs:
           (cd dist && sha256sum ./* > SHA256SUMS && cat SHA256SUMS)
 
       - name: Attach to the release
+        # No checkout in this job, so `gh` needs the repo spelled out.
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
