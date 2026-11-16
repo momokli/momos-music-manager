@@ -9,5 +9,6 @@
 
 mod crypto;
 mod error;
+mod gateway;
 
 pub use error::Error;
