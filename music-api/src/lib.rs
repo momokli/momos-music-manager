@@ -9,6 +9,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod db;
+pub mod deezer_dl;
 pub mod deemix;
 pub mod deezer;
 pub mod logbuf;
