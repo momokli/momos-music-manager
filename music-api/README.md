@@ -409,6 +409,13 @@ See [`.env.example`](.env.example). Everything is env-driven; `MUSIC_API_TOKEN`
 and `DEEMIX_ARL` are the only required secrets. Response bodies from
 `loginArl` are never logged — deemix echoes the ARL back.
 
+Download backend: `DOWNLOAD_BACKEND` selects where Deezer audio comes from —
+`native` downloads via the vendored `deezer_dl` module, `sidecar` hands the
+track to the deemix instance behind `DEEMIX_URL`, and `auto` resolves per
+environment (native when `DEEMIX_ARL` is set, else sidecar). The **default is
+`sidecar`**, which keeps the pre-existing deemix pipeline; `native` is an
+explicit opt-in. Blank or unknown values fall back to `sidecar`.
+
 Queue tuning: `QUEUE_MAX_ATTEMPTS` (default `3`), `QUEUE_RETRY_BASE_SECS` (`60`)
 and `QUEUE_RETRY_MAX_SECS` (`1800`) shape the bounded retry backoff. The download
 lease reuses `DOWNLOAD_TIMEOUT_SECS` (refreshed as a heartbeat). `MAX_INFLIGHT`

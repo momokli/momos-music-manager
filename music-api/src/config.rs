@@ -6,12 +6,12 @@ use std::time::Duration;
 /// Where Deezer audio is acquired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DownloadBackend {
-    /// Download natively via the vendored `deezer_dl` module.
+    /// Download natively via the vendored `deezer_dl` module (explicit opt-in).
     Native,
-    /// Hand the track to the deemix sidecar (`DEEMIX_URL`).
-    Sidecar,
-    /// Pick per environment: native when an ARL is configured, else sidecar.
+    /// Hand the track to the deemix sidecar (`DEEMIX_URL`). This is the default.
     #[default]
+    Sidecar,
+    /// Explicit opt-in: native when an ARL is configured, else sidecar.
     Auto,
 }
 
@@ -52,7 +52,8 @@ pub struct Config {
     pub deemix_url: String,
     /// Deezer ARL used to authenticate with deemix.
     pub deemix_arl: String,
-    /// Where Deezer audio comes from: native, sidecar, or auto (default).
+    /// Where Deezer audio comes from: native, sidecar, or auto. Defaults to
+    /// `sidecar`.
     pub download_backend: DownloadBackend,
     /// Requested deemix bitrate (1 = 128, 3 = 320, 9 = FLAC).
     pub deemix_bitrate: u8,
@@ -207,19 +208,19 @@ fn analyzer_url_from_env() -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// Parse `DOWNLOAD_BACKEND`: blank/unknown → `Auto` (unknown warns once).
+/// Parse `DOWNLOAD_BACKEND`: blank/unknown → `Sidecar` (unknown warns once).
 fn parse_download_backend(raw: &str) -> DownloadBackend {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return DownloadBackend::Auto;
+        return DownloadBackend::Sidecar;
     }
     match DownloadBackend::parse(trimmed) {
         Some(b) => b,
         None => {
             tracing::warn!(
-                "unknown DOWNLOAD_BACKEND '{trimmed}' — defaulting to auto"
+                "unknown DOWNLOAD_BACKEND '{trimmed}' — defaulting to sidecar"
             );
-            DownloadBackend::Auto
+            DownloadBackend::Sidecar
         }
     }
 }
@@ -258,10 +259,10 @@ mod tests {
     }
 
     #[test]
-    fn download_backend_defaults_to_auto() {
-        assert_eq!(DownloadBackend::default(), DownloadBackend::Auto);
-        assert_eq!(parse_download_backend(""), DownloadBackend::Auto);
-        assert_eq!(parse_download_backend("nonsense"), DownloadBackend::Auto);
+    fn download_backend_defaults_to_sidecar() {
+        assert_eq!(DownloadBackend::default(), DownloadBackend::Sidecar);
+        assert_eq!(parse_download_backend(""), DownloadBackend::Sidecar);
+        assert_eq!(parse_download_backend("nonsense"), DownloadBackend::Sidecar);
         assert_eq!(parse_download_backend("native"), DownloadBackend::Native);
     }
 
