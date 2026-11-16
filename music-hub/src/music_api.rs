@@ -604,6 +604,14 @@ pub struct WorkerInfo {
     pub paused: bool,
     pub interval_secs: u64,
     pub max_attempts: i64,
+    /// Active download source: `native` or `sidecar` (#511).
+    pub backend: String,
+    /// Whether a deemix sidecar URL is configured.
+    pub sidecar_configured: bool,
+    /// Cached Deezer account tier offer (e.g. `HiFi`), when known.
+    pub arl_offer: Option<String>,
+    /// Whether the account tier can stream FLAC, when known.
+    pub arl_lossless: Option<bool>,
 }
 
 /// `GET /worker` — pause state, cadence and retry cap (defaults when unavailable).
@@ -624,12 +632,20 @@ pub async fn worker_info(cfg: &Config) -> WorkerInfo {
             paused: v["paused"].as_bool().unwrap_or(false),
             interval_secs: v["intervalSecs"].as_u64().unwrap_or(0),
             max_attempts: v["maxAttempts"].as_i64().unwrap_or(0),
+            backend: v["backend"].as_str().unwrap_or("unknown").to_string(),
+            sidecar_configured: v["sidecarConfigured"].as_bool().unwrap_or(false),
+            arl_offer: v["arlTier"]["offer"].as_str().map(|s| s.to_string()),
+            arl_lossless: v["arlTier"]["lossless"].as_bool(),
         },
         None => WorkerInfo {
             ok: false,
             paused: false,
             interval_secs: 0,
             max_attempts: 0,
+            backend: "unknown".to_string(),
+            sidecar_configured: false,
+            arl_offer: None,
+            arl_lossless: None,
         },
     }
 }

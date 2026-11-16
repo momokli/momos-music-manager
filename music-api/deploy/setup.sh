@@ -90,6 +90,8 @@ if [ ! -f "$ROOT/music-api.env" ]; then
 MUSIC_API_TOKEN=$TOKEN
 MUSIC_API_BIND=0.0.0.0:8710
 DEEMIX_URL=http://127.0.0.1:6599
+# Optional override; auto (default) resolves by DEEMIX_URL/DEEMIX_ARL presence.
+# DOWNLOAD_BACKEND=auto
 DEEMIX_ARL=$ARL
 DEEMIX_BITRATE=9
 DEEMIX_DOWNLOAD_DIR=$STORE/incoming

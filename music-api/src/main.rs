@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Notify;
-use tracing::info;
+use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 
 use music_api::{build_router, connect_db, db, worker, AppState, Config};
@@ -117,6 +117,15 @@ async fn main() -> anyhow::Result<()> {
     match state.config.analyzer_url.as_deref() {
         Some(url) => info!("BPM/key analysis enabled (analyzer {url})"),
         None => info!("BPM/key analysis disabled (ANALYZER_URL not set)"),
+    }
+    if state.config.sidecar_configured() {
+        info!(
+            backend = ?state.config.effective_backend(),
+            "deemix sidecar available ({})",
+            state.config.deemix_url
+        );
+    } else {
+        debug!("deemix sidecar disabled (DEEMIX_URL not set)");
     }
 
     axum::serve(listener, build_router(state))

@@ -14,17 +14,46 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio_util::io::ReaderStream;
 
+use crate::config::DownloadBackend;
 use crate::models::{CreateArtistOrderRequest, CreateOrderRequest, MetadataPushRequest};
 use crate::{db, work, worker, AppState};
 
-/// Public liveness probe (no auth).
-pub async fn health() -> impl IntoResponse {
+/// Public liveness probe (no auth). Also advertises the active download source
+/// (native vs. sidecar) and, without any network call, the cached ARL tier.
+/// The tier is deliberately limited to `offer`/`lossless`/`canStreamFlac` —
+/// never the `userId` (that stays on the protected `GET /account`).
+pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(json!({
         "status": "ok",
         "version": crate::VERSION,
         "gitSha": crate::GIT_SHA,
-        "describe": crate::GIT_DESCRIBE
+        "describe": crate::GIT_DESCRIBE,
+        "backend": backend_name(&state),
+        "sidecarConfigured": state.config.sidecar_configured(),
+        "arlTier": arl_tier_public(&state).await,
     }))
+}
+
+/// The concrete backend name as advertised over HTTP (never `auto`).
+fn backend_name(state: &AppState) -> &'static str {
+    match state.config.effective_backend() {
+        DownloadBackend::Sidecar => "sidecar",
+        _ => "native",
+    }
+}
+
+/// The cached ARL tier, shaped for public/ops consumption: `offer` +
+/// `lossless` + `canStreamFlac` only, or `null` while unknown. Reads the cached
+/// value (no network).
+async fn arl_tier_public(state: &AppState) -> serde_json::Value {
+    match state.arl_tier.read().await.clone() {
+        Some(t) => json!({
+            "offer": t.offer,
+            "lossless": t.lossless,
+            "canStreamFlac": t.can_stream_flac(),
+        }),
+        None => serde_json::Value::Null,
+    }
 }
 
 /// All protected routes. The auth layer is applied by the caller.
@@ -338,6 +367,9 @@ async fn worker_status(State(state): State<Arc<AppState>>) -> Response {
         "intervalSecs": state.config.worker_interval.as_secs(),
         "maxAttempts": state.config.queue_max_attempts,
         "maxInflight": state.config.max_inflight,
+        "backend": backend_name(&state),
+        "sidecarConfigured": state.config.sidecar_configured(),
+        "arlTier": arl_tier_public(&state).await,
     }))
     .into_response()
 }
@@ -425,8 +457,19 @@ async fn get_tracks(State(state): State<Arc<AppState>>, Query(q): Query<TracksQu
 }
 
 /// `GET /queue` — the live deemix queue plus per-state ISRC counts.
+///
+/// In native mode there is no deemix queue to poll: answer from the local DB
+/// only, so even a manual call never wakes the sidecar (#511).
 async fn get_queue(State(state): State<Arc<AppState>>) -> Response {
     let counts = db::queue_counts(&state.pool).await.unwrap_or_default();
+    if state.config.effective_backend() == DownloadBackend::Native {
+        return Json(json!({
+            "items": [],
+            "counts": counts,
+            "backend": "native",
+        }))
+        .into_response();
+    }
     match crate::deemix::queue(&state.http, &state.config.deemix_url).await {
         Ok(q) => {
             let items: Vec<serde_json::Value> = q

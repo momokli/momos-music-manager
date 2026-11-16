@@ -9,6 +9,15 @@
     Pausieren
 </button>
 {% endif %} {% if ok %}
+<span class="hub-badge">Quelle: {{ backend }}</span>
+{% if let Some(offer) = arl_offer %}
+<span class="hub-badge"
+    >ARL: {{ offer }}{% if let Some(l) = arl_lossless %}{% if l %} (lossless){%
+    endif %}{% endif %}</span
+>
+{% else %}
+<span class="hub-muted">ARL: –</span>
+{% endif %}
 <span class="hub-muted"
     >Intervall {{ interval_secs }}s · max. Versuche {{ max_attempts }}</span
 >

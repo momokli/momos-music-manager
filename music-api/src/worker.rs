@@ -743,6 +743,14 @@ pub async fn advance_downloads(state: &Arc<AppState>) -> Result<()> {
         return Ok(());
     }
 
+    // Native mode never repolls the sidecar (#511): native rows finalize on
+    // their own background task. The `is_native_uuid` filter above already drops
+    // them; this guard additionally avoids a `getQueue` call for mixed legacy
+    // rows when the backend is native.
+    if state.config.effective_backend() == crate::config::DownloadBackend::Native {
+        return Ok(());
+    }
+
     let queue = match deemix::queue(&state.http, &state.config.deemix_url).await {
         Ok(q) => q,
         Err(e) => {
@@ -1190,7 +1198,13 @@ async fn advance_crawl_leads(state: &Arc<AppState>) -> Result<()> {
 }
 
 /// Phase D: submit `open` artist orders to deemix and ingest finished ones.
-async fn advance_artist_orders(state: &Arc<AppState>) -> Result<()> {
+pub async fn advance_artist_orders(state: &Arc<AppState>) -> Result<()> {
+    // Artist orders are a deemix-sidecar concept. In native mode this phase is
+    // inert: no login, no submit, no `getQueue` poll (#511).
+    if state.config.effective_backend() == crate::config::DownloadBackend::Native {
+        return Ok(());
+    }
+
     // Submit open orders (bounded). Reuses the deemix login backoff.
     let open = db::open_artist_orders(&state.pool, ARTIST_ORDER_BATCH).await?;
     if !open.is_empty() {

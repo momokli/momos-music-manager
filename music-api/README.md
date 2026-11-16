@@ -432,15 +432,18 @@ and `DEEMIX_ARL` are the only required secrets. Response bodies from
 
 Download backend: `DOWNLOAD_BACKEND` selects where Deezer audio comes from —
 `native` downloads via the vendored `deezer_dl` module, `sidecar` hands the
-track to the deemix instance behind `DEEMIX_URL`, and `auto` resolves per
-environment (native when `DEEMIX_ARL` is set, else sidecar). The **default is
-`native`**: the API acquires Deezer audio itself, with no sidecar, no Node and no
-Docker. Blank or unknown values also fall back to `native`.
+track to the deemix instance behind `DEEMIX_URL`, and `auto` (the **default**)
+resolves per environment: native when `DEEMIX_ARL` is set, sidecar when only
+`DEEMIX_URL` is set, and native when `DEEMIX_URL` is empty. `DEEMIX_URL` has
+**no default** since 0.5.0 (#511) — an unset/blank value disables the sidecar
+entirely. An explicit `DOWNLOAD_BACKEND=sidecar` without `DEEMIX_URL` is a
+startup error (fail-fast, never a silent network call against an empty URL).
 
 > **Upgrade note (0.5.0).** Before 0.5.0 every download went through the deemix
-> sidecar. An existing installation therefore switches to the native path on
-> upgrade without any operator action. The sidecar stays available as an
-> explicit fallback: set `DOWNLOAD_BACKEND=sidecar` to keep the old pipeline.
+> sidecar and `DEEMIX_URL` defaulted to `http://127.0.0.1:6595`. An existing
+> installation therefore switches to the native path on upgrade without any
+> operator action. The sidecar stays available as an explicit fallback: set
+> `DOWNLOAD_BACKEND=sidecar` (and `DEEMIX_URL`) to keep the old pipeline.
 
 Queue tuning: `QUEUE_MAX_ATTEMPTS` (default `3`), `QUEUE_RETRY_BASE_SECS` (`60`)
 and `QUEUE_RETRY_MAX_SECS` (`1800`) shape the bounded retry backoff. The download

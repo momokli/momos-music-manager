@@ -33,6 +33,7 @@ async fn harness() -> Harness {
         download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
         deezer_base: None,
+        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await
 }
@@ -46,6 +47,7 @@ async fn harness_with(analyzer_url: Option<String>) -> Harness {
         download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
         deezer_base: None,
+        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await
 }
@@ -57,6 +59,8 @@ struct HarnessOpts {
     download_backend: music_api::config::DownloadBackend,
     native_fake: Option<Arc<music_api::worker::NativeFake>>,
     deezer_base: Option<String>,
+    /// `DEEMIX_URL`; empty disables the sidecar (#511).
+    deemix_url: String,
 }
 
 /// Full-control harness builder (ARL + gw-light base for tier tests).
@@ -67,7 +71,7 @@ async fn harness_opts(opts: HarnessOpts) -> Harness {
     let config = Config {
         token: TOKEN.to_string(),
         bind: "127.0.0.1:0".to_string(),
-        deemix_url: "http://127.0.0.1:1".to_string(),
+        deemix_url: opts.deemix_url,
         deemix_arl: opts.deemix_arl,
         download_backend: opts.download_backend,
         deemix_bitrate: 9,
@@ -3462,6 +3466,7 @@ async fn account_reports_hi_tier_from_gw_light() {
         download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
         deezer_base: None,
+        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await;
 
@@ -3537,6 +3542,7 @@ async fn account_reports_free_tier_without_flac() {
         download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
         deezer_base: None,
+        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await;
 
@@ -3565,6 +3571,7 @@ async fn account_returns_bad_gateway_when_gw_light_unreachable() {
         download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
         deezer_base: None,
+        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await;
 
@@ -3629,6 +3636,7 @@ async fn harness_native(
         download_backend: backend,
         native_fake: Some(Arc::new(fake)),
         deezer_base: Some(deezer_base),
+        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await
 }
@@ -3826,6 +3834,7 @@ async fn native_empty_arl_warns_once_and_never_attempts_login() {
         download_backend: music_api::config::DownloadBackend::Native,
         native_fake: None,
         deezer_base: None,
+        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await;
 
@@ -3869,6 +3878,7 @@ async fn native_login_failure_backs_off_and_discards_session() {
         download_backend: music_api::config::DownloadBackend::Native,
         native_fake: None,
         deezer_base: None,
+        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await;
 
@@ -4000,4 +4010,247 @@ async fn native_inflight_row_is_not_double_dispatched() {
         .filter(|l| l.msg.contains("native download started"))
         .count();
     assert_eq!(starts, 0, "no second native download may be started");
+}
+
+// ── #511: optional sidecar — no queue traffic in native mode, source in health ─
+
+/// A deemix stub that counts `getQueue` requests (loopback only, no real network).
+async fn deemix_queue_mock(
+    axum::extract::State(count): axum::extract::State<Arc<std::sync::atomic::AtomicUsize>>,
+) -> Json<serde_json::Value> {
+    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Json(serde_json::json!({ "queue": {} }))
+}
+
+/// Spawn the counting deemix stub; returns its base URL and the shared counter.
+async fn spawn_deemix_counter() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/api/getQueue", get(deemix_queue_mock))
+        .with_state(count.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), count)
+}
+
+fn native_deemix_url(deemix_url: String) -> HarnessOpts {
+    HarnessOpts {
+        analyzer_url: None,
+        deemix_arl: String::new(),
+        deezer_gw_base: "http://127.0.0.1:1".to_string(),
+        download_backend: music_api::config::DownloadBackend::Native,
+        native_fake: None,
+        deezer_base: None,
+        deemix_url,
+    }
+}
+
+/// Acceptance (c): a native tick with a native in-flight row *and* an open artist
+/// order must make zero `getQueue` calls.
+#[tokio::test]
+async fn native_tick_makes_no_sidecar_queue_calls() {
+    let (deemix, count) = spawn_deemix_counter().await;
+    let h = harness_opts(native_deemix_url(deemix)).await;
+
+    create_order(&h.app, &["AEA0D1846146"]).await;
+    db::mark_downloading(
+        &h.state.pool,
+        "AEA0D1846146",
+        "native:AEA0D1846146",
+        db::now() + 60,
+    )
+    .await
+    .unwrap();
+    db::create_artist_order(
+        &h.state.pool,
+        "ao-1",
+        "12345",
+        "https://www.deezer.com/artist/12345",
+        0,
+    )
+    .await
+    .unwrap();
+
+    music_api::worker::advance_downloads(&h.state).await.unwrap();
+    music_api::worker::advance_artist_orders(&h.state)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "native mode must not poll the sidecar queue"
+    );
+}
+
+/// Acceptance (c): even a manual `GET /queue` answers from the local DB only in
+/// native mode — no sidecar call.
+#[tokio::test]
+async fn native_queue_endpoint_does_not_call_the_sidecar() {
+    let (deemix, count) = spawn_deemix_counter().await;
+    let h = harness_opts(native_deemix_url(deemix)).await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+
+    let (status, body) = send(&h.app, authed("GET", "/queue").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["backend"], "native");
+    assert!(v["items"].as_array().unwrap().is_empty());
+    assert_eq!(v["counts"]["pending"], 1);
+    assert_eq!(
+        count.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "GET /queue must not poll the sidecar in native mode"
+    );
+}
+
+/// Acceptance (a), explicit: a native download completes with a *dead* sidecar
+/// URL (`127.0.0.1:1`) and an open artist order present. Neither the worker tick
+/// nor `GET /queue` may reach the sidecar (no failed `getQueue` in the run log).
+#[tokio::test]
+async fn native_download_works_with_dead_sidecar_url() {
+    let deezer = spawn_deezer_mock().await;
+    let fake = music_api::worker::NativeFake {
+        bytes: fixture_bytes("tiny.flac"),
+        extension: "flac".to_string(),
+        no_flac: false,
+    };
+    let h = harness_opts(HarnessOpts {
+        analyzer_url: None,
+        deemix_arl: String::new(),
+        deezer_gw_base: "http://127.0.0.1:1".to_string(),
+        download_backend: music_api::config::DownloadBackend::Native,
+        native_fake: Some(Arc::new(fake)),
+        deezer_base: Some(deezer),
+        // Docker/deemix stopped: nothing listens here.
+        deemix_url: "http://127.0.0.1:1".to_string(),
+    })
+    .await;
+
+    // An open artist order would trigger login/submit/getQueue if the native
+    // guard were missing — the dead URL would then produce a warning.
+    db::create_artist_order(
+        &h.state.pool,
+        "ao-dead",
+        "12345",
+        "https://www.deezer.com/artist/12345",
+        0,
+    )
+    .await
+    .unwrap();
+
+    create_order(&h.app, &["USRC17607839"]).await;
+    music_api::worker::resolve_pending(&h.state).await.unwrap();
+    wait_settled(&h.state, "USRC17607839").await;
+
+    let t = db::get_track(&h.state.pool, "USRC17607839")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.state, "ready", "track did not land ready: {t:?}");
+    assert_eq!(
+        t.deemix_uuid.as_deref(),
+        Some("native:USRC17607839"),
+        "native sentinel missing"
+    );
+
+    // Worker ticks must stay inert and `GET /queue` must answer locally.
+    music_api::worker::advance_downloads(&h.state).await.unwrap();
+    music_api::worker::advance_artist_orders(&h.state)
+        .await
+        .unwrap();
+    let (status, body) = send(&h.app, authed("GET", "/queue").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["backend"], "native");
+
+    let logs = h.state.logs.recent(100);
+    assert!(
+        logs.iter().all(|l| !l.msg.contains("getQueue failed")),
+        "native mode must not touch the dead sidecar: {:?}",
+        logs.iter().map(|l| &l.msg).collect::<Vec<_>>()
+    );
+}
+
+/// US3: the public `/health` advertises the source and — without a network call
+/// — the cached tier. A native, sidecar-less install reports `native`/`false`.
+#[tokio::test]
+async fn health_reports_native_backend_without_sidecar() {
+    let h = harness_opts(native_deemix_url(String::new())).await;
+    let (status, body) = send(
+        &h.app,
+        Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["status"], "ok");
+    assert_eq!(v["backend"], "native");
+    assert_eq!(v["sidecarConfigured"], false);
+    assert!(v["arlTier"].is_null(), "tier must be null while unknown");
+}
+
+/// US3: `/health` reports `sidecar` + the cached ARL tier, but never the
+/// `userId` (that stays on the protected `GET /account`).
+#[tokio::test]
+async fn health_reports_sidecar_and_cached_arl_tier() {
+    let h = harness_opts(HarnessOpts {
+        analyzer_url: None,
+        deemix_arl: "fake-arl".to_string(),
+        deezer_gw_base: "http://127.0.0.1:1".to_string(),
+        download_backend: music_api::config::DownloadBackend::Sidecar,
+        native_fake: None,
+        deezer_base: None,
+        deemix_url: "http://127.0.0.1:1".to_string(),
+    })
+    .await;
+    *h.state.arl_tier.write().await = Some(music_api::deezer::ArlTier {
+        offer: "HiFi".to_string(),
+        lossless: true,
+        high: true,
+        low: true,
+        user_id: Some(4242),
+    });
+
+    let (status, body) = send(
+        &h.app,
+        Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["backend"], "sidecar");
+    assert_eq!(v["sidecarConfigured"], true);
+    assert_eq!(v["arlTier"]["offer"], "HiFi");
+    assert_eq!(v["arlTier"]["lossless"], true);
+    assert_eq!(v["arlTier"]["canStreamFlac"], true);
+    assert!(
+        v["arlTier"]["userId"].is_null(),
+        "userId must never appear in the public health payload"
+    );
+}
+
+/// US3: `GET /worker` carries the same source/tier fields.
+#[tokio::test]
+async fn worker_reports_backend_and_sidecar_configured() {
+    let h = harness_opts(native_deemix_url(String::new())).await;
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/worker").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["backend"], "native");
+    assert_eq!(v["sidecarConfigured"], false);
+    assert!(v["arlTier"].is_null());
 }

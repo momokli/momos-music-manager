@@ -6,12 +6,13 @@ use std::time::Duration;
 /// Where Deezer audio is acquired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DownloadBackend {
-    /// Download natively via the vendored `deezer_dl` module. This is the default.
-    #[default]
+    /// Download natively via the vendored `deezer_dl` module.
     Native,
     /// Hand the track to the deemix sidecar (`DEEMIX_URL`) — explicit fallback.
     Sidecar,
-    /// Pick per environment: native when an ARL is configured, else sidecar.
+    /// Pick per environment (the default): native when an ARL is configured,
+    /// else the sidecar when `DEEMIX_URL` is set, else native.
+    #[default]
     Auto,
 }
 
@@ -26,17 +27,21 @@ impl DownloadBackend {
         }
     }
 
-    /// Resolve `Auto` to a concrete choice: native iff an ARL is configured.
-    /// (`DEEMIX_URL` has a default, so "sidecar configured" is not a signal.)
-    pub fn resolve(self, arl_configured: bool) -> Self {
+    /// Resolve `Auto` to a concrete choice:
+    ///
+    /// 1. no `DEEMIX_URL` ⇒ native (there is no reachable sidecar);
+    /// 2. `DEEMIX_URL` set but no ARL ⇒ sidecar (native cannot authenticate);
+    /// 3. both set ⇒ native (the sidecar stays available via an explicit
+    ///    `DOWNLOAD_BACKEND=sidecar`).
+    ///
+    /// A concrete choice is always authoritative.
+    pub fn resolve(self, arl_configured: bool, sidecar_configured: bool) -> Self {
         match self {
-            Self::Auto => {
-                if arl_configured {
-                    Self::Native
-                } else {
-                    Self::Sidecar
-                }
-            }
+            Self::Auto => match (sidecar_configured, arl_configured) {
+                (false, _) => Self::Native,
+                (true, false) => Self::Sidecar,
+                (true, true) => Self::Native,
+            },
             concrete => concrete,
         }
     }
@@ -129,11 +134,14 @@ impl Config {
                 .unwrap_or_else(|_| data_dir.join("ytdlp").display().to_string()),
         );
 
-        Ok(Self {
+        let config = Self {
             token,
             bind: std::env::var("MUSIC_API_BIND").unwrap_or_else(|_| "0.0.0.0:8710".to_string()),
+            // No default: an unset/blank `DEEMIX_URL` disables the sidecar, and
+            // `Auto` then runs purely native (#511).
             deemix_url: std::env::var("DEEMIX_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:6595".to_string())
+                .unwrap_or_default()
+                .trim()
                 .trim_end_matches('/')
                 .to_string(),
             deemix_arl: std::env::var("DEEMIX_ARL").unwrap_or_default(),
@@ -177,13 +185,31 @@ impl Config {
                 "ANALYSIS_PRECEDENCE",
                 &["traktor", "essentia", "reccobeats"],
             ),
-        })
+        };
+
+        // Fail fast: an explicit sidecar backend without a URL would otherwise
+        // issue network calls against an empty base (#511).
+        if config.download_backend == DownloadBackend::Sidecar && !config.sidecar_configured() {
+            anyhow::bail!(
+                "DOWNLOAD_BACKEND=sidecar requires DEEMIX_URL to be set (got an empty value)"
+            );
+        }
+
+        Ok(config)
     }
 
-    /// The concrete download backend: `auto` resolved against the ARL.
+    /// Whether a deemix sidecar URL is configured (non-blank `DEEMIX_URL`).
+    pub fn sidecar_configured(&self) -> bool {
+        !self.deemix_url.trim().is_empty()
+    }
+
+    /// The concrete download backend: `auto` resolved against the ARL presence
+    /// and the sidecar URL.
     pub fn effective_backend(&self) -> DownloadBackend {
-        self.download_backend
-            .resolve(!self.deemix_arl.trim().is_empty())
+        self.download_backend.resolve(
+            !self.deemix_arl.trim().is_empty(),
+            self.sidecar_configured(),
+        )
     }
 
     pub fn flac_dir(&self) -> PathBuf {
@@ -208,17 +234,17 @@ fn analyzer_url_from_env() -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// Parse `DOWNLOAD_BACKEND`: blank/unknown → `Native` (unknown warns once).
+/// Parse `DOWNLOAD_BACKEND`: blank/unknown → `Auto` (unknown warns once).
 fn parse_download_backend(raw: &str) -> DownloadBackend {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return DownloadBackend::Native;
+        return DownloadBackend::Auto;
     }
     match DownloadBackend::parse(trimmed) {
         Some(b) => b,
         None => {
-            tracing::warn!("unknown DOWNLOAD_BACKEND '{trimmed}' — defaulting to native");
-            DownloadBackend::Native
+            tracing::warn!("unknown DOWNLOAD_BACKEND '{trimmed}' — defaulting to auto");
+            DownloadBackend::Auto
         }
     }
 }
@@ -266,27 +292,42 @@ mod tests {
     }
 
     #[test]
-    fn download_backend_defaults_to_native() {
-        assert_eq!(DownloadBackend::default(), DownloadBackend::Native);
-        assert_eq!(parse_download_backend(""), DownloadBackend::Native);
-        assert_eq!(parse_download_backend("nonsense"), DownloadBackend::Native);
+    fn download_backend_defaults_to_auto() {
+        assert_eq!(DownloadBackend::default(), DownloadBackend::Auto);
+        assert_eq!(parse_download_backend(""), DownloadBackend::Auto);
+        assert_eq!(parse_download_backend("nonsense"), DownloadBackend::Auto);
         assert_eq!(parse_download_backend("sidecar"), DownloadBackend::Sidecar);
+        assert_eq!(parse_download_backend("native"), DownloadBackend::Native);
     }
 
     #[test]
-    fn auto_resolves_by_arl_presence() {
-        assert_eq!(DownloadBackend::Auto.resolve(true), DownloadBackend::Native);
+    fn auto_resolves_by_arl_and_sidecar_presence() {
+        // 1. no sidecar URL ⇒ always native, ARL or not.
         assert_eq!(
-            DownloadBackend::Auto.resolve(false),
-            DownloadBackend::Sidecar
-        );
-        // A concrete choice is never overridden by the ARL.
-        assert_eq!(
-            DownloadBackend::Sidecar.resolve(true),
-            DownloadBackend::Sidecar
+            DownloadBackend::Auto.resolve(false, false),
+            DownloadBackend::Native
         );
         assert_eq!(
-            DownloadBackend::Native.resolve(false),
+            DownloadBackend::Auto.resolve(true, false),
+            DownloadBackend::Native
+        );
+        // 2. sidecar URL but no ARL ⇒ sidecar (native cannot authenticate).
+        assert_eq!(
+            DownloadBackend::Auto.resolve(false, true),
+            DownloadBackend::Sidecar
+        );
+        // 3. both set ⇒ native (sidecar stays available via explicit override).
+        assert_eq!(
+            DownloadBackend::Auto.resolve(true, true),
+            DownloadBackend::Native
+        );
+        // A concrete choice is never overridden by the environment.
+        assert_eq!(
+            DownloadBackend::Sidecar.resolve(true, true),
+            DownloadBackend::Sidecar
+        );
+        assert_eq!(
+            DownloadBackend::Native.resolve(false, false),
             DownloadBackend::Native
         );
     }
