@@ -1,0 +1,146 @@
+name: music-api release
+
+# Publishes the music-api binary for the target host.
+#
+# * `push` on `api-v*` is the real trigger: build the static musl binary, then
+#   attach it (+ SHA256SUMS) to the release. The tag is the truth for releases —
+#   `build.rs` embeds `MUSIC_API_VERSION` from it (docs/stack-versioning.md).
+# * `pull_request` (path-filtered) proves the build *before* a tag exists; the
+#   release job is skipped there.
+# * `workflow_dispatch` allows a manual run from the default branch.
+#
+# Why musl: the host (music-catalog) has no Rust toolchain and no Docker, so the
+# deploy ships one static binary (`music-api/deploy/setup.sh`). The target
+# x86_64-unknown-linux-musl is the one we install; ffmpeg/ffprobe/flac stay
+# host-provided binaries, they are not linked into the crate.
+
+on:
+  push:
+    tags: ["api-v*"]
+  pull_request:
+    paths:
+      - "music-api/**"
+      - ".github/workflows/api-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: music-api linux-x86_64-musl
+    runs-on: ubuntu-latest
+    # Every `run` step is relative to the crate (like `ci-pr.yml`). `uses` steps
+    # are NOT affected, so the artefact path below is spelled from the repo root.
+    defaults:
+      run:
+        working-directory: music-api
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `git describe` needs the tags, otherwise build.rs falls back to the
+          # bare SHA (the traceability promise in docs/stack-versioning.md).
+          fetch-depth: 0
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: music-api -> target
+
+      # A tag must not publish code that does not even compile its tests.
+      - name: Compile the tests
+        run: cargo test --locked --target x86_64-unknown-linux-musl --no-run
+
+      # `MUSIC_API_VERSION` from the tag is what build.rs embeds.
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/api-v* ]]; then
+            VERSION="${GITHUB_REF_NAME#api-v}"
+          else
+            VERSION=""
+          fi
+          MUSIC_API_VERSION="$VERSION" cargo build --release --locked \
+            --target x86_64-unknown-linux-musl
+          BIN="target/x86_64-unknown-linux-musl/release/music-api"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+          ls -l "$BIN" | awk '{print "size:", $5, "bytes"}'
+
+      - name: Smoke test (run the binary)
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BIN" --version
+          # The version must carry the tag (or the dev fallback), never `unknown`.
+          if [[ "${GITHUB_REF}" == refs/tags/api-v* ]]; then
+            "$BIN" --version | grep -q "${GITHUB_REF_NAME#api-v}"
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/api-v* ]]; then
+            VER="${GITHUB_REF_NAME#api-v}"
+          else
+            VER="dev-$(git rev-parse --short=8 HEAD)"
+          fi
+          NAME="music-api-${VER}-x86_64-unknown-linux-musl"
+          mkdir -p dist
+          cp "$BIN" "dist/${NAME}"
+          # Deploy material travels with the binary: the deploy host has no repo.
+          cp deploy/setup.sh deploy/music-api.service deploy/Caddyfile.snippet \
+             .env.example "dist/"
+          (cd dist && tar czf "${NAME}.tar.gz" "${NAME}" setup.sh music-api.service \
+             Caddyfile.snippet .env.example)
+          ls -l dist/
+          echo "ARTIFACT=${NAME}.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: music-api-linux-x86_64-musl
+          path: music-api/dist/*
+          if-no-files-found: error
+
+  # Attaches everything to the release — tag builds only.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/api-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          ls -l dist
+          (cd dist && sha256sum ./* > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+            --title "$TAG" --notes "music-api $TAG (see music-api/CHANGELOG.md)"
+          gh release upload "$TAG" dist/* --clobber
