@@ -14,32 +14,21 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio_util::io::ReaderStream;
 
-use crate::config::DownloadBackend;
-use crate::models::{CreateArtistOrderRequest, CreateOrderRequest, MetadataPushRequest};
-use crate::{db, work, worker, AppState};
+use crate::models::{CreateOrderRequest, MetadataPushRequest};
+use crate::{db, work, AppState};
 
-/// Public liveness probe (no auth). Also advertises the active download source
-/// (native vs. sidecar) and, without any network call, the cached ARL tier.
-/// The tier is deliberately limited to `offer`/`lossless`/`canStreamFlac` —
-/// never the `userId` (that stays on the protected `GET /account`).
+/// Public liveness probe (no auth). Also advertises, without any network call,
+/// the cached ARL tier. The tier is deliberately limited to
+/// `offer`/`lossless`/`canStreamFlac` — never the `userId` (that stays on the
+/// protected `GET /account`).
 pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(json!({
         "status": "ok",
         "version": crate::VERSION,
         "gitSha": crate::GIT_SHA,
         "describe": crate::GIT_DESCRIBE,
-        "backend": backend_name(&state),
-        "sidecarConfigured": state.config.sidecar_configured(),
         "arlTier": arl_tier_public(&state).await,
     }))
-}
-
-/// The concrete backend name as advertised over HTTP (never `auto`).
-fn backend_name(state: &AppState) -> &'static str {
-    match state.config.effective_backend() {
-        DownloadBackend::Sidecar => "sidecar",
-        _ => "native",
-    }
 }
 
 /// The cached ARL tier, shaped for public/ops consumption: `offer` +
@@ -65,19 +54,13 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/orders/{id}/priority", post(set_priority))
         // Whole-playlist download: one request → one ZIP of the order (#358).
         .route("/orders/{id}/archive", get(get_order_archive))
-        // Artist orders: download a whole Deezer artist's discography.
-        .route(
-            "/artist-orders",
-            post(create_artist_order).get(list_artist_orders),
-        )
-        .route("/artist-orders/{id}", get(get_artist_order))
         .route("/isrc/{isrc}", get(get_isrc))
         .route("/isrc/{isrc}/objects", get(get_isrc_objects))
         .route("/isrc/{isrc}/retry", post(retry_isrc))
         .route("/isrc/{isrc}/{format}", get(get_file))
         // Bulk metadata/state for many ISRCs at once (hub enrichment).
         .route("/tracks", get(get_tracks))
-        // Live deemix queue + recent service events + worker control.
+        // Native-queue view + recent service events + worker control.
         .route("/queue", get(get_queue))
         .route("/logs", get(get_logs))
         // Deezer account tier behind the configured ARL (protected).
@@ -146,51 +129,6 @@ async fn create_order(
     Json(json!({ "orderId": order_id, "status": "open", "count": isrcs.len() })).into_response()
 }
 
-/// `POST /artist-orders` — order a whole Deezer artist's discography.
-async fn create_artist_order(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<CreateArtistOrderRequest>,
-) -> Response {
-    let Some(artist_url) = crate::deezer::normalize_artist_url(&req.artist) else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "artist must be a Deezer artist id or URL",
-        );
-    };
-
-    let order_id = uuid::Uuid::new_v4().to_string();
-    if let Err(e) = db::create_artist_order(
-        &state.pool,
-        &order_id,
-        req.artist.trim(),
-        &artist_url,
-        req.priority,
-    )
-    .await
-    {
-        tracing::error!("create_artist_order failed: {e:#}");
-        return error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to create artist order",
-        );
-    }
-
-    // Best-effort submit; the worker retries while the order stays `open`.
-    let deemix_ready = worker::ensure_deemix_login(&state).await;
-    let status = worker::submit_artist_order(&state, &order_id, &artist_url, deemix_ready).await;
-
-    state.notify.notify_one();
-    state.logs.push(
-        "info",
-        format!(
-            "artist order {order_id}: {artist_url} (prio {})",
-            req.priority
-        ),
-    );
-
-    Json(json!({ "orderId": order_id, "status": status, "artist": artist_url })).into_response()
-}
-
 /// `POST /work` — enqueue a work item (raise/re-arm on conflict). Generic so any
 /// producer (the hub, the spider) can seed any kind.
 async fn create_work(
@@ -201,6 +139,14 @@ async fn create_work(
     let reference = req.reference.trim();
     if kind.is_empty() || reference.is_empty() {
         return error(StatusCode::BAD_REQUEST, "kind and ref are required");
+    }
+    // `crawl:*` has no worker any more (native artist crawl is a separate step).
+    // Refusing it here beats silently stacking leads in a dead queue.
+    if kind.starts_with("crawl:") {
+        return error(
+            StatusCode::CONFLICT,
+            "no crawl worker configured; native artist crawl is a separate step",
+        );
     }
     if let Err(e) = work::enqueue(
         &state.pool,
@@ -231,7 +177,7 @@ async fn get_work(State(state): State<Arc<AppState>>, Query(q): Query<WorkQuery>
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateWorkRequest {
-    /// e.g. `download`, `analyze`, `crawl:deezer`.
+    /// e.g. `download`, `analyze`.
     kind: String,
     /// What the work acts on.
     #[serde(rename = "ref", alias = "refId")]
@@ -249,55 +195,6 @@ struct CreateWorkRequest {
 struct WorkQuery {
     kind: Option<String>,
     limit: Option<i64>,
-}
-
-/// `GET /artist-orders` — list artist orders, optionally filtered by status.
-async fn list_artist_orders(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<ListQuery>,
-) -> Response {
-    let limit = q.limit.unwrap_or(50).clamp(1, 500);
-    match db::list_artist_orders(&state.pool, q.status.as_deref(), limit).await {
-        Ok(orders) => Json(json!({ "orders": orders })).into_response(),
-        Err(e) => {
-            tracing::error!("list_artist_orders failed: {e:#}");
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to list artist orders",
-            )
-        }
-    }
-}
-
-/// `GET /artist-orders/{id}` — artist order status plus the ingested ISRCs.
-async fn get_artist_order(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let order = match db::get_artist_order(&state.pool, &id).await {
-        Ok(Some(o)) => o,
-        Ok(None) => return error(StatusCode::NOT_FOUND, "artist order not found"),
-        Err(e) => {
-            tracing::error!("get_artist_order failed: {e:#}");
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to read artist order",
-            );
-        }
-    };
-    let items = db::artist_order_items(&state.pool, &id)
-        .await
-        .unwrap_or_default();
-    Json(json!({
-        "orderId": order.id,
-        "artist": order.artist,
-        "artistUrl": order.artist_url,
-        "status": order.status,
-        "priority": order.priority,
-        "added": order.added,
-        "error": order.error,
-        "createdAt": order.created_at,
-        "updatedAt": order.updated_at,
-        "items": items,
-    }))
-    .into_response()
 }
 
 /// `POST /orders/{id}/cancel` — mark an order cancelled and drop its item links.
@@ -367,8 +264,6 @@ async fn worker_status(State(state): State<Arc<AppState>>) -> Response {
         "intervalSecs": state.config.worker_interval.as_secs(),
         "maxAttempts": state.config.queue_max_attempts,
         "maxInflight": state.config.max_inflight,
-        "backend": backend_name(&state),
-        "sidecarConfigured": state.config.sidecar_configured(),
         "arlTier": arl_tier_public(&state).await,
     }))
     .into_response()
@@ -456,39 +351,12 @@ async fn get_tracks(State(state): State<Arc<AppState>>, Query(q): Query<TracksQu
     Json(json!({ "tracks": out })).into_response()
 }
 
-/// `GET /queue` — the live deemix queue plus per-state ISRC counts.
-///
-/// In native mode there is no deemix queue to poll: answer from the local DB
-/// only, so even a manual call never wakes the sidecar (#511).
+/// `GET /queue` — a native queue view: per-state ISRC counts plus an empty
+/// `items` hull the hub can keep consuming. The `items` list no longer comes
+/// from an external queue.
 async fn get_queue(State(state): State<Arc<AppState>>) -> Response {
     let counts = db::queue_counts(&state.pool).await.unwrap_or_default();
-    if state.config.effective_backend() == DownloadBackend::Native {
-        return Json(json!({
-            "items": [],
-            "counts": counts,
-            "backend": "native",
-        }))
-        .into_response();
-    }
-    match crate::deemix::queue(&state.http, &state.config.deemix_url).await {
-        Ok(q) => {
-            let items: Vec<serde_json::Value> = q
-                .into_iter()
-                .map(|(id, it)| {
-                    json!({
-                        "id": id,
-                        "title": it.title,
-                        "status": it.status,
-                        "progress": it.progress,
-                    })
-                })
-                .collect();
-            Json(json!({ "items": items, "counts": counts })).into_response()
-        }
-        Err(e) => {
-            Json(json!({ "items": [], "counts": counts, "error": e.to_string() })).into_response()
-        }
-    }
+    Json(json!({ "items": [], "counts": counts })).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -501,9 +369,9 @@ struct LogsQuery {
 /// Protected route. Serves the cached tier when available, otherwise probes
 /// gw-light on demand (bounded timeout) and caches the result.
 async fn get_account(State(state): State<Arc<AppState>>) -> Response {
-    let arl = state.config.deemix_arl.trim();
+    let arl = state.config.deezer_arl.trim();
     if arl.is_empty() {
-        return error(StatusCode::CONFLICT, "DEEMIX_ARL not configured");
+        return error(StatusCode::CONFLICT, "DEEZER_ARL not configured");
     }
 
     if let Some(tier) = state.arl_tier.read().await.clone() {

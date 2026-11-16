@@ -40,7 +40,7 @@ pub async fn to_mp3(ffmpeg: &str, src: &Path, dst: &Path, kbps: u32) -> anyhow::
 /// Probe the audio bit rate (bits/s) of a file. `None` when the container does
 /// not report one — callers must decide on a fallback.
 ///
-/// deemix's bitrate fallback can land on any tier, so a delivered MP3 is only
+/// The tier fallback can land on any quality, so a delivered MP3 is only
 /// labelled by what it actually is, not by what was requested.
 pub async fn probe_bitrate(ffprobe: &str, src: &Path) -> Option<u64> {
     let output = tokio::process::Command::new(ffprobe)

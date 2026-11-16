@@ -1,6 +1,6 @@
 //! yt-dlp acquisition for non-Deezer sources (SoundCloud, YouTube).
 //!
-//! Deezer tracks go through deemix; sources that give us only an external id
+//! Deezer tracks are downloaded natively; sources that give us only an external id
 //! (a SoundCloud numeric track id or a YouTube video id) are downloaded here.
 //! yt-dlp resolves the SoundCloud numeric id via the
 //! `api.soundcloud.com/tracks/<id>` endpoint and the YouTube video id via the

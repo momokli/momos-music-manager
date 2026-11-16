@@ -28,12 +28,10 @@ struct Harness {
 async fn harness() -> Harness {
     harness_opts(HarnessOpts {
         analyzer_url: None,
-        deemix_arl: String::new(),
+        deezer_arl: String::new(),
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
-        download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
         deezer_base: None,
-        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await
 }
@@ -42,25 +40,20 @@ async fn harness() -> Harness {
 async fn harness_with(analyzer_url: Option<String>) -> Harness {
     harness_opts(HarnessOpts {
         analyzer_url,
-        deemix_arl: String::new(),
+        deezer_arl: String::new(),
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
-        download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
         deezer_base: None,
-        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await
 }
 
 struct HarnessOpts {
     analyzer_url: Option<String>,
-    deemix_arl: String,
+    deezer_arl: String,
     deezer_gw_base: String,
-    download_backend: music_api::config::DownloadBackend,
     native_fake: Option<Arc<music_api::worker::NativeFake>>,
     deezer_base: Option<String>,
-    /// `DEEMIX_URL`; empty disables the sidecar (#511).
-    deemix_url: String,
 }
 
 /// Full-control harness builder (ARL + gw-light base for tier tests).
@@ -71,11 +64,8 @@ async fn harness_opts(opts: HarnessOpts) -> Harness {
     let config = Config {
         token: TOKEN.to_string(),
         bind: "127.0.0.1:0".to_string(),
-        deemix_url: opts.deemix_url,
-        deemix_arl: opts.deemix_arl,
-        download_backend: opts.download_backend,
-        deemix_bitrate: 9,
-        deemix_download_dir: root.join("incoming"),
+        deezer_arl: opts.deezer_arl,
+        download_quality: music_api::deezer_dl::Quality::Flac,
         data_dir: root.clone(),
         store_root: root.join("objects"),
         store_max_upload_bytes: music_api::store::DEFAULT_MAX_UPLOAD_BYTES,
@@ -109,7 +99,6 @@ async fn harness_opts(opts: HarnessOpts) -> Harness {
         config.flac_dir(),
         config.mp3_320_dir(),
         config.mp3_128_dir(),
-        config.deemix_download_dir.clone(),
     ] {
         std::fs::create_dir_all(dir).unwrap();
     }
@@ -124,7 +113,6 @@ async fn harness_opts(opts: HarnessOpts) -> Harness {
         config,
         http: reqwest::Client::new(),
         notify: Arc::new(tokio::sync::Notify::new()),
-        deemix_login: Default::default(),
         native_session: Arc::new(tokio::sync::RwLock::new(None)),
         native_login: Default::default(),
         native_fake: opts.native_fake,
@@ -140,7 +128,6 @@ async fn harness_opts(opts: HarnessOpts) -> Harness {
         analysis_sem: Arc::new(tokio::sync::Semaphore::new(1)),
         analyzing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         analysis_backoff: Default::default(),
-        artist_ingesting: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         arl_tier: Arc::new(tokio::sync::RwLock::new(None)),
     });
 
@@ -1934,51 +1921,25 @@ async fn vault_backfill_is_idempotent_and_batched() {
     assert_eq!(v["resolved"]["source"], "traktor");
 }
 
-// ── Artist orders (whole-discography download + ingest) ──────────────────────
+// ── Artist orders removed (#518): the routes must be gone ────────────────────
 
 #[tokio::test]
-async fn artist_order_create_and_get() {
+async fn artist_order_routes_are_gone() {
     let h = harness().await;
-
-    // A bare Deezer artist id is canonicalised to its URL. No ARL is configured,
-    // so no deemix call is made and the order stays `open`.
-    let (status, body) = send(
+    // No crawl/artist-order worker exists any more — the endpoints are gone.
+    let (status, _) = send(
         &h.app,
         authed("POST", "/artist-orders")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(
-                serde_json::json!({ "artist": "12345", "priority": 7 }),
-            ))
+            .body(json_body(serde_json::json!({ "artist": "12345" })))
             .unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["status"], "open");
-    assert_eq!(v["artist"], "https://www.deezer.com/artist/12345");
-    let order_id = v["orderId"].as_str().unwrap().to_string();
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
-    let (status, body) = send(
-        &h.app,
-        authed("GET", &format!("/artist-orders/{order_id}"))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["orderId"], order_id);
-    assert_eq!(v["artist"], "12345");
-    assert_eq!(v["artistUrl"], "https://www.deezer.com/artist/12345");
-    assert_eq!(v["status"], "open");
-    assert_eq!(v["priority"], 7);
-    assert_eq!(v["added"], 0);
-    assert!(v["items"].as_array().unwrap().is_empty());
-
-    // Unknown id → 404.
     let (status, _) = send(
         &h.app,
-        authed("GET", "/artist-orders/nope")
+        authed("GET", "/artist-orders/whatever")
             .body(Body::empty())
             .unwrap(),
     )
@@ -1987,21 +1948,7 @@ async fn artist_order_create_and_get() {
 }
 
 #[tokio::test]
-async fn artist_order_rejects_a_bad_artist() {
-    let h = harness().await;
-    let (status, _) = send(
-        &h.app,
-        authed("POST", "/artist-orders")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(serde_json::json!({ "artist": "not an artist" })))
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn artist_ingest_parses_ffprobe_fixture_into_vault() {
+async fn ingest_file_tags_parses_ffprobe_fixture_into_vault() {
     let h = harness().await;
 
     // A realistic `ffprobe -show_format -show_streams -print_format json` body.
@@ -2031,7 +1978,7 @@ async fn artist_ingest_parses_ffprobe_fixture_into_vault() {
         tags.artist.as_deref(),
         tags.album.as_deref(),
         tags.duration_ms,
-        "deemix",
+        "deezer",
     )
     .await
     .unwrap()
@@ -2091,7 +2038,7 @@ async fn artist_ingest_parses_ffprobe_fixture_into_vault() {
         Some("Someone"),
         None,
         None,
-        "deemix",
+        "deezer",
     )
     .await
     .unwrap();
@@ -2114,7 +2061,7 @@ async fn work_enqueue_and_overview_round_trip() {
     let (status, body) = send(
         &h.app,
         post_work(serde_json::json!({
-            "kind": "crawl:deezer",
+            "kind": "analyze",
             "ref": "10725209",
             "priority": 7,
             "recordSource": "hub"
@@ -2123,13 +2070,13 @@ async fn work_enqueue_and_overview_round_trip() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["kind"], "crawl:deezer");
+    assert_eq!(v["kind"], "analyze");
     assert_eq!(v["ref"], "10725209");
     assert_eq!(v["priority"], 7);
 
     let (status, body) = send(
         &h.app,
-        authed("GET", "/work?kind=crawl:deezer")
+        authed("GET", "/work?kind=analyze")
             .body(Body::empty())
             .unwrap(),
     )
@@ -2139,7 +2086,7 @@ async fn work_enqueue_and_overview_round_trip() {
     assert_eq!(v["items"].as_array().unwrap().len(), 1);
     assert_eq!(v["items"][0]["state"], "queued");
     assert_eq!(v["items"][0]["recordSource"], "hub");
-    assert_eq!(v["counts"][0]["kind"], "crawl:deezer");
+    assert_eq!(v["counts"][0]["kind"], "analyze");
     assert_eq!(v["counts"][0]["state"], "queued");
     assert_eq!(v["counts"][0]["count"], 1);
 }
@@ -3461,12 +3408,10 @@ async fn account_reports_hi_tier_from_gw_light() {
     let gw = spawn_gw_light().await;
     let h = harness_opts(HarnessOpts {
         analyzer_url: None,
-        deemix_arl: "fake-arl".to_string(),
+        deezer_arl: "fake-arl".to_string(),
         deezer_gw_base: gw,
-        download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
         deezer_base: None,
-        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await;
 
@@ -3496,7 +3441,7 @@ async fn account_reports_hi_tier_from_gw_light() {
 
 #[tokio::test]
 async fn account_without_arl_is_conflict() {
-    let h = harness().await; // deemix_arl empty
+    let h = harness().await; // deezer_arl empty
     let (status, body) = send(
         &h.app,
         authed("GET", "/account").body(Body::empty()).unwrap(),
@@ -3504,7 +3449,7 @@ async fn account_without_arl_is_conflict() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["error"], "DEEMIX_ARL not configured");
+    assert_eq!(v["error"], "DEEZER_ARL not configured");
 }
 
 /// Mock gw-light answering with a Deezer Free (no lossless) payload.
@@ -3537,12 +3482,10 @@ async fn account_reports_free_tier_without_flac() {
     let gw = spawn_gw_light_free().await;
     let h = harness_opts(HarnessOpts {
         analyzer_url: None,
-        deemix_arl: "fake-arl".to_string(),
+        deezer_arl: "fake-arl".to_string(),
         deezer_gw_base: gw,
-        download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
         deezer_base: None,
-        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await;
 
@@ -3566,12 +3509,10 @@ async fn account_returns_bad_gateway_when_gw_light_unreachable() {
     // Dead port: the on-demand gw-light probe fails → 502.
     let h = harness_opts(HarnessOpts {
         analyzer_url: None,
-        deemix_arl: "fake-arl".to_string(),
+        deezer_arl: "fake-arl".to_string(),
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
-        download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
         deezer_base: None,
-        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await;
 
@@ -3626,17 +3567,14 @@ fn fixture_bytes(name: &str) -> Vec<u8> {
 async fn harness_native(
     deezer_base: String,
     fake: music_api::worker::NativeFake,
-    backend: music_api::config::DownloadBackend,
     arl: &str,
 ) -> Harness {
     harness_opts(HarnessOpts {
         analyzer_url: None,
-        deemix_arl: arl.to_string(),
+        deezer_arl: arl.to_string(),
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
-        download_backend: backend,
         native_fake: Some(Arc::new(fake)),
         deezer_base: Some(deezer_base),
-        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await
 }
@@ -3672,13 +3610,7 @@ async fn native_download_lands_ready_with_isrc_and_serves_file() {
         extension: "flac".to_string(),
         no_flac: false,
     };
-    let h = harness_native(
-        deezer,
-        fake,
-        music_api::config::DownloadBackend::Native,
-        "",
-    )
-    .await;
+    let h = harness_native(deezer, fake, "").await;
 
     create_order(&h.app, &["USRC17607839"]).await;
     music_api::worker::resolve_pending(&h.state).await.unwrap();
@@ -3691,7 +3623,7 @@ async fn native_download_lands_ready_with_isrc_and_serves_file() {
     assert_eq!(t.state, "ready", "track did not land ready: {t:?}");
     assert_eq!(t.source_format.as_deref(), Some("flac"));
     assert_eq!(
-        t.deemix_uuid.as_deref(),
+        t.download_ref.as_deref(),
         Some("native:USRC17607839"),
         "native sentinel missing"
     );
@@ -3719,7 +3651,8 @@ async fn native_download_lands_ready_with_isrc_and_serves_file() {
         logs.iter().map(|l| &l.msg).collect::<Vec<_>>()
     );
     assert!(
-        logs.iter().all(|l| !l.msg.contains("DEEMIX_ARL=")),
+        logs.iter()
+            .all(|l| !l.msg.contains("DEEZER_ARL=") && !l.msg.contains("DEEMIX_ARL=")),
         "log leaked the ARL"
     );
 }
@@ -3733,13 +3666,7 @@ async fn native_download_no_lossless_tier_falls_back_to_320() {
         extension: "mp3".to_string(),
         no_flac: true,
     };
-    let h = harness_native(
-        deezer,
-        fake,
-        music_api::config::DownloadBackend::Native,
-        "",
-    )
-    .await;
+    let h = harness_native(deezer, fake, "").await;
 
     create_order(&h.app, &["USRC17607839"]).await;
     music_api::worker::resolve_pending(&h.state).await.unwrap();
@@ -3763,64 +3690,6 @@ async fn native_download_no_lossless_tier_falls_back_to_320() {
     );
 }
 
-#[tokio::test]
-async fn advance_downloads_ignores_native_rows() {
-    let h = harness().await; // sidecar default
-    create_order(&h.app, &["AEA0D1846146"]).await;
-    db::mark_downloading(
-        &h.state.pool,
-        "AEA0D1846146",
-        "native:AEA0D1846146",
-        db::now() + 60,
-    )
-    .await
-    .unwrap();
-
-    // With only a native row in flight, no deemix queue is polled and the row is
-    // left untouched (its own background task owns it).
-    music_api::worker::advance_downloads(&h.state).await.unwrap();
-    let t = db::get_track(&h.state.pool, "AEA0D1846146")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(t.state, "downloading");
-    assert_eq!(t.deemix_uuid.as_deref(), Some("native:AEA0D1846146"));
-}
-
-#[tokio::test]
-async fn sidecar_backend_does_not_take_the_native_path() {
-    let deezer = spawn_deezer_mock().await;
-    let fake = music_api::worker::NativeFake {
-        bytes: fixture_bytes("tiny.flac"),
-        extension: "flac".to_string(),
-        no_flac: false,
-    };
-    // `auto` with no ARL resolves to sidecar: the native fake must be ignored.
-    let h = harness_native(
-        deezer,
-        fake,
-        music_api::config::DownloadBackend::Auto,
-        "",
-    )
-    .await;
-
-    create_order(&h.app, &["USRC17607839"]).await;
-    music_api::worker::resolve_pending(&h.state).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(80)).await;
-
-    let t = db::get_track(&h.state.pool, "USRC17607839")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_ne!(t.state, "ready", "native path ran under the sidecar backend");
-    assert!(
-        !t.deemix_uuid
-            .as_deref()
-            .is_some_and(|u| u.starts_with("native:")),
-        "native sentinel written under the sidecar backend"
-    );
-}
-
 /// A native backend with an empty `DEEMIX_ARL` must warn once, attempt no login
 /// (no network) and leave the session unset. The injected login closure records
 /// any invocation, so "no attempt" is asserted directly.
@@ -3829,12 +3698,10 @@ async fn native_empty_arl_warns_once_and_never_attempts_login() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let h = harness_opts(HarnessOpts {
         analyzer_url: None,
-        deemix_arl: String::new(), // no ARL configured
+        deezer_arl: String::new(), // no ARL configured
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
-        download_backend: music_api::config::DownloadBackend::Native,
         native_fake: None,
         deezer_base: None,
-        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await;
 
@@ -3873,12 +3740,10 @@ async fn native_login_failure_backs_off_and_discards_session() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let h = harness_opts(HarnessOpts {
         analyzer_url: None,
-        deemix_arl: "invalid-arl-zzz".to_string(),
+        deezer_arl: "invalid-arl-zzz".to_string(),
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
-        download_backend: music_api::config::DownloadBackend::Native,
         native_fake: None,
         deezer_base: None,
-        deemix_url: "http://127.0.0.1:1".to_string(),
     })
     .await;
 
@@ -3958,13 +3823,7 @@ async fn native_inflight_row_is_not_double_dispatched() {
         extension: "flac".to_string(),
         no_flac: false,
     };
-    let h = harness_native(
-        deezer,
-        fake,
-        music_api::config::DownloadBackend::Native,
-        "",
-    )
-    .await;
+    let h = harness_native(deezer, fake, "").await;
     let isrc = "USRC17607839";
     create_order(&h.app, &[isrc]).await;
 
@@ -4000,7 +3859,7 @@ async fn native_inflight_row_is_not_double_dispatched() {
         "native in-flight row must not be settled or restarted"
     );
     let expected_uuid = format!("native:{isrc}");
-    assert_eq!(t.deemix_uuid.as_deref(), Some(expected_uuid.as_str()));
+    assert_eq!(t.download_ref.as_deref(), Some(expected_uuid.as_str()));
     assert_eq!(db::count_downloading(&h.state.pool).await.unwrap(), 1);
     let starts = h
         .state
@@ -4011,205 +3870,32 @@ async fn native_inflight_row_is_not_double_dispatched() {
         .count();
     assert_eq!(starts, 0, "no second native download may be started");
 }
+// ── #518: native-only HTTP contract — no backend/sidecar fields ──────────────
 
-// ── #511: optional sidecar — no queue traffic in native mode, source in health ─
-
-/// A deemix stub that counts `getQueue` requests (loopback only, no real network).
-async fn deemix_queue_mock(
-    axum::extract::State(count): axum::extract::State<Arc<std::sync::atomic::AtomicUsize>>,
-) -> Json<serde_json::Value> {
-    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    Json(serde_json::json!({ "queue": {} }))
-}
-
-/// Spawn the counting deemix stub; returns its base URL and the shared counter.
-async fn spawn_deemix_counter() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
-    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let app = Router::new()
-        .route("/api/getQueue", get(deemix_queue_mock))
-        .with_state(count.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    (format!("http://{addr}"), count)
-}
-
-fn native_deemix_url(deemix_url: String) -> HarnessOpts {
-    HarnessOpts {
-        analyzer_url: None,
-        deemix_arl: String::new(),
-        deezer_gw_base: "http://127.0.0.1:1".to_string(),
-        download_backend: music_api::config::DownloadBackend::Native,
-        native_fake: None,
-        deezer_base: None,
-        deemix_url,
-    }
-}
-
-/// Acceptance (c): a native tick with a native in-flight row *and* an open artist
-/// order must make zero `getQueue` calls.
 #[tokio::test]
-async fn native_tick_makes_no_sidecar_queue_calls() {
-    let (deemix, count) = spawn_deemix_counter().await;
-    let h = harness_opts(native_deemix_url(deemix)).await;
-
-    create_order(&h.app, &["AEA0D1846146"]).await;
-    db::mark_downloading(
-        &h.state.pool,
-        "AEA0D1846146",
-        "native:AEA0D1846146",
-        db::now() + 60,
-    )
-    .await
-    .unwrap();
-    db::create_artist_order(
-        &h.state.pool,
-        "ao-1",
-        "12345",
-        "https://www.deezer.com/artist/12345",
-        0,
-    )
-    .await
-    .unwrap();
-
-    music_api::worker::advance_downloads(&h.state).await.unwrap();
-    music_api::worker::advance_artist_orders(&h.state)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        count.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "native mode must not poll the sidecar queue"
-    );
-}
-
-/// Acceptance (c): even a manual `GET /queue` answers from the local DB only in
-/// native mode — no sidecar call.
-#[tokio::test]
-async fn native_queue_endpoint_does_not_call_the_sidecar() {
-    let (deemix, count) = spawn_deemix_counter().await;
-    let h = harness_opts(native_deemix_url(deemix)).await;
-    create_order(&h.app, &["AEA0D1846146"]).await;
-
-    let (status, body) = send(&h.app, authed("GET", "/queue").body(Body::empty()).unwrap()).await;
-    assert_eq!(status, StatusCode::OK);
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["backend"], "native");
-    assert!(v["items"].as_array().unwrap().is_empty());
-    assert_eq!(v["counts"]["pending"], 1);
-    assert_eq!(
-        count.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "GET /queue must not poll the sidecar in native mode"
-    );
-}
-
-/// Acceptance (a), explicit: a native download completes with a *dead* sidecar
-/// URL (`127.0.0.1:1`) and an open artist order present. Neither the worker tick
-/// nor `GET /queue` may reach the sidecar (no failed `getQueue` in the run log).
-#[tokio::test]
-async fn native_download_works_with_dead_sidecar_url() {
-    let deezer = spawn_deezer_mock().await;
-    let fake = music_api::worker::NativeFake {
-        bytes: fixture_bytes("tiny.flac"),
-        extension: "flac".to_string(),
-        no_flac: false,
-    };
-    let h = harness_opts(HarnessOpts {
-        analyzer_url: None,
-        deemix_arl: String::new(),
-        deezer_gw_base: "http://127.0.0.1:1".to_string(),
-        download_backend: music_api::config::DownloadBackend::Native,
-        native_fake: Some(Arc::new(fake)),
-        deezer_base: Some(deezer),
-        // Docker/deemix stopped: nothing listens here.
-        deemix_url: "http://127.0.0.1:1".to_string(),
-    })
-    .await;
-
-    // An open artist order would trigger login/submit/getQueue if the native
-    // guard were missing — the dead URL would then produce a warning.
-    db::create_artist_order(
-        &h.state.pool,
-        "ao-dead",
-        "12345",
-        "https://www.deezer.com/artist/12345",
-        0,
-    )
-    .await
-    .unwrap();
-
-    create_order(&h.app, &["USRC17607839"]).await;
-    music_api::worker::resolve_pending(&h.state).await.unwrap();
-    wait_settled(&h.state, "USRC17607839").await;
-
-    let t = db::get_track(&h.state.pool, "USRC17607839")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(t.state, "ready", "track did not land ready: {t:?}");
-    assert_eq!(
-        t.deemix_uuid.as_deref(),
-        Some("native:USRC17607839"),
-        "native sentinel missing"
-    );
-
-    // Worker ticks must stay inert and `GET /queue` must answer locally.
-    music_api::worker::advance_downloads(&h.state).await.unwrap();
-    music_api::worker::advance_artist_orders(&h.state)
-        .await
-        .unwrap();
-    let (status, body) = send(&h.app, authed("GET", "/queue").body(Body::empty()).unwrap()).await;
-    assert_eq!(status, StatusCode::OK);
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["backend"], "native");
-
-    let logs = h.state.logs.recent(100);
-    assert!(
-        logs.iter().all(|l| !l.msg.contains("getQueue failed")),
-        "native mode must not touch the dead sidecar: {:?}",
-        logs.iter().map(|l| &l.msg).collect::<Vec<_>>()
-    );
-}
-
-/// US3: the public `/health` advertises the source and — without a network call
-/// — the cached tier. A native, sidecar-less install reports `native`/`false`.
-#[tokio::test]
-async fn health_reports_native_backend_without_sidecar() {
-    let h = harness_opts(native_deemix_url(String::new())).await;
+async fn health_has_no_backend_fields() {
+    let h = harness().await;
     let (status, body) = send(
         &h.app,
-        Request::builder()
-            .uri("/health")
-            .body(Body::empty())
-            .unwrap(),
+        Request::builder().uri("/health").body(Body::empty()).unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["status"], "ok");
-    assert_eq!(v["backend"], "native");
-    assert_eq!(v["sidecarConfigured"], false);
+    assert!(v.get("backend").is_none(), "backend must be gone: {v}");
+    assert!(
+        v.get("sidecarConfigured").is_none(),
+        "sidecarConfigured must be gone: {v}"
+    );
     assert!(v["arlTier"].is_null(), "tier must be null while unknown");
 }
 
-/// US3: `/health` reports `sidecar` + the cached ARL tier, but never the
-/// `userId` (that stays on the protected `GET /account`).
+/// The cached ARL tier is public (`offer`/`lossless`/`canStreamFlac`) but never
+/// the `userId` (that stays on the protected `GET /account`).
 #[tokio::test]
-async fn health_reports_sidecar_and_cached_arl_tier() {
-    let h = harness_opts(HarnessOpts {
-        analyzer_url: None,
-        deemix_arl: "fake-arl".to_string(),
-        deezer_gw_base: "http://127.0.0.1:1".to_string(),
-        download_backend: music_api::config::DownloadBackend::Sidecar,
-        native_fake: None,
-        deezer_base: None,
-        deemix_url: "http://127.0.0.1:1".to_string(),
-    })
-    .await;
+async fn health_reports_cached_arl_tier_without_user_id() {
+    let h = harness().await;
     *h.state.arl_tier.write().await = Some(music_api::deezer::ArlTier {
         offer: "HiFi".to_string(),
         lossless: true,
@@ -4220,16 +3906,11 @@ async fn health_reports_sidecar_and_cached_arl_tier() {
 
     let (status, body) = send(
         &h.app,
-        Request::builder()
-            .uri("/health")
-            .body(Body::empty())
-            .unwrap(),
+        Request::builder().uri("/health").body(Body::empty()).unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["backend"], "sidecar");
-    assert_eq!(v["sidecarConfigured"], true);
     assert_eq!(v["arlTier"]["offer"], "HiFi");
     assert_eq!(v["arlTier"]["lossless"], true);
     assert_eq!(v["arlTier"]["canStreamFlac"], true);
@@ -4239,18 +3920,128 @@ async fn health_reports_sidecar_and_cached_arl_tier() {
     );
 }
 
-/// US3: `GET /worker` carries the same source/tier fields.
 #[tokio::test]
-async fn worker_reports_backend_and_sidecar_configured() {
-    let h = harness_opts(native_deemix_url(String::new())).await;
-    let (status, body) = send(
-        &h.app,
-        authed("GET", "/worker").body(Body::empty()).unwrap(),
-    )
-    .await;
+async fn worker_has_no_backend_fields() {
+    let h = harness().await;
+    let (status, body) = send(&h.app, authed("GET", "/worker").body(Body::empty()).unwrap()).await;
     assert_eq!(status, StatusCode::OK);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["backend"], "native");
-    assert_eq!(v["sidecarConfigured"], false);
+    assert!(v.get("backend").is_none(), "backend must be gone: {v}");
+    assert!(
+        v.get("sidecarConfigured").is_none(),
+        "sidecarConfigured must be gone: {v}"
+    );
     assert!(v["arlTier"].is_null());
+}
+
+#[tokio::test]
+async fn queue_has_no_backend_fields() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+    let (status, body) = send(&h.app, authed("GET", "/queue").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(v.get("backend").is_none(), "backend must be gone: {v}");
+    assert!(v["items"].as_array().unwrap().is_empty());
+    assert_eq!(v["counts"]["pending"], 1);
+}
+
+/// A native tick must be self-contained: an in-flight native row is left to its
+/// own background task and no external queue is consulted (there is none).
+#[tokio::test]
+async fn native_tick_is_self_contained() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+    db::mark_downloading(
+        &h.state.pool,
+        "AEA0D1846146",
+        "native:AEA0D1846146",
+        db::now() + 60,
+    )
+    .await
+    .unwrap();
+
+    music_api::worker::resolve_pending(&h.state).await.unwrap();
+
+    let t = db::get_track(&h.state.pool, "AEA0D1846146")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.state, "downloading");
+    assert_eq!(t.download_ref.as_deref(), Some("native:AEA0D1846146"));
+}
+
+/// `POST /work {"kind":"crawl:deezer"}` → 409: there is no crawl worker any more.
+#[tokio::test]
+async fn crawl_work_kind_is_rejected() {
+    let h = harness().await;
+    let (status, body) = send(
+        &h.app,
+        post_work(serde_json::json!({"kind": "crawl:deezer", "ref": "10725209"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        v["error"].as_str().unwrap().contains("crawl"),
+        "error was {:?}",
+        v["error"]
+    );
+    // Nothing was enqueued.
+    let counts = music_api::work::counts(&h.state.pool).await.unwrap();
+    assert!(
+        counts.iter().all(|c| c.kind != "crawl:deezer"),
+        "crawl work must not be enqueued"
+    );
+}
+
+/// The `tracks.deemix_uuid` → `download_ref` migration is idempotent and
+/// preserves existing values; no `DROP TABLE` involved.
+#[tokio::test]
+async fn migration_renames_deemix_uuid_to_download_ref() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("legacy.db");
+    let opts = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true);
+    let pool = sqlx::SqlitePool::connect_with(opts).await.unwrap();
+
+    // Legacy schema: the identifier column still carries the old name.
+    sqlx::query(
+        "CREATE TABLE tracks (
+            isrc TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            deemix_uuid TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tracks (isrc, state, deemix_uuid, created_at, updated_at)
+         VALUES ('ABC', 'ready', 'native:ABC', 1, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Two runs: the second is a no-op (idempotent).
+    music_api::db::init(&pool).await.unwrap();
+    music_api::db::init(&pool).await.unwrap();
+
+    let old_cols: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name = 'deemix_uuid'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(old_cols, 0, "the old column must be gone");
+
+    let val: Option<String> = sqlx::query_scalar("SELECT download_ref FROM tracks WHERE isrc = 'ABC'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(val.as_deref(), Some("native:ABC"), "values must be preserved");
 }

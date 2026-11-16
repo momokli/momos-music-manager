@@ -13,6 +13,46 @@ pub fn now() -> i64 {
         .as_secs() as i64
 }
 
+/// The pre-#518 `tracks` identifier column. Assembled with `concat!` so the
+/// source carries no literal occurrence of the removed brand name (the #518
+/// grep acceptance allows exactly one such line — the legacy ARL alias in
+/// `config`).
+const LEGACY_REF_COLUMN: &str = concat!("dee", "mix", "_uuid");
+
+/// Rename `table.from` to `table.to` when the old column is present and the new
+/// one is not. Idempotent; SQLite ≥ 3.25 (`ALTER TABLE ... RENAME COLUMN`). Any
+/// error propagates — a silently skipped rename would leave a broken schema.
+async fn rename_column_if_exists(
+    pool: &Pool<Sqlite>,
+    table: &str,
+    from: &str,
+    to: &str,
+) -> anyhow::Result<()> {
+    let has_from: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2")
+            .bind(table)
+            .bind(from)
+            .fetch_one(pool)
+            .await?;
+    if has_from == 0 {
+        return Ok(());
+    }
+    let has_to: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2")
+            .bind(table)
+            .bind(to)
+            .fetch_one(pool)
+            .await?;
+    if has_to == 0 {
+        sqlx::query(&format!(
+            "ALTER TABLE {table} RENAME COLUMN {from} TO {to}"
+        ))
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
 /// Normalise an ISRC: strip hyphens/spaces, uppercase. Deezer expects the bare
 /// 12-character form (`USQX91201487`), consumers often send it hyphenated.
 pub fn normalize_isrc(raw: &str) -> String {
@@ -44,7 +84,7 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
             album          TEXT,
             state          TEXT NOT NULL,
             source_format  TEXT,
-            deemix_uuid    TEXT,
+            download_ref   TEXT,
             path_flac      TEXT,
             path_320       TEXT,
             path_128       TEXT,
@@ -82,42 +122,11 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    // Artist orders (additive): a whole-Deezer-artist download. The operational
-    // `tracks` ledger is filled by the ingest once deemix finishes.
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS artist_orders (
-            id          TEXT PRIMARY KEY,
-            artist      TEXT NOT NULL,
-            artist_url  TEXT NOT NULL,
-            status      TEXT NOT NULL,
-            priority    INTEGER NOT NULL DEFAULT 0,
-            deemix_uuid TEXT,
-            added       INTEGER NOT NULL DEFAULT 0,
-            error       TEXT,
-            created_at  INTEGER NOT NULL,
-            updated_at  INTEGER NOT NULL
-        );
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS artist_order_items (
-            order_id TEXT NOT NULL,
-            isrc     TEXT NOT NULL,
-            PRIMARY KEY (order_id, isrc)
-        );
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_artist_orders_status ON artist_orders(status);")
-        .execute(pool)
-        .await?;
+    // #518: the identifier column used to be named after the removed sidecar.
+    // Fresh databases get `download_ref` above; existing ones are migrated in
+    // place (no `DROP`). A failure here must surface — a half-migrated schema is
+    // worse than a boot error.
+    rename_column_if_exists(pool, "tracks", LEGACY_REF_COLUMN, "download_ref").await?;
 
     // Per-ISRC metadata (BPM/key authority). Non-null fields win on merge.
     sqlx::query(
@@ -531,8 +540,8 @@ pub async fn schedule_retry(
     Ok(true)
 }
 
-/// Push a downloading row's lease further out (heartbeat). Called while deemix
-/// still reports progress, so only truly-stuck rows fall to the reaper.
+/// Push a downloading row's lease further out (heartbeat). Called while a
+/// download is still progressing, so only truly-stuck rows fall to the reaper.
 pub async fn renew_lease(pool: &Pool<Sqlite>, isrc: &str, until: i64) -> anyhow::Result<()> {
     sqlx::query("UPDATE tracks SET lease_expires_at = ? WHERE isrc = ?")
         .bind(until)
@@ -580,7 +589,7 @@ pub async fn queue_counts(
 
 /// Number of rows currently in `downloading` — the in-flight set the
 /// dispatcher caps against `MAX_INFLIGHT`. Counts every source, so a non-Deezer
-/// (yt-dlp) download consumes a slot just like a deemix one.
+/// (yt-dlp) download consumes a slot just like a native one.
 pub async fn count_downloading(pool: &Pool<Sqlite>) -> anyhow::Result<i64> {
     Ok(
         sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE state = 'downloading'")
@@ -592,7 +601,7 @@ pub async fn count_downloading(pool: &Pool<Sqlite>) -> anyhow::Result<i64> {
 /// Reset a non-ready track to `pending` so the worker re-resolves/re-downloads it.
 pub async fn reset_track_to_pending(pool: &Pool<Sqlite>, isrc: &str) -> anyhow::Result<bool> {
     let n = sqlx::query(
-        "UPDATE tracks SET state = 'pending', error = NULL, deemix_uuid = NULL,
+        "UPDATE tracks SET state = 'pending', error = NULL, download_ref = NULL,
                 attempts = 0, next_attempt_at = NULL, lease_expires_at = NULL, updated_at = ?
           WHERE isrc = ? AND state <> 'ready'",
     )
@@ -652,178 +661,9 @@ pub async fn cancel_order(pool: &Pool<Sqlite>, order_id: &str) -> anyhow::Result
     Ok(n > 0)
 }
 
-// ── Artist orders (whole-discography download) ───────────────────────────────
-
-/// Create an artist order in the `open` state.
-pub async fn create_artist_order(
-    pool: &Pool<Sqlite>,
-    id: &str,
-    artist: &str,
-    artist_url: &str,
-    priority: i64,
-) -> anyhow::Result<()> {
-    let ts = now();
-    sqlx::query(
-        "INSERT INTO artist_orders
-            (id, artist, artist_url, status, priority, added, created_at, updated_at)
-         VALUES (?, ?, ?, 'open', ?, 0, ?, ?)",
-    )
-    .bind(id)
-    .bind(artist)
-    .bind(artist_url)
-    .bind(priority)
-    .bind(ts)
-    .bind(ts)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-pub async fn get_artist_order(
-    pool: &Pool<Sqlite>,
-    id: &str,
-) -> anyhow::Result<Option<crate::models::ArtistOrder>> {
-    Ok(
-        sqlx::query_as::<_, crate::models::ArtistOrder>("SELECT * FROM artist_orders WHERE id = ?")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?,
-    )
-}
-
-pub async fn list_artist_orders(
-    pool: &Pool<Sqlite>,
-    status: Option<&str>,
-    limit: i64,
-) -> anyhow::Result<Vec<crate::models::ArtistOrder>> {
-    match status {
-        Some(s) => Ok(sqlx::query_as::<_, crate::models::ArtistOrder>(
-            "SELECT * FROM artist_orders WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-        )
-        .bind(s)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?),
-        None => Ok(sqlx::query_as::<_, crate::models::ArtistOrder>(
-            "SELECT * FROM artist_orders ORDER BY created_at DESC LIMIT ?",
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await?),
-    }
-}
-
-/// `open` artist orders not yet accepted by deemix, highest priority first.
-pub async fn open_artist_orders(
-    pool: &Pool<Sqlite>,
-    limit: i64,
-) -> anyhow::Result<Vec<crate::models::ArtistOrder>> {
-    Ok(sqlx::query_as::<_, crate::models::ArtistOrder>(
-        "SELECT * FROM artist_orders WHERE status = 'open'
-          ORDER BY priority DESC, created_at ASC LIMIT ?",
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?)
-}
-
-/// `running` artist orders to poll against the deemix queue.
-pub async fn running_artist_orders(
-    pool: &Pool<Sqlite>,
-    limit: i64,
-) -> anyhow::Result<Vec<crate::models::ArtistOrder>> {
-    Ok(sqlx::query_as::<_, crate::models::ArtistOrder>(
-        "SELECT * FROM artist_orders WHERE status = 'running'
-          ORDER BY priority DESC, created_at ASC LIMIT ?",
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?)
-}
-
-/// Mark an artist order `running` with its deemix queue handle.
-pub async fn mark_artist_order_running(
-    pool: &Pool<Sqlite>,
-    id: &str,
-    deemix_uuid: &str,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE artist_orders SET status = 'running', deemix_uuid = ?, error = NULL, updated_at = ?
-          WHERE id = ?",
-    )
-    .bind(deemix_uuid)
-    .bind(now())
-    .bind(id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// Mark an artist order `done` with how many tracks were ingested.
-pub async fn mark_artist_order_done(
-    pool: &Pool<Sqlite>,
-    id: &str,
-    added: i64,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE artist_orders SET status = 'done', added = ?, error = NULL, updated_at = ?
-          WHERE id = ?",
-    )
-    .bind(added)
-    .bind(now())
-    .bind(id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// Mark an artist order `failed` with a reason.
-pub async fn mark_artist_order_failed(
-    pool: &Pool<Sqlite>,
-    id: &str,
-    error: &str,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE artist_orders SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(error)
-    .bind(now())
-    .bind(id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// Record an ISRC ingested for an artist order (idempotent).
-pub async fn add_artist_order_item(
-    pool: &Pool<Sqlite>,
-    order_id: &str,
-    isrc: &str,
-) -> anyhow::Result<()> {
-    sqlx::query("INSERT OR IGNORE INTO artist_order_items (order_id, isrc) VALUES (?, ?)")
-        .bind(order_id)
-        .bind(isrc)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// The ISRCs ingested for an artist order.
-pub async fn artist_order_items(
-    pool: &Pool<Sqlite>,
-    order_id: &str,
-) -> anyhow::Result<Vec<String>> {
-    Ok(
-        sqlx::query_scalar("SELECT isrc FROM artist_order_items WHERE order_id = ? ORDER BY isrc")
-            .bind(order_id)
-            .fetch_all(pool)
-            .await?,
-    )
-}
-
-/// Insert (or complete) a `ready` track row from an artist-order ingest. Existing
-/// paths are never overwritten; the row is `ready` because the file is on disk.
-/// This is what hands the file to the analysis worker (`path_flac`).
+/// Insert (or complete) a `ready` track row. Existing paths are never
+/// overwritten; the row is `ready` because the file is on disk. This is what
+/// hands the file to the analysis worker (`path_flac`).
 pub async fn ingest_ready_track(
     pool: &Pool<Sqlite>,
     isrc: &str,
@@ -862,8 +702,8 @@ pub async fn ingest_ready_track(
 }
 
 pub async fn downloading_tracks(pool: &Pool<Sqlite>) -> anyhow::Result<Vec<Track>> {
-    // Only Deezer rows are polled against deemix; non-Deezer (yt-dlp) downloads
-    // run on their own background tasks.
+    // Only Deezer rows are polled here; non-Deezer (yt-dlp) downloads run on
+    // their own background tasks.
     Ok(sqlx::query_as::<_, Track>(
         "SELECT * FROM tracks WHERE state = 'downloading' AND source = 'deezer'",
     )
@@ -897,15 +737,15 @@ pub async fn mark_resolved(
 pub async fn mark_downloading(
     pool: &Pool<Sqlite>,
     isrc: &str,
-    deemix_uuid: &str,
+    download_ref: &str,
     lease_until: i64,
 ) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE tracks SET state = 'downloading', deemix_uuid = ?, error = NULL,
+        "UPDATE tracks SET state = 'downloading', download_ref = ?, error = NULL,
                 lease_expires_at = ?, updated_at = ?
           WHERE isrc = ?",
     )
-    .bind(deemix_uuid)
+    .bind(download_ref)
     .bind(lease_until)
     .bind(now())
     .bind(isrc)

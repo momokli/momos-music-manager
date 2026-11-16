@@ -1,8 +1,8 @@
-//! music-api — an ISRC order/consume API in front of deemix.
+//! music-api — an ISRC order/consume API that downloads Deezer audio natively.
 //!
 //! Consumers (MMM) place *orders* of ISRCs; this service resolves them on
-//! Deezer, downloads the best available quality through a dedicated deemix
-//! instance, derives the lossy variants and serves the files back by ISRC.
+//! Deezer, downloads the best available quality itself (tagging the ISRC),
+//! derives the lossy variants and serves the files back by ISRC.
 
 pub mod analyzer;
 pub mod api;
@@ -10,7 +10,6 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod deezer_dl;
-pub mod deemix;
 pub mod deezer;
 pub mod logbuf;
 pub mod models;
@@ -46,8 +45,6 @@ pub struct AppState {
     pub http: reqwest::Client,
     /// Wakes the worker when a new order arrives.
     pub notify: Arc<Notify>,
-    /// Login-attempt backoff for the deemix session.
-    pub deemix_login: worker::LoginBackoff,
     /// Cached native Deezer (`deezer_dl`) session. Holds only derived tokens —
     /// never the ARL.
     pub native_session: Arc<tokio::sync::RwLock<Option<Arc<deezer_dl::Session>>>>,
@@ -74,8 +71,6 @@ pub struct AppState {
     pub analyzing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Backoff for analyzer calls so a dead analyzer is not retried every tick.
     pub analysis_backoff: worker::LoginBackoff,
-    /// Artist-order ids with an ingest task currently in flight (dedupe guard).
-    pub artist_ingesting: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Cached Deezer account tier for the configured ARL (`None` until probed).
     pub arl_tier: Arc<tokio::sync::RwLock<Option<deezer::ArlTier>>>,
 }
@@ -97,15 +92,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 ///
 /// Meant to be **spawned**, never awaited on the boot path: the network call is
 /// bounded and all failures are swallowed into a warning. When the requested
-/// bitrate is FLAC (`9`) but the tier cannot stream lossless, a warning is
-/// logged so operators can see why downloads fall back.
+/// quality is FLAC but the tier cannot stream lossless, a warning is logged so
+/// operators can see why downloads fall back.
 pub async fn init_arl_tier(state: &Arc<AppState>) {
-    let arl = state.config.deemix_arl.trim();
+    let arl = state.config.deezer_arl.trim();
     if arl.is_empty() {
-        tracing::warn!("DEEMIX_ARL not configured — Deezer account tier unknown");
+        tracing::warn!("DEEZER_ARL not configured — Deezer account tier unknown");
         state
             .logs
-            .push("warn", "DEEMIX_ARL not configured — Deezer tier unknown");
+            .push("warn", "DEEZER_ARL not configured — Deezer tier unknown");
         return;
     }
 
@@ -123,9 +118,11 @@ pub async fn init_arl_tier(state: &Arc<AppState>) {
                     tier.offer, tier.lossless
                 ),
             );
-            if state.config.deemix_bitrate == 9 && !tier.can_stream_flac() {
+            if state.config.download_quality == crate::deezer_dl::Quality::Flac
+                && !tier.can_stream_flac()
+            {
                 let msg = format!(
-                    "DEEMIX_BITRATE=9 requested but ARL tier '{}' has no lossless — downloads fall back",
+                    "DOWNLOAD_QUALITY=flac requested but ARL tier '{}' has no lossless — downloads fall back",
                     tier.offer
                 );
                 tracing::warn!("{msg}");

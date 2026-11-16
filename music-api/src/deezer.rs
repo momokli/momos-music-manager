@@ -1,4 +1,4 @@
-//! Deezer public API: ISRC → track resolution (no auth, no deemix needed).
+//! Deezer public API: ISRC → track resolution (no auth needed).
 
 use std::time::Duration;
 
@@ -199,43 +199,6 @@ pub async fn lookup_isrc(http: &reqwest::Client, base: &str, isrc: &str) -> anyh
     })
 }
 
-/// Build the deemix source URL for a resolved Deezer track.
-pub fn deemix_track_url(deezer_id: &str) -> String {
-    format!("https://www.deezer.com/track/{deezer_id}")
-}
-
-/// Normalise a caller-supplied artist reference into the canonical Deezer artist
-/// URL deemix accepts. A bare numeric id becomes
-/// `https://www.deezer.com/artist/<id>`; a `deezer.com/artist/<id>` URL is
-/// canonicalised; any other URL is passed through unchanged. `None` when the
-/// input is neither a numeric id nor a URL.
-pub fn normalize_artist_url(input: &str) -> Option<String> {
-    let s = input.trim();
-    if s.is_empty() {
-        return None;
-    }
-    if s.chars().all(|c| c.is_ascii_digit()) {
-        return Some(format!("https://www.deezer.com/artist/{s}"));
-    }
-    if s.contains("://") {
-        // Only a Deezer artist URL is canonicalised; other URLs pass through.
-        if s.contains("deezer.com") {
-            if let Some(id) = deezer_artist_id(s) {
-                return Some(format!("https://www.deezer.com/artist/{id}"));
-            }
-        }
-        return Some(s.to_string());
-    }
-    None
-}
-
-/// Extract the numeric id from a `deezer.com/artist/<id>` URL.
-fn deezer_artist_id(url: &str) -> Option<String> {
-    let rest = url.split("/artist/").nth(1)?;
-    let id: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    (!id.is_empty()).then_some(id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,14 +219,6 @@ mod tests {
         let r: DeezerTrackResponse = serde_json::from_str(json).unwrap();
         let err = r.error.unwrap();
         assert_eq!(err.code, 800);
-    }
-
-    #[test]
-    fn builds_track_url() {
-        assert_eq!(
-            deemix_track_url("3135556"),
-            "https://www.deezer.com/track/3135556"
-        );
     }
 
     #[test]
@@ -329,26 +284,4 @@ mod tests {
         assert!(tier.is_none());
     }
 
-    #[test]
-    fn normalises_artist_references() {
-        assert_eq!(
-            normalize_artist_url("12345").as_deref(),
-            Some("https://www.deezer.com/artist/12345")
-        );
-        assert_eq!(
-            normalize_artist_url("https://www.deezer.com/artist/12345").as_deref(),
-            Some("https://www.deezer.com/artist/12345")
-        );
-        assert_eq!(
-            normalize_artist_url("https://www.deezer.com/de/artist/12345?utm=x").as_deref(),
-            Some("https://www.deezer.com/artist/12345")
-        );
-        // A non-Deezer URL is passed through.
-        assert_eq!(
-            normalize_artist_url("https://example.com/artist/9").as_deref(),
-            Some("https://example.com/artist/9")
-        );
-        assert_eq!(normalize_artist_url("not an artist"), None);
-        assert_eq!(normalize_artist_url("  "), None);
-    }
 }

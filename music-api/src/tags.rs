@@ -1,7 +1,7 @@
 //! Audio tag reading via `ffprobe`.
 //!
-//! The artist-order ingest needs the ISRC/title/artist/album/duration of every
-//! file deemix produced. music-api already ships `ffprobe` (used by
+//! The ingest path needs the ISRC/title/artist/album/duration of every
+//! downloaded file. music-api already ships `ffprobe` (used by
 //! [`crate::transcode::probe_bitrate`]) and configures it via `FFPROBE`, so we
 //! read tags with it rather than adding a second tag library. `lofty` is present
 //! in `Cargo.toml` but unused here: ffprobe is the established media probe, and

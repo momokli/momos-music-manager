@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Notify;
-use tracing::{debug, info};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use music_api::{build_router, connect_db, db, worker, AppState, Config};
@@ -55,7 +55,6 @@ async fn main() -> anyhow::Result<()> {
         config.flac_dir(),
         config.mp3_320_dir(),
         config.mp3_128_dir(),
-        config.deemix_download_dir.clone(),
     ] {
         tokio::fs::create_dir_all(&dir).await?;
     }
@@ -80,7 +79,6 @@ async fn main() -> anyhow::Result<()> {
         config,
         http,
         notify: Arc::new(Notify::new()),
-        deemix_login: Default::default(),
         native_session: Arc::new(tokio::sync::RwLock::new(None)),
         native_login: Default::default(),
         native_fake: None,
@@ -93,7 +91,6 @@ async fn main() -> anyhow::Result<()> {
         analysis_sem: Arc::new(tokio::sync::Semaphore::new(analysis_concurrency)),
         analyzing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         analysis_backoff: Default::default(),
-        artist_ingesting: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         arl_tier: Arc::new(tokio::sync::RwLock::new(None)),
     });
 
@@ -109,23 +106,13 @@ async fn main() -> anyhow::Result<()> {
     info!(
         version = music_api::VERSION,
         git_sha = music_api::GIT_SHA,
-        "music-api listening on {} (deemix {}, download dir {})",
-        state.config.bind,
-        state.config.deemix_url,
-        state.config.deemix_download_dir.display()
+        quality = ?state.config.download_quality,
+        "music-api listening on {} (native Deezer downloads)",
+        state.config.bind
     );
     match state.config.analyzer_url.as_deref() {
         Some(url) => info!("BPM/key analysis enabled (analyzer {url})"),
         None => info!("BPM/key analysis disabled (ANALYZER_URL not set)"),
-    }
-    if state.config.sidecar_configured() {
-        info!(
-            backend = ?state.config.effective_backend(),
-            "deemix sidecar available ({})",
-            state.config.deemix_url
-        );
-    } else {
-        debug!("deemix sidecar disabled (DEEMIX_URL not set)");
     }
 
     axum::serve(listener, build_router(state))

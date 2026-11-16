@@ -3,49 +3,14 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Where Deezer audio is acquired.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DownloadBackend {
-    /// Download natively via the vendored `deezer_dl` module.
-    Native,
-    /// Hand the track to the deemix sidecar (`DEEMIX_URL`) — explicit fallback.
-    Sidecar,
-    /// Pick per environment (the default): native when an ARL is configured,
-    /// else the sidecar when `DEEMIX_URL` is set, else native.
-    #[default]
-    Auto,
-}
+use crate::deezer_dl::Quality;
 
-impl DownloadBackend {
-    /// Parse a `DOWNLOAD_BACKEND` value (case-insensitive). Unknown → `None`.
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "native" => Some(Self::Native),
-            "sidecar" => Some(Self::Sidecar),
-            "auto" => Some(Self::Auto),
-            _ => None,
-        }
-    }
-
-    /// Resolve `Auto` to a concrete choice:
-    ///
-    /// 1. no `DEEMIX_URL` ⇒ native (there is no reachable sidecar);
-    /// 2. `DEEMIX_URL` set but no ARL ⇒ sidecar (native cannot authenticate);
-    /// 3. both set ⇒ native (the sidecar stays available via an explicit
-    ///    `DOWNLOAD_BACKEND=sidecar`).
-    ///
-    /// A concrete choice is always authoritative.
-    pub fn resolve(self, arl_configured: bool, sidecar_configured: bool) -> Self {
-        match self {
-            Self::Auto => match (sidecar_configured, arl_configured) {
-                (false, _) => Self::Native,
-                (true, false) => Self::Sidecar,
-                (true, true) => Self::Native,
-            },
-            concrete => concrete,
-        }
-    }
-}
+/// The single legacy ARL variable name still honoured (#518).
+///
+/// The constant is the one deliberate exception to the "no sidecar brand in
+/// `src`" acceptance: the old name must appear somewhere to be read. Every
+/// other occurrence is gone.
+const LEGACY_ARL_ENV: &str = "DEEMIX_ARL"; // #518 legacy-env-alias — bewusste Ausnahme zur Grep-Akzeptanz
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -53,17 +18,11 @@ pub struct Config {
     pub token: String,
     /// Address the HTTP server binds to.
     pub bind: String,
-    /// Base URL of the deemix instance that performs the downloads.
-    pub deemix_url: String,
-    /// Deezer ARL used to authenticate with deemix.
-    pub deemix_arl: String,
-    /// Where Deezer audio comes from: native, sidecar, or auto. Defaults to
-    /// `native`.
-    pub download_backend: DownloadBackend,
-    /// Requested deemix bitrate (1 = 128, 3 = 320, 9 = FLAC).
-    pub deemix_bitrate: u8,
-    /// Directory deemix writes its downloads into (as seen by this process).
-    pub deemix_download_dir: PathBuf,
+    /// Deezer ARL used to authenticate native downloads (never logged).
+    pub deezer_arl: String,
+    /// Requested download quality (`DOWNLOAD_QUALITY`): `flac` | `mp3-320` |
+    /// `mp3-128`. Default `flac`.
+    pub download_quality: Quality,
     /// Our own store: `flac/`, `320/`, `128/` live below this.
     pub data_dir: PathBuf,
     /// Root of the content-addressed object store.
@@ -90,7 +49,7 @@ pub struct Config {
     pub transcode_concurrency: usize,
     /// How often the worker advances the pipeline.
     pub worker_interval: Duration,
-    /// How long to wait for a single deemix download before giving up.
+    /// How long to wait for a single native download before giving up.
     pub download_timeout: Duration,
     /// Bounded retries: a transient failure becomes terminal after this many attempts.
     pub queue_max_attempts: u32,
@@ -98,10 +57,10 @@ pub struct Config {
     pub queue_retry_base_secs: i64,
     /// Upper bound on the retry backoff (seconds).
     pub queue_retry_max_secs: i64,
-    /// Maximum number of downloads dispatched to deemix at once. Orders are
-    /// still accepted without limit; only the *dispatch* is bounded, so at most
-    /// this many rows sit in `downloading`. Priority decides *which* pending
-    /// rows fill the free slots.
+    /// Maximum number of downloads dispatched at once. Orders are still
+    /// accepted without limit; only the *dispatch* is bounded, so at most this
+    /// many rows sit in `downloading`. Priority decides *which* pending rows
+    /// fill the free slots.
     pub max_inflight: usize,
     /// Base URL of the BPM/key analyzer service (Essentia), e.g.
     /// `http://127.0.0.1:8711`. `POST {url}/analyze` with a server-local file
@@ -134,25 +93,15 @@ impl Config {
                 .unwrap_or_else(|_| data_dir.join("ytdlp").display().to_string()),
         );
 
+        let download_quality = parse_download_quality(
+            &std::env::var("DOWNLOAD_QUALITY").unwrap_or_else(|_| "flac".to_string()),
+        )?;
+
         let config = Self {
             token,
             bind: std::env::var("MUSIC_API_BIND").unwrap_or_else(|_| "0.0.0.0:8710".to_string()),
-            // No default: an unset/blank `DEEMIX_URL` disables the sidecar, and
-            // `Auto` then runs purely native (#511).
-            deemix_url: std::env::var("DEEMIX_URL")
-                .unwrap_or_default()
-                .trim()
-                .trim_end_matches('/')
-                .to_string(),
-            deemix_arl: std::env::var("DEEMIX_ARL").unwrap_or_default(),
-            download_backend: parse_download_backend(
-                &std::env::var("DOWNLOAD_BACKEND").unwrap_or_default(),
-            ),
-            deemix_bitrate: env_parse("DEEMIX_BITRATE", 9u8),
-            deemix_download_dir: PathBuf::from(
-                std::env::var("DEEMIX_DOWNLOAD_DIR")
-                    .unwrap_or_else(|_| data_dir.join("incoming").display().to_string()),
-            ),
+            deezer_arl: arl_from_env(),
+            download_quality,
             data_dir,
             store_root,
             store_max_upload_bytes: env_parse(
@@ -187,29 +136,7 @@ impl Config {
             ),
         };
 
-        // Fail fast: an explicit sidecar backend without a URL would otherwise
-        // issue network calls against an empty base (#511).
-        if config.download_backend == DownloadBackend::Sidecar && !config.sidecar_configured() {
-            anyhow::bail!(
-                "DOWNLOAD_BACKEND=sidecar requires DEEMIX_URL to be set (got an empty value)"
-            );
-        }
-
         Ok(config)
-    }
-
-    /// Whether a deemix sidecar URL is configured (non-blank `DEEMIX_URL`).
-    pub fn sidecar_configured(&self) -> bool {
-        !self.deemix_url.trim().is_empty()
-    }
-
-    /// The concrete download backend: `auto` resolved against the ARL presence
-    /// and the sidecar URL.
-    pub fn effective_backend(&self) -> DownloadBackend {
-        self.download_backend.resolve(
-            !self.deemix_arl.trim().is_empty(),
-            self.sidecar_configured(),
-        )
     }
 
     pub fn flac_dir(&self) -> PathBuf {
@@ -223,6 +150,42 @@ impl Config {
     }
 }
 
+/// Resolve the ARL from the new (`DEEZER_ARL`) and legacy names. The new name
+/// wins; the legacy name is the fallback. Pure, so it is testable without
+/// mutating global process env.
+fn resolve_arl(new: &str, legacy: &str) -> String {
+    let new = new.trim();
+    if !new.is_empty() {
+        new.to_string()
+    } else {
+        legacy.trim().to_string()
+    }
+}
+
+/// Read the ARL from the environment, warning once (variable name only, never
+/// the value) when only the legacy name is set.
+fn arl_from_env() -> String {
+    let deezer = std::env::var("DEEZER_ARL").unwrap_or_default();
+    let legacy = std::env::var(LEGACY_ARL_ENV).unwrap_or_default();
+    if deezer.trim().is_empty() && !legacy.trim().is_empty() {
+        tracing::warn!("{LEGACY_ARL_ENV} is deprecated — use DEEZER_ARL instead");
+    }
+    resolve_arl(&deezer, &legacy)
+}
+
+/// Parse `DOWNLOAD_QUALITY` (`flac` | `mp3-320` | `mp3-128`, case-insensitive).
+/// An unknown value is a hard error: a typo must not silently pick a default.
+fn parse_download_quality(raw: &str) -> anyhow::Result<Quality> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "flac" => Ok(Quality::Flac),
+        "mp3-320" => Ok(Quality::Mp3_320),
+        "mp3-128" => Ok(Quality::Mp3_128),
+        other => anyhow::bail!(
+            "invalid DOWNLOAD_QUALITY '{other}' — expected flac, mp3-320 or mp3-128"
+        ),
+    }
+}
+
 /// The analyzer base URL: `ANALYZER_URL` wins, `HUB_ANALYZER_URL` is the
 /// fallback. A blank/whitespace value is treated as "not configured" (analysis
 /// disabled).
@@ -232,21 +195,6 @@ fn analyzer_url_from_env() -> Option<String> {
         .ok()
         .map(|v| v.trim().trim_end_matches('/').to_string())
         .filter(|v| !v.is_empty())
-}
-
-/// Parse `DOWNLOAD_BACKEND`: blank/unknown → `Auto` (unknown warns once).
-fn parse_download_backend(raw: &str) -> DownloadBackend {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return DownloadBackend::Auto;
-    }
-    match DownloadBackend::parse(trimmed) {
-        Some(b) => b,
-        None => {
-            tracing::warn!("unknown DOWNLOAD_BACKEND '{trimmed}' — defaulting to auto");
-            DownloadBackend::Auto
-        }
-    }
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -274,61 +222,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn download_backend_parses_case_insensitively() {
+    fn download_quality_parses_case_insensitively() {
+        assert_eq!(parse_download_quality("flac").unwrap(), Quality::Flac);
+        assert_eq!(parse_download_quality("MP3-320").unwrap(), Quality::Mp3_320);
         assert_eq!(
-            DownloadBackend::parse("native"),
-            Some(DownloadBackend::Native)
+            parse_download_quality("  mp3-128 ").unwrap(),
+            Quality::Mp3_128
         );
-        assert_eq!(
-            DownloadBackend::parse("Sidecar"),
-            Some(DownloadBackend::Sidecar)
-        );
-        assert_eq!(
-            DownloadBackend::parse(" AUTO "),
-            Some(DownloadBackend::Auto)
-        );
-        assert_eq!(DownloadBackend::parse("qobuz"), None);
-        assert_eq!(DownloadBackend::parse(""), None);
     }
 
     #[test]
-    fn download_backend_defaults_to_auto() {
-        assert_eq!(DownloadBackend::default(), DownloadBackend::Auto);
-        assert_eq!(parse_download_backend(""), DownloadBackend::Auto);
-        assert_eq!(parse_download_backend("nonsense"), DownloadBackend::Auto);
-        assert_eq!(parse_download_backend("sidecar"), DownloadBackend::Sidecar);
-        assert_eq!(parse_download_backend("native"), DownloadBackend::Native);
+    fn download_quality_rejects_unknown_values() {
+        assert!(parse_download_quality("wav").is_err());
+        assert!(parse_download_quality("320").is_err());
+        assert!(parse_download_quality("").is_err());
     }
 
     #[test]
-    fn auto_resolves_by_arl_and_sidecar_presence() {
-        // 1. no sidecar URL ⇒ always native, ARL or not.
-        assert_eq!(
-            DownloadBackend::Auto.resolve(false, false),
-            DownloadBackend::Native
-        );
-        assert_eq!(
-            DownloadBackend::Auto.resolve(true, false),
-            DownloadBackend::Native
-        );
-        // 2. sidecar URL but no ARL ⇒ sidecar (native cannot authenticate).
-        assert_eq!(
-            DownloadBackend::Auto.resolve(false, true),
-            DownloadBackend::Sidecar
-        );
-        // 3. both set ⇒ native (sidecar stays available via explicit override).
-        assert_eq!(
-            DownloadBackend::Auto.resolve(true, true),
-            DownloadBackend::Native
-        );
-        // A concrete choice is never overridden by the environment.
-        assert_eq!(
-            DownloadBackend::Sidecar.resolve(true, true),
-            DownloadBackend::Sidecar
-        );
-        assert_eq!(
-            DownloadBackend::Native.resolve(false, false),
-            DownloadBackend::Native
-        );
+    fn arl_alias_prefers_the_new_name() {
+        // The new name wins when both are present.
+        assert_eq!(resolve_arl("new-arl", "legacy-arl"), "new-arl");
+        // Only the legacy name set → fallback to it.
+        assert_eq!(resolve_arl("", "legacy-arl"), "legacy-arl");
+        assert_eq!(resolve_arl("   ", "legacy-arl"), "legacy-arl");
+        // Neither set → empty.
+        assert_eq!(resolve_arl("", ""), "");
+        assert_eq!(resolve_arl("  ", "  "), "");
     }
 }
