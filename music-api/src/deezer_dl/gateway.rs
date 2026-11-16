@@ -148,12 +148,11 @@ impl GatewayApi {
         let status = response.status();
         let text = response.text().await?;
 
-        // Status-aware mapping BEFORE body parsing (401/403/404/429).
+        // Status-aware mapping BEFORE body parsing (401/403/404/429). A 404
+        // maps to `TrackGone` with an empty id; callers that know the real
+        // Deezer id substitute it (see `get_song_data`) so no empty or
+        // "song.getData is gone" placeholder ever reaches the user.
         if let Some(err) = Error::map_status(status.as_u16()) {
-            if matches!(err, Error::TrackGone(_)) {
-                // Enrich with the method for diagnostics (never the ARL).
-                return Err(Error::TrackGone(method.to_string()));
-            }
             return Err(err);
         }
 
@@ -198,7 +197,13 @@ impl GatewayApi {
     pub async fn get_song_data(&self, song_id: &str) -> Result<SongData> {
         let json_data = json!({ "sng_id": song_id });
 
-        let result = self.call_api("song.getData", Some(json_data)).await?;
+        let result = match self.call_api("song.getData", Some(json_data)).await {
+            Ok(v) => v,
+            // A 404 on `song.getData` means the track itself is gone; report
+            // the real Deezer id instead of the empty placeholder.
+            Err(Error::TrackGone(_)) => return Err(Error::TrackGone(song_id.to_string())),
+            Err(e) => return Err(e),
+        };
 
         if result.is_null() {
             return Err(Error::TrackGone(song_id.to_string()));

@@ -141,7 +141,12 @@ async fn fetch_encrypted(
         .next()
         .ok_or(Error::NoLosslessTier)?;
 
-    session.gateway.fetch_bytes(&media.url).await
+    match session.gateway.fetch_bytes(&media.url).await {
+        Ok(bytes) => Ok(bytes),
+        // Media 404: report the real Deezer id, not an empty placeholder.
+        Err(Error::TrackGone(_)) => Err(Error::TrackGone(deezer_id.to_string())),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
