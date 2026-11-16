@@ -48,6 +48,14 @@ pub struct AppState {
     pub notify: Arc<Notify>,
     /// Login-attempt backoff for the deemix session.
     pub deemix_login: worker::LoginBackoff,
+    /// Cached native Deezer (`deezer_dl`) session. Holds only derived tokens —
+    /// never the ARL.
+    pub native_session: Arc<tokio::sync::RwLock<Option<Arc<deezer_dl::Session>>>>,
+    /// Login-attempt backoff for the native Deezer session (60s → 1800s).
+    pub native_login: worker::LoginBackoff,
+    /// Test seam for the native download path: when set, the worker serves
+    /// these canned bytes instead of calling Deezer (CI has no ARL/network).
+    pub native_fake: Option<Arc<worker::NativeFake>>,
     /// Content-addressed object store.
     pub store: store::Store,
     /// Recent service events (surfaced via `GET /logs`).

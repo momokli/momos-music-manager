@@ -76,6 +76,19 @@ impl LoginBackoff {
     }
 }
 
+/// Canned native download for tests: serves `bytes` for any track id/quality,
+/// so the native worker path can be exercised without an ARL or the network.
+#[derive(Debug, Clone)]
+pub struct NativeFake {
+    /// File bytes to hand back (must be a container `lofty` can tag).
+    pub bytes: Vec<u8>,
+    /// File extension to write them with (e.g. `"flac"`, `"mp3"`).
+    pub extension: String,
+    /// When true, a request for `Quality::Flac` fails with `NoLosslessTier`,
+    /// forcing the 320 fallback (tier-exercised path).
+    pub no_flac: bool,
+}
+
 /// Run forever, waking on the configured interval or when nudged by a new order.
 pub async fn run(state: Arc<AppState>) {
     loop {
@@ -148,6 +161,48 @@ pub async fn ensure_deemix_login(state: &Arc<AppState>) -> bool {
         Err(e) => {
             let delay = state.deemix_login.note_failure(now);
             warn!("deemix login failed ({e:#}) — next attempt in {delay}s");
+            false
+        }
+    }
+}
+
+/// Ensure a native Deezer session, honouring the native login backoff.
+///
+/// Returns whether the native path is ready to download. The backoff grows
+/// 60s → 1800s on repeated failures and resets on success. A missing ARL warns
+/// exactly once. The ARL is only ever handed to [`crate::deezer_dl::login`] —
+/// it never reaches a log line or an error message.
+///
+/// When [`AppState::native_fake`] is set (tests), no session is needed.
+pub async fn ensure_native_login(state: &Arc<AppState>) -> bool {
+    if state.native_fake.is_some() {
+        return true;
+    }
+    let arl = state.config.deemix_arl.trim();
+    if arl.is_empty() {
+        if state.native_login.warn_missing_arl() {
+            warn!("DEEMIX_ARL is not set — native Deezer downloads unavailable");
+        }
+        return false;
+    }
+    if state.native_session.read().await.is_some() {
+        return true;
+    }
+    let now = db::now();
+    if state.native_login.blocked(now) {
+        return false;
+    }
+    match crate::deezer_dl::login(arl).await {
+        Ok(session) => {
+            state.native_login.note_success();
+            *state.native_session.write().await = Some(Arc::new(session));
+            info!("native Deezer session established");
+            true
+        }
+        Err(e) => {
+            let delay = state.native_login.note_failure(now);
+            // `{e}` is ARL-free by construction (deezer_dl renders no ARL).
+            warn!("native Deezer login failed ({e}) — next attempt in {delay}s");
             false
         }
     }
@@ -1392,6 +1447,41 @@ mod tests {
         b.note_success();
         assert!(!b.blocked(1000));
         assert_eq!(b.note_failure(1000), 60);
+    }
+
+    #[test]
+    fn native_login_backoff_grows_and_resets() {
+        // The native session has its own backoff, independent of deemix's.
+        let b = LoginBackoff::default();
+        assert!(!b.blocked(1000));
+        assert_eq!(b.note_failure(1000), 60);
+        assert!(b.blocked(1030));
+        assert!(!b.blocked(1061));
+        assert_eq!(b.note_failure(1000), 120);
+        for _ in 0..10 {
+            b.note_failure(1000);
+        }
+        assert_eq!(b.note_failure(1000), LOGIN_BACKOFF_MAX);
+        b.note_success();
+        assert!(!b.blocked(1000));
+        assert_eq!(b.note_failure(1000), 60);
+        assert!(b.warn_missing_arl());
+        assert!(!b.warn_missing_arl());
+    }
+
+    /// The native login-failure warning is assembled from the error's Display,
+    /// which carries no ARL — the exact invariant the worker relies on.
+    #[test]
+    fn native_login_error_messages_never_carry_the_arl() {
+        let arl = "this-is-a-fake-arl-zzz999";
+        for err in [
+            crate::deezer_dl::Error::InvalidArl,
+            crate::deezer_dl::Error::Api("deezer api unreachable".to_string()),
+        ] {
+            let msg = format!("native Deezer login failed ({err}) — next attempt in 60s");
+            assert!(!msg.contains(arl), "ARL leaked: {msg}");
+            assert!(!msg.contains("zzz999"), "ARL fragment leaked: {msg}");
+        }
     }
 
     #[test]

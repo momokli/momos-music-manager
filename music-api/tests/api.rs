@@ -31,6 +31,7 @@ async fn harness() -> Harness {
         deemix_arl: String::new(),
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
         download_backend: music_api::config::DownloadBackend::Auto,
+        native_fake: None,
     })
     .await
 }
@@ -42,6 +43,7 @@ async fn harness_with(analyzer_url: Option<String>) -> Harness {
         deemix_arl: String::new(),
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
         download_backend: music_api::config::DownloadBackend::Auto,
+        native_fake: None,
     })
     .await
 }
@@ -51,6 +53,7 @@ struct HarnessOpts {
     deemix_arl: String,
     deezer_gw_base: String,
     download_backend: music_api::config::DownloadBackend,
+    native_fake: Option<Arc<music_api::worker::NativeFake>>,
 }
 
 /// Full-control harness builder (ARL + gw-light base for tier tests).
@@ -113,6 +116,9 @@ async fn harness_opts(opts: HarnessOpts) -> Harness {
         http: reqwest::Client::new(),
         notify: Arc::new(tokio::sync::Notify::new()),
         deemix_login: Default::default(),
+        native_session: Arc::new(tokio::sync::RwLock::new(None)),
+        native_login: Default::default(),
+        native_fake: opts.native_fake,
         store: music_api::store::Store::new(
             root.join("objects"),
             music_api::store::DEFAULT_MAX_UPLOAD_BYTES,
@@ -3449,6 +3455,7 @@ async fn account_reports_hi_tier_from_gw_light() {
         deemix_arl: "fake-arl".to_string(),
         deezer_gw_base: gw,
         download_backend: music_api::config::DownloadBackend::Auto,
+        native_fake: None,
     })
     .await;
 
@@ -3522,6 +3529,7 @@ async fn account_reports_free_tier_without_flac() {
         deemix_arl: "fake-arl".to_string(),
         deezer_gw_base: gw,
         download_backend: music_api::config::DownloadBackend::Auto,
+        native_fake: None,
     })
     .await;
 
@@ -3548,6 +3556,7 @@ async fn account_returns_bad_gateway_when_gw_light_unreachable() {
         deemix_arl: "fake-arl".to_string(),
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
         download_backend: music_api::config::DownloadBackend::Auto,
+        native_fake: None,
     })
     .await;
 
