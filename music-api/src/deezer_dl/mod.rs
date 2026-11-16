@@ -7,6 +7,7 @@
 //!
 //! Track download only: no tagging, no album/playlist/batch, no CLI.
 
+mod crypto;
 mod error;
 
 pub use error::Error;
