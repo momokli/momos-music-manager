@@ -175,6 +175,16 @@ pub async fn ensure_deemix_login(state: &Arc<AppState>) -> bool {
     }
 }
 
+/// Boxed, owned-input login future. Production is [`crate::deezer_dl::login`];
+/// tests inject their own so a failing login drives the backoff without the
+/// network.
+pub type NativeLoginFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<crate::deezer_dl::Session, crate::deezer_dl::Error>>
+            + Send,
+    >,
+>;
+
 /// Ensure a native Deezer session, honouring the native login backoff.
 ///
 /// Returns whether the native path is ready to download. The backoff grows
@@ -184,6 +194,22 @@ pub async fn ensure_deemix_login(state: &Arc<AppState>) -> bool {
 ///
 /// When [`AppState::native_fake`] is set (tests), no session is needed.
 pub async fn ensure_native_login(state: &Arc<AppState>) -> bool {
+    ensure_native_login_with(state, |arl| -> NativeLoginFuture {
+        Box::pin(async move { crate::deezer_dl::login(&arl).await })
+    })
+    .await
+}
+
+/// [`ensure_native_login`] with the login call injected.
+///
+/// Production passes [`crate::deezer_dl::login`]; tests inject a fake so a
+/// failing login can be exercised without touching the network. Everything else
+/// — the empty-ARL short-circuit, the session cache and the backoff — is shared
+/// with the production path.
+pub async fn ensure_native_login_with<L>(state: &Arc<AppState>, login: L) -> bool
+where
+    L: Fn(String) -> NativeLoginFuture,
+{
     if state.native_fake.is_some() {
         return true;
     }
@@ -201,7 +227,7 @@ pub async fn ensure_native_login(state: &Arc<AppState>) -> bool {
     if state.native_login.blocked(now) {
         return false;
     }
-    match crate::deezer_dl::login(arl).await {
+    match login(arl.to_string()).await {
         Ok(session) => {
             state.native_login.note_success();
             *state.native_session.write().await = Some(Arc::new(session));

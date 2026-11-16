@@ -3812,3 +3812,192 @@ async fn sidecar_backend_does_not_take_the_native_path() {
         "native sentinel written under the sidecar backend"
     );
 }
+
+/// A native backend with an empty `DEEMIX_ARL` must warn once, attempt no login
+/// (no network) and leave the session unset. The injected login closure records
+/// any invocation, so "no attempt" is asserted directly.
+#[tokio::test]
+async fn native_empty_arl_warns_once_and_never_attempts_login() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let h = harness_opts(HarnessOpts {
+        analyzer_url: None,
+        deemix_arl: String::new(), // no ARL configured
+        deezer_gw_base: "http://127.0.0.1:1".to_string(),
+        download_backend: music_api::config::DownloadBackend::Native,
+        native_fake: None,
+        deezer_base: None,
+    })
+    .await;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let login = move |_: String| -> music_api::worker::NativeLoginFuture {
+        seen.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(music_api::deezer_dl::Error::InvalidArl) })
+    };
+
+    assert!(
+        !music_api::worker::ensure_native_login_with(&h.state, login).await,
+        "empty ARL must not report the native path ready"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no login attempt expected");
+    assert!(
+        h.state.native_session.read().await.is_none(),
+        "no session may be cached"
+    );
+    assert!(
+        !h.state.native_login.blocked(db::now()),
+        "no failure/backoff may be recorded"
+    );
+    // The warning guard is spent — i.e. exactly one warn was emitted.
+    assert!(
+        !h.state.native_login.warn_missing_arl(),
+        "the missing-ARL warning must fire exactly once"
+    );
+}
+
+/// A failing native login must engage the backoff and drop any session, so a
+/// second call inside the window makes no new attempt. The login closure
+/// counts invocations, proving the retry is skipped.
+#[tokio::test]
+async fn native_login_failure_backs_off_and_discards_session() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let h = harness_opts(HarnessOpts {
+        analyzer_url: None,
+        deemix_arl: "invalid-arl-zzz".to_string(),
+        deezer_gw_base: "http://127.0.0.1:1".to_string(),
+        download_backend: music_api::config::DownloadBackend::Native,
+        native_fake: None,
+        deezer_base: None,
+    })
+    .await;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let login = move |_: String| -> music_api::worker::NativeLoginFuture {
+        seen.fetch_add(1, Ordering::SeqCst);
+        // InvalidArl is ARL-free by construction; no network is touched.
+        Box::pin(async { Err(music_api::deezer_dl::Error::InvalidArl) })
+    };
+
+    assert!(!music_api::worker::ensure_native_login_with(&h.state, login.clone()).await);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        h.state.native_session.read().await.is_none(),
+        "session must be discarded on failure"
+    );
+    assert!(
+        h.state.native_login.blocked(db::now()),
+        "a failure must engage the backoff"
+    );
+
+    // Inside the cooldown window the login is not retried.
+    assert!(!music_api::worker::ensure_native_login_with(&h.state, login).await);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "login must not be retried inside the backoff window"
+    );
+}
+
+/// Native (`native:`-sentinel) in-flight rows must consume `MAX_INFLIGHT` slots
+/// exactly like sidecar rows — the ledger counts every source.
+#[tokio::test]
+async fn resolve_pending_counts_native_rows_against_inflight_cap() {
+    let h = harness().await; // max_inflight = 5
+    let isrcs = [
+        "AEA0D1846146",
+        "USQX91201487",
+        "USUM71807935",
+        "GBUM71029604",
+        "FRZ039800054",
+        "USRC17607839",
+    ];
+    create_order(&h.app, &isrcs).await;
+    for isrc in &isrcs[..5] {
+        db::mark_downloading(
+            &h.state.pool,
+            isrc,
+            &format!("native:{isrc}"),
+            db::now() + 60,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(db::count_downloading(&h.state.pool).await.unwrap(), 5);
+
+    // No free slots: the sixth row must stay pending, undispatched.
+    music_api::worker::resolve_pending(&h.state).await.unwrap();
+    assert_eq!(db::count_downloading(&h.state.pool).await.unwrap(), 5);
+    let t = db::get_track(&h.state.pool, isrcs[5])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.state, "pending");
+    assert_eq!(t.attempts, 0);
+    assert_eq!(t.next_attempt_at, None);
+}
+
+/// A row already in flight on a native background task must not be dispatched a
+/// second time, even when its queue item is offered again.
+#[tokio::test]
+async fn native_inflight_row_is_not_double_dispatched() {
+    let deezer = spawn_deezer_mock().await;
+    let fake = music_api::worker::NativeFake {
+        bytes: fixture_bytes("tiny.flac"),
+        extension: "flac".to_string(),
+        no_flac: false,
+    };
+    let h = harness_native(
+        deezer,
+        fake,
+        music_api::config::DownloadBackend::Native,
+        "",
+    )
+    .await;
+    let isrc = "USRC17607839";
+    create_order(&h.app, &[isrc]).await;
+
+    // An in-flight native job: `downloading` with its own sentinel.
+    db::mark_downloading(
+        &h.state.pool,
+        isrc,
+        &format!("native:{isrc}"),
+        db::now() + 60,
+    )
+    .await
+    .unwrap();
+    // Re-offer the queue item as the reconcile would on a later tick.
+    music_api::work::finish_ref(&h.state.pool, music_api::work::kind::DOWNLOAD, isrc, db::now())
+        .await
+        .unwrap();
+    music_api::work::enqueue(
+        &h.state.pool,
+        music_api::work::kind::DOWNLOAD,
+        isrc,
+        0,
+        None,
+    )
+    .await
+    .unwrap();
+
+    music_api::worker::resolve_pending(&h.state).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let t = db::get_track(&h.state.pool, isrc).await.unwrap().unwrap();
+    assert_eq!(
+        t.state, "downloading",
+        "native in-flight row must not be settled or restarted"
+    );
+    let expected_uuid = format!("native:{isrc}");
+    assert_eq!(t.deemix_uuid.as_deref(), Some(expected_uuid.as_str()));
+    assert_eq!(db::count_downloading(&h.state.pool).await.unwrap(), 1);
+    let starts = h
+        .state
+        .logs
+        .recent(50)
+        .iter()
+        .filter(|l| l.msg.contains("native download started"))
+        .count();
+    assert_eq!(starts, 0, "no second native download may be started");
+}
