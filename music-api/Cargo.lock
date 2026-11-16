@@ -1101,7 +1101,6 @@ dependencies = [
  "axum",
  "blowfish",
  "byteorder",
- "bytes",
  "cipher",
  "ctr",
  "dotenvy",

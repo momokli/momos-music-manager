@@ -23,7 +23,6 @@ ctr = "0.9"
 hex = "0.4"
 cipher = "0.4"
 byteorder = "1.5"
-bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
