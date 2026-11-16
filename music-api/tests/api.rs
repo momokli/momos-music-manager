@@ -30,6 +30,7 @@ async fn harness() -> Harness {
         analyzer_url: None,
         deemix_arl: String::new(),
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
+        download_backend: music_api::config::DownloadBackend::Auto,
     })
     .await
 }
@@ -40,6 +41,7 @@ async fn harness_with(analyzer_url: Option<String>) -> Harness {
         analyzer_url,
         deemix_arl: String::new(),
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
+        download_backend: music_api::config::DownloadBackend::Auto,
     })
     .await
 }
@@ -48,6 +50,7 @@ struct HarnessOpts {
     analyzer_url: Option<String>,
     deemix_arl: String,
     deezer_gw_base: String,
+    download_backend: music_api::config::DownloadBackend,
 }
 
 /// Full-control harness builder (ARL + gw-light base for tier tests).
@@ -60,6 +63,7 @@ async fn harness_opts(opts: HarnessOpts) -> Harness {
         bind: "127.0.0.1:0".to_string(),
         deemix_url: "http://127.0.0.1:1".to_string(),
         deemix_arl: opts.deemix_arl,
+        download_backend: opts.download_backend,
         deemix_bitrate: 9,
         deemix_download_dir: root.join("incoming"),
         data_dir: root.clone(),
@@ -3444,6 +3448,7 @@ async fn account_reports_hi_tier_from_gw_light() {
         analyzer_url: None,
         deemix_arl: "fake-arl".to_string(),
         deezer_gw_base: gw,
+        download_backend: music_api::config::DownloadBackend::Auto,
     })
     .await;
 
@@ -3516,6 +3521,7 @@ async fn account_reports_free_tier_without_flac() {
         analyzer_url: None,
         deemix_arl: "fake-arl".to_string(),
         deezer_gw_base: gw,
+        download_backend: music_api::config::DownloadBackend::Auto,
     })
     .await;
 
@@ -3541,6 +3547,7 @@ async fn account_returns_bad_gateway_when_gw_light_unreachable() {
         analyzer_url: None,
         deemix_arl: "fake-arl".to_string(),
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
+        download_backend: music_api::config::DownloadBackend::Auto,
     })
     .await;
 

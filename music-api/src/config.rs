@@ -3,6 +3,45 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Where Deezer audio is acquired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DownloadBackend {
+    /// Download natively via the vendored `deezer_dl` module.
+    Native,
+    /// Hand the track to the deemix sidecar (`DEEMIX_URL`).
+    Sidecar,
+    /// Pick per environment: native when an ARL is configured, else sidecar.
+    #[default]
+    Auto,
+}
+
+impl DownloadBackend {
+    /// Parse a `DOWNLOAD_BACKEND` value (case-insensitive). Unknown → `None`.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "native" => Some(Self::Native),
+            "sidecar" => Some(Self::Sidecar),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    /// Resolve `Auto` to a concrete choice: native iff an ARL is configured.
+    /// (`DEEMIX_URL` has a default, so "sidecar configured" is not a signal.)
+    pub fn resolve(self, arl_configured: bool) -> Self {
+        match self {
+            Self::Auto => {
+                if arl_configured {
+                    Self::Native
+                } else {
+                    Self::Sidecar
+                }
+            }
+            concrete => concrete,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Bearer token the API requires on every non-public route.
@@ -13,6 +52,8 @@ pub struct Config {
     pub deemix_url: String,
     /// Deezer ARL used to authenticate with deemix.
     pub deemix_arl: String,
+    /// Where Deezer audio comes from: native, sidecar, or auto (default).
+    pub download_backend: DownloadBackend,
     /// Requested deemix bitrate (1 = 128, 3 = 320, 9 = FLAC).
     pub deemix_bitrate: u8,
     /// Directory deemix writes its downloads into (as seen by this process).
@@ -95,6 +136,9 @@ impl Config {
                 .trim_end_matches('/')
                 .to_string(),
             deemix_arl: std::env::var("DEEMIX_ARL").unwrap_or_default(),
+            download_backend: parse_download_backend(
+                &std::env::var("DOWNLOAD_BACKEND").unwrap_or_default(),
+            ),
             deemix_bitrate: env_parse("DEEMIX_BITRATE", 9u8),
             deemix_download_dir: PathBuf::from(
                 std::env::var("DEEMIX_DOWNLOAD_DIR")
@@ -135,6 +179,12 @@ impl Config {
         })
     }
 
+    /// The concrete download backend: `auto` resolved against the ARL.
+    pub fn effective_backend(&self) -> DownloadBackend {
+        self.download_backend
+            .resolve(!self.deemix_arl.trim().is_empty())
+    }
+
     pub fn flac_dir(&self) -> PathBuf {
         self.data_dir.join("flac")
     }
@@ -157,6 +207,23 @@ fn analyzer_url_from_env() -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// Parse `DOWNLOAD_BACKEND`: blank/unknown → `Auto` (unknown warns once).
+fn parse_download_backend(raw: &str) -> DownloadBackend {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return DownloadBackend::Auto;
+    }
+    match DownloadBackend::parse(trimmed) {
+        Some(b) => b,
+        None => {
+            tracing::warn!(
+                "unknown DOWNLOAD_BACKEND '{trimmed}' — defaulting to auto"
+            );
+            DownloadBackend::Auto
+        }
+    }
+}
+
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
     std::env::var(key)
         .ok()
@@ -174,5 +241,36 @@ fn env_list(key: &str, default: &[&str]) -> Vec<String> {
             .filter(|s| !s.is_empty())
             .collect(),
         _ => default.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_backend_parses_case_insensitively() {
+        assert_eq!(DownloadBackend::parse("native"), Some(DownloadBackend::Native));
+        assert_eq!(DownloadBackend::parse("Sidecar"), Some(DownloadBackend::Sidecar));
+        assert_eq!(DownloadBackend::parse(" AUTO "), Some(DownloadBackend::Auto));
+        assert_eq!(DownloadBackend::parse("qobuz"), None);
+        assert_eq!(DownloadBackend::parse(""), None);
+    }
+
+    #[test]
+    fn download_backend_defaults_to_auto() {
+        assert_eq!(DownloadBackend::default(), DownloadBackend::Auto);
+        assert_eq!(parse_download_backend(""), DownloadBackend::Auto);
+        assert_eq!(parse_download_backend("nonsense"), DownloadBackend::Auto);
+        assert_eq!(parse_download_backend("native"), DownloadBackend::Native);
+    }
+
+    #[test]
+    fn auto_resolves_by_arl_presence() {
+        assert_eq!(DownloadBackend::Auto.resolve(true), DownloadBackend::Native);
+        assert_eq!(DownloadBackend::Auto.resolve(false), DownloadBackend::Sidecar);
+        // A concrete choice is never overridden by the ARL.
+        assert_eq!(DownloadBackend::Sidecar.resolve(true), DownloadBackend::Sidecar);
+        assert_eq!(DownloadBackend::Native.resolve(false), DownloadBackend::Native);
     }
 }
