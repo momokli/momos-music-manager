@@ -69,6 +69,18 @@ pub struct Session {
     gateway: gateway::GatewayApi,
 }
 
+#[cfg(test)]
+impl Session {
+    /// Test-only constructor: a real `Session` whose underlying client has the
+    /// given ARL placed in its cookie jar (no network I/O). Used to prove the
+    /// ARL never surfaces through the session's real types.
+    pub(crate) fn for_test(arl: &str) -> Self {
+        Session {
+            gateway: gateway::GatewayApi::for_test(arl),
+        }
+    }
+}
+
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
@@ -172,12 +184,27 @@ mod tests {
         assert_eq!(Quality::default(), Quality::Mp3_128);
     }
 
-    /// ARL hygiene: no error rendering may leak an ARL-like value.
+    /// A dummy ARL that must never surface anywhere.
+    const DUMMY_ARL: &str = "this-is-a-fake-arl-1234567890";
+
+    /// ARL hygiene: the ARL actually flows through the session path, and no
+    /// rendering of the session's real types or of any error leaks it.
     #[test]
     fn arl_never_in_error_rendering() {
-        // A dummy ARL that must never surface anywhere.
-        let dummy_arl = "this-is-a-fake-arl-1234567890";
-        let _ = dummy_arl; // the ARL is only ever passed to `login`.
+        // Build a real `Session` with the dummy ARL in its cookie jar; this is
+        // the exact path `login` takes after a successful `getUserData`.
+        let session = Session::for_test(DUMMY_ARL);
+
+        let session_debug = format!("{:?}", session);
+        let gateway_debug = format!("{:?}", session.gateway);
+        assert!(
+            !session_debug.contains(DUMMY_ARL),
+            "Session Debug leaked ARL: {session_debug}"
+        );
+        assert!(
+            !gateway_debug.contains(DUMMY_ARL),
+            "Gateway Debug leaked ARL: {gateway_debug}"
+        );
 
         let errors = vec![
             Error::InvalidArl,
@@ -186,18 +213,18 @@ mod tests {
             Error::RateLimited,
             Error::Api("some api message".to_string()),
             Error::Crypto("crypto detail".to_string()),
-            Error::Io(std::io::Error::new(std::io::ErrorKind::Other, "io detail")),
+            Error::Io(std::io::Error::other("io detail")),
         ];
 
         for err in &errors {
             let display = err.to_string();
             let debug = format!("{:?}", err);
             assert!(
-                !display.contains(dummy_arl),
+                !display.contains(DUMMY_ARL),
                 "Display leaked ARL: {display}"
             );
-            assert!(!debug.contains(dummy_arl), "Debug leaked ARL: {debug}");
-            // No ARL-like 192-char hex token either.
+            assert!(!debug.contains(DUMMY_ARL), "Debug leaked ARL: {debug}");
+            // No ARL-like fragment either.
             assert!(
                 !display.contains("fake-arl"),
                 "Display leaked ARL fragment: {display}"
@@ -205,11 +232,18 @@ mod tests {
         }
     }
 
-    /// A `Session` Debug render must never expose tokens verbatim.
+    /// A real `Session` Debug render must redact the tokens verbatim: it would
+    /// go red the moment the manual `Debug` were replaced by a derived one.
     #[test]
     fn session_debug_is_redacted() {
-        // Construct the Debug output shape without a live network session.
-        let rendered = format!("{:?}", "Session { api_token: \"<redacted>\", license_token: \"<redacted>\" }");
-        assert!(rendered.contains("<redacted>"));
+        let session = Session::for_test(DUMMY_ARL);
+        let rendered = format!("{:?}", session);
+        assert!(rendered.contains("<redacted>"), "not redacted: {rendered}");
+        assert!(!rendered.contains("test-api-token"), "api token leaked: {rendered}");
+        assert!(
+            !rendered.contains("test-license-token"),
+            "license token leaked: {rendered}"
+        );
+        assert!(!rendered.contains(DUMMY_ARL), "ARL leaked: {rendered}");
     }
 }

@@ -351,6 +351,28 @@ impl GatewayApi {
 }
 
 #[cfg(test)]
+impl GatewayApi {
+    /// Test-only constructor: builds the client and writes the ARL into the
+    /// cookie jar exactly like [`GatewayApi::new`], but performs **no network
+    /// I/O**. Lets offline tests exercise the real `Debug`/redaction surface
+    /// with a real ARL flowing through the session path.
+    pub(crate) fn for_test(arl: &str) -> Self {
+        let jar = Arc::new(Jar::default());
+        let url = "https://www.deezer.com".parse::<Url>().unwrap();
+        jar.add_cookie_str(&format!("arl={}", arl), &url);
+        let client = Client::builder()
+            .cookie_provider(jar)
+            .build()
+            .expect("test client builds");
+        Self {
+            client,
+            api_token: "test-api-token".to_string(),
+            license_token: "test-license-token".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
