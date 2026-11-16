@@ -326,6 +326,19 @@ impl GatewayApi {
     pub fn has_license_token(&self) -> bool {
         !self.license_token.is_empty()
     }
+
+    /// Fetch the raw (still encrypted) bytes behind a media URL.
+    ///
+    /// Status is mapped before the body is consumed.
+    pub(crate) async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        let response = self.client.get(url).send().await?;
+        let status = response.status();
+        if let Some(err) = Error::map_status(status.as_u16()) {
+            return Err(err);
+        }
+        let bytes = response.bytes().await?;
+        Ok(bytes.to_vec())
+    }
 }
 
 #[cfg(test)]
