@@ -1,4 +1,4 @@
-//! Native music-api integration: an ops console showing the live deemix queue
+//! Native music-api integration: an ops console showing the native queue view
 //! and the service event log, with action buttons (refresh states, order missing)
 //! that give toast feedback via htmx.
 
@@ -305,7 +305,6 @@ struct WorkerFrag {
     paused: bool,
     interval_secs: u64,
     max_attempts: i64,
-    backend: String,
     arl_offer: Option<String>,
     arl_lossless: Option<bool>,
 }
@@ -320,7 +319,6 @@ async fn worker_frag(State(st): State<AppState>, headers: HeaderMap) -> Response
         paused: w.paused,
         interval_secs: w.interval_secs,
         max_attempts: w.max_attempts,
-        backend: w.backend,
         arl_offer: w.arl_offer,
         arl_lossless: w.arl_lossless,
     })
@@ -585,26 +583,25 @@ async fn track_retry(
 mod tests {
     use super::*;
 
-    /// #511: the ops fragment advertises the download source and the ARL tier.
+    /// The ops fragment shows the ARL tier but no download-source badge any more.
     #[test]
-    fn worker_frag_renders_source_and_arl_tier() {
+    fn worker_frag_renders_arl_tier_without_source() {
         let html = WorkerFrag {
             ok: true,
             paused: false,
             interval_secs: 5,
             max_attempts: 3,
-            backend: "native".to_string(),
             arl_offer: Some("HiFi".to_string()),
             arl_lossless: Some(true),
         }
         .render()
         .unwrap();
-        assert!(html.contains("Quelle: native"), "source missing: {html}");
+        assert!(!html.contains("Quelle:"), "source badge must be gone: {html}");
         assert!(html.contains("ARL: HiFi"), "tier missing: {html}");
         assert!(html.contains("(lossless)"), "lossless flag missing: {html}");
     }
 
-    /// A native, ARL-less install still renders `Quelle: native` and an em dash.
+    /// A native, ARL-less install renders an em dash and no source badge.
     #[test]
     fn worker_frag_renders_unknown_tier_placeholder() {
         let html = WorkerFrag {
@@ -612,13 +609,12 @@ mod tests {
             paused: false,
             interval_secs: 5,
             max_attempts: 3,
-            backend: "native".to_string(),
             arl_offer: None,
             arl_lossless: None,
         }
         .render()
         .unwrap();
-        assert!(html.contains("Quelle: native"));
+        assert!(!html.contains("Quelle:"), "source badge must be gone: {html}");
         assert!(html.contains("ARL: –"), "placeholder missing: {html}");
     }
 }

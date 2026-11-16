@@ -30,7 +30,7 @@ async fn ops_page_and_fragments_render() {
     // Fragments render even without a token (empty states).
     let queue = get(&app, &cookie, "/music-api/queue").await;
     assert!(
-        queue.contains("Queue leer"),
+        queue.contains("Native Queue"),
         "empty queue fragment: {queue}"
     );
     let logs = get(&app, &cookie, "/music-api/logs").await;

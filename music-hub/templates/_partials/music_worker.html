@@ -9,7 +9,6 @@
     Pausieren
 </button>
 {% endif %} {% if ok %}
-<span class="hub-badge">Quelle: {{ backend }}</span>
 {% if let Some(offer) = arl_offer %}
 <span class="hub-badge"
     >ARL: {{ offer }}{% if let Some(l) = arl_lossless %}{% if l %} (lossless){%

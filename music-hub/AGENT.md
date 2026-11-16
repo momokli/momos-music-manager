@@ -139,7 +139,7 @@ tar czf - -C music-hub --exclude target --exclude 'hub.db*' --exclude .env \
 - **Config priority**: env > `.env` > settings in DB (`hub_settings`, edited on `/admin`) > defaults.
 - **Admin-only settings page** `/admin` (`settings::SETTINGS` typed registry) stores API keys + the
   whole **ranking engine** config (see §7).
-- ⚠️ **Rotate secrets**: `DEEMIX_ARL` and `MUSIC_API_TOKEN` were once printed into a chat — the
+- ⚠️ **Rotate secrets**: `DEEZER_ARL` and `MUSIC_API_TOKEN` were once printed into a chat — the
   user should rotate them.
 
 ---
@@ -207,7 +207,7 @@ Migrations **001–024** (see `migrations/`). Highlights:
   - `hub_group_members(group_id, user_id, role owner|contributor|subscriber)`.
   - `hub_group_tags(tag_id, group_id, rank)` — **rank 0..5 lives here** (per group membership).
   - `hub_collectives(id, slug, name, icon, owner_user_id)` + `hub_collective_members`.
-- Other: `hub_settings`, `hub_task_history`, `hub_api_usage` (FreqBlog quota), `hub_deemix_downloads`.
+- Other: `hub_settings`, `hub_task_history`, `hub_api_usage` (FreqBlog quota), `hub_deemix_downloads` (**legacy table** — written by the removed deemix-sidecar era, no longer read).
 - Crawl-everything (048/049): `hub_track_audio(track_id, bpm, musical_key, camelot, energy, source, updated_at)` — flat read-model of the **vault's resolved best value** (music-api owns the vault; the hub only consumes `GET /vault/tracks?isrcs=`); `hub_crawl_state(kind, ref, state, …)` — TTL'd touch-cascade frontier (`kind` ∈ `artist` | `artist_top` | `album`); `hub_order_state(track_id, priority, ordered_at)` — idempotency ledger for music-api download-priority orders.
 - Metadata backfill (#354, migration **050**): `hub_track_features.metadata_checked_at TEXT` — TTL marker (7 days) for the api→hub BPM/key backfill. `music_api::metadata_range` reads
   `GET /metadata?isrcs=` and `features::backfill_from_music_api` UPSERTs hits into
