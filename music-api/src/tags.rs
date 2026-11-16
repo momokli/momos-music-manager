@@ -106,6 +106,17 @@ pub async fn read_tags(ffprobe: &str, path: &Path) -> Option<AudioTags> {
     Some(parse_ffprobe(&String::from_utf8_lossy(&output.stdout)))
 }
 
+/// Read the ISRC from `path`'s primary tag with `lofty` (`ItemKey::Isrc` maps
+/// to ID3v2 `TSRC` / Vorbis `ISRC`). `None` when the file has no readable tag or
+/// value. Complements [`read_tags`], which goes through `ffprobe`.
+pub fn read_isrc(path: &Path) -> Option<String> {
+    let tagged = lofty::read_from_path(path).ok()?;
+    tagged
+        .primary_tag()
+        .and_then(|t| t.get_string(&ItemKey::Isrc))
+        .map(str::to_string)
+}
+
 /// Write the ISRC into `path`'s primary tag, creating the tag when the file has
 /// none. One code path for both containers: `lofty` maps [`ItemKey::Isrc`] to
 /// ID3v2 `TSRC` (MP3) and the Vorbis comment `ISRC` (FLAC). Blocking file I/O is
@@ -155,10 +166,7 @@ mod tests {
 
     /// Read the ISRC back with `lofty` directly (ffprobe may be absent in CI).
     fn read_isrc_lofty(path: &Path) -> Option<String> {
-        let f = lofty::read_from_path(path).ok()?;
-        f.primary_tag()
-            .and_then(|t| t.get_string(&ItemKey::Isrc))
-            .map(str::to_string)
+        super::read_isrc(path)
     }
 
     #[tokio::test]

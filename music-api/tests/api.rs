@@ -32,6 +32,7 @@ async fn harness() -> Harness {
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
         download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
+        deezer_base: None,
     })
     .await
 }
@@ -44,6 +45,7 @@ async fn harness_with(analyzer_url: Option<String>) -> Harness {
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
         download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
+        deezer_base: None,
     })
     .await
 }
@@ -54,6 +56,7 @@ struct HarnessOpts {
     deezer_gw_base: String,
     download_backend: music_api::config::DownloadBackend,
     native_fake: Option<Arc<music_api::worker::NativeFake>>,
+    deezer_base: Option<String>,
 }
 
 /// Full-control harness builder (ARL + gw-light base for tier tests).
@@ -72,7 +75,9 @@ async fn harness_opts(opts: HarnessOpts) -> Harness {
         data_dir: root.clone(),
         store_root: root.join("objects"),
         store_max_upload_bytes: music_api::store::DEFAULT_MAX_UPLOAD_BYTES,
-        deezer_base: "http://127.0.0.1:1".to_string(),
+        deezer_base: opts
+            .deezer_base
+            .unwrap_or_else(|| "http://127.0.0.1:1".to_string()),
         deezer_gw_base: opts.deezer_gw_base,
         ffmpeg: "ffmpeg".to_string(),
         ffprobe: "ffprobe".to_string(),
@@ -3456,6 +3461,7 @@ async fn account_reports_hi_tier_from_gw_light() {
         deezer_gw_base: gw,
         download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
+        deezer_base: None,
     })
     .await;
 
@@ -3530,6 +3536,7 @@ async fn account_reports_free_tier_without_flac() {
         deezer_gw_base: gw,
         download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
+        deezer_base: None,
     })
     .await;
 
@@ -3557,6 +3564,7 @@ async fn account_returns_bad_gateway_when_gw_light_unreachable() {
         deezer_gw_base: "http://127.0.0.1:1".to_string(),
         download_backend: music_api::config::DownloadBackend::Auto,
         native_fake: None,
+        deezer_base: None,
     })
     .await;
 
@@ -3571,5 +3579,236 @@ async fn account_returns_bad_gateway_when_gw_light_unreachable() {
         v["error"].as_str().unwrap().contains("deezer tier lookup failed"),
         "error was {:?}",
         v["error"]
+    );
+}
+
+// ── Native Deezer download (#510, M2) ─────────────────────────────────────────
+//
+// The native path is driven end-to-end without any real Deezer/ARL: a loopback
+// mock answers the ISRC lookup and a `NativeFake` supplies the audio bytes.
+
+/// Canned Deezer public-API track lookup (no auth, loopback only).
+async fn deezer_track_mock() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "id": 3135556,
+        "readable": true,
+        "title": "Sudno",
+        "artist": { "id": 42, "name": "Molchat Doma" },
+        "album": { "id": 7, "title": "Etazhi" }
+    }))
+}
+
+/// Spawn the mock Deezer API on an ephemeral port; returns its base URL. The
+/// lookup hits `/track/isrc:<isrc>` (one path segment), captured as a whole.
+async fn spawn_deezer_mock() -> String {
+    let app = Router::new().route("/track/{rest}", get(deezer_track_mock));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+/// Fixture bytes that `lofty` can tag (real container).
+fn fixture_bytes(name: &str) -> Vec<u8> {
+    std::fs::read(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+}
+
+/// A harness with the native path wired to a loopback Deezer mock + fake bytes.
+async fn harness_native(
+    deezer_base: String,
+    fake: music_api::worker::NativeFake,
+    backend: music_api::config::DownloadBackend,
+    arl: &str,
+) -> Harness {
+    harness_opts(HarnessOpts {
+        analyzer_url: None,
+        deemix_arl: arl.to_string(),
+        deezer_gw_base: "http://127.0.0.1:1".to_string(),
+        download_backend: backend,
+        native_fake: Some(Arc::new(fake)),
+        deezer_base: Some(deezer_base),
+    })
+    .await
+}
+
+/// Poll until the row leaves the in-flight states *and* its run-log line is in
+/// (the log is written after `mark_ready`, so state alone races).
+async fn wait_settled(state: &Arc<AppState>, isrc: &str) {
+    for _ in 0..500 {
+        let t = db::get_track(&state.pool, isrc).await.unwrap().unwrap();
+        let logged = state
+            .logs
+            .recent(50)
+            .iter()
+            .any(|l| l.msg.starts_with(&format!("{isrc}: ready (native,")));
+        if t.state != "pending" && t.state != "downloading" && logged {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for {isrc} to settle");
+}
+
+/// Read the ISRC back with `lofty` (ffprobe is not guaranteed in CI).
+fn read_isrc(path: &str) -> Option<String> {
+    music_api::tags::read_isrc(Path::new(path))
+}
+
+#[tokio::test]
+async fn native_download_lands_ready_with_isrc_and_serves_file() {
+    let deezer = spawn_deezer_mock().await;
+    let fake = music_api::worker::NativeFake {
+        bytes: fixture_bytes("tiny.flac"),
+        extension: "flac".to_string(),
+        no_flac: false,
+    };
+    let h = harness_native(
+        deezer,
+        fake,
+        music_api::config::DownloadBackend::Native,
+        "",
+    )
+    .await;
+
+    create_order(&h.app, &["USRC17607839"]).await;
+    music_api::worker::resolve_pending(&h.state).await.unwrap();
+    wait_settled(&h.state, "USRC17607839").await;
+
+    let t = db::get_track(&h.state.pool, "USRC17607839")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.state, "ready", "track did not land ready: {t:?}");
+    assert_eq!(t.source_format.as_deref(), Some("flac"));
+    assert_eq!(
+        t.deemix_uuid.as_deref(),
+        Some("native:USRC17607839"),
+        "native sentinel missing"
+    );
+
+    // The stored file carries the ISRC.
+    let path = t.path_flac.as_deref().expect("flac path");
+    assert_eq!(read_isrc(path).as_deref(), Some("USRC17607839"));
+
+    // ...and it is servable over the API.
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/isrc/USRC17607839/flac")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.starts_with(b"fLaC"), "not a FLAC body");
+
+    // Run-log line: quality + source, no ARL.
+    let logs = h.state.logs.recent(50);
+    assert!(
+        logs.iter().any(|l| l.msg.contains("ready (native, flac,")),
+        "run-log line missing: {:?}",
+        logs.iter().map(|l| &l.msg).collect::<Vec<_>>()
+    );
+    assert!(
+        logs.iter().all(|l| !l.msg.contains("DEEMIX_ARL=")),
+        "log leaked the ARL"
+    );
+}
+
+#[tokio::test]
+async fn native_download_no_lossless_tier_falls_back_to_320() {
+    let deezer = spawn_deezer_mock().await;
+    // `no_flac` simulates an account without the lossless tier.
+    let fake = music_api::worker::NativeFake {
+        bytes: fixture_bytes("tiny.mp3"),
+        extension: "mp3".to_string(),
+        no_flac: true,
+    };
+    let h = harness_native(
+        deezer,
+        fake,
+        music_api::config::DownloadBackend::Native,
+        "",
+    )
+    .await;
+
+    create_order(&h.app, &["USRC17607839"]).await;
+    music_api::worker::resolve_pending(&h.state).await.unwrap();
+    wait_settled(&h.state, "USRC17607839").await;
+
+    let t = db::get_track(&h.state.pool, "USRC17607839")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.state, "ready");
+    assert_eq!(
+        t.source_format.as_deref(),
+        Some("mp3-320"),
+        "expected the 320 fallback"
+    );
+    assert!(t.path_320.is_some(), "320 path missing");
+    let logs = h.state.logs.recent(50);
+    assert!(
+        logs.iter().any(|l| l.msg.contains("ready (native, mp3-320,")),
+        "fallback run-log line missing"
+    );
+}
+
+#[tokio::test]
+async fn advance_downloads_ignores_native_rows() {
+    let h = harness().await; // sidecar default
+    create_order(&h.app, &["AEA0D1846146"]).await;
+    db::mark_downloading(
+        &h.state.pool,
+        "AEA0D1846146",
+        "native:AEA0D1846146",
+        db::now() + 60,
+    )
+    .await
+    .unwrap();
+
+    // With only a native row in flight, no deemix queue is polled and the row is
+    // left untouched (its own background task owns it).
+    music_api::worker::advance_downloads(&h.state).await.unwrap();
+    let t = db::get_track(&h.state.pool, "AEA0D1846146")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.state, "downloading");
+    assert_eq!(t.deemix_uuid.as_deref(), Some("native:AEA0D1846146"));
+}
+
+#[tokio::test]
+async fn sidecar_backend_does_not_take_the_native_path() {
+    let deezer = spawn_deezer_mock().await;
+    let fake = music_api::worker::NativeFake {
+        bytes: fixture_bytes("tiny.flac"),
+        extension: "flac".to_string(),
+        no_flac: false,
+    };
+    // `auto` with no ARL resolves to sidecar: the native fake must be ignored.
+    let h = harness_native(
+        deezer,
+        fake,
+        music_api::config::DownloadBackend::Auto,
+        "",
+    )
+    .await;
+
+    create_order(&h.app, &["USRC17607839"]).await;
+    music_api::worker::resolve_pending(&h.state).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let t = db::get_track(&h.state.pool, "USRC17607839")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(t.state, "ready", "native path ran under the sidecar backend");
+    assert!(
+        !t.deemix_uuid
+            .as_deref()
+            .is_some_and(|u| u.starts_with("native:")),
+        "native sentinel written under the sidecar backend"
     );
 }
