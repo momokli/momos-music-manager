@@ -1,14 +1,14 @@
 # Plan: native-deezer-download
 
-**Status**: proposed
+**Status**: in progress (M1 #509, M2 #510 gemergt; **M3 = deemix ersatzlos entfernen**, offen)
 **Branch**: `feat/native-deezer-download`
 **Ready for review**: yes
 **Depends on**: nothing (Rusteer ist MIT, unsere `deezer.rs`-Metadaten sind schon nativ)
 **Migration needed**: nein (nutzt bestehende `store_objects`/`sat_track_download`)
 
-> **Ziel**: music-api lädt Deezer-Audio **selbst** (128/320/FLAC) — ohne deemix-Sidecar, ohne
-> Node, ohne Docker, ohne `/api/getQueue`-Polling. Der Sidecar bleibt als Fallback, yt-dlp bleibt
-> für YT/SoundCloud.
+> **Ziel**: music-api lädt Deezer-Audio **selbst** (128/320/FLAC). **deemix wird ersatzlos
+> entfernt** — kein Sidecar, kein Fallback, kein Node, kein Docker, kein `/api/getQueue`-Polling.
+> yt-dlp bleibt für YT/SoundCloud.
 
 ## Ausgangslage (verifiziert 2026-11-16)
 
@@ -68,21 +68,34 @@ Modul-Tausch, keine Architekturänderung.
 `crypto/`-Modul; der Aufruf bleibt hinter dem bestehenden Worker-Interface.
 
 Unsere Seite bleibt unverändert: Queue/Prioritäten, Store/Vault, ISRC-Mapping, Tagging-Normalisierung,
-yt-dlp-Fallback. `deemix.rs` bleibt als **optionaler Fallback**, wenn `DEEMIX_URL` gesetzt ist.
+yt-dlp-Fallback. **`deemix.rs` wird gelöscht** — es gibt genau einen Download-Pfad (native), keinen
+Schalter, keinen Fallback (Entscheidung 2026-11-16).
+
+## Was „deemix raus" konkret mitnimmt (verifiziert 2026-11-16)
+
+`grep -rc deemix music-api/src music-api/tests` → **187 Treffer** (`worker.rs` 84, `config.rs` 16, `tests/api.rs` 25, `api.rs` 6; `deemix.rs` selbst 170 Zeilen). Zwei Stellen sind nicht bloß Löschung, sondern **Ersatz**:
+
+| Abhängigkeit                                                                                   | Warum sie nicht einfach mitgelöscht werden darf                                                                                                                 | Ersatz                                                                                                                                                                                                                                                                                  |
+| ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /queue` (`api.rs:427`)                                                                    | enthält einen Sidecar-Zweig, der die **live deemix-Queue** liefert; die Hub-Ops-UI liest den Endpoint über `music-hub/src/music_ops.rs:19` (`/music-api/queue`) | der native Zweig existiert seit #517 (antwortet aus der DB) — der Sidecar-Zweig fliegt raus, mit `backend`/`sidecarConfigured`                                                                                                                                                          |
+| Artist-Order-Phase (`advance_crawl_leads` → `submit_artist_order` → `ingest_artist_downloads`) | existiert **ausschließlich** über `deemix::add_to_queue(artist_url)` plus Dateisuche in `deemix_download_dir`                                                   | entfällt mit dem Sidecar: `crawl:deezer`-Leads erzeugt im Repo nur `music-api/tests/api.rs:2113`, hub und kellner **nicht**. Wenn `plans/proposed/hub-crawl-everything.md` Diskografien will, kommt das als eigener Schritt (Deezer artist → albums → tracks → ISRCs in die Work-Queue) |
+
+`DEEMIX_ARL` ist **keine** deemix-Abhängigkeit: die native Session authentifiziert sich damit (`worker.rs:150,162`, `lib.rs:103`). Die Variable wird nur umbenannt, das Secret bleibt dasselbe.
 
 ## Meilensteine
 
-| M                 | Inhalt                                                                                                                                                                  | Akzeptanz                                                                             |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| **M1**            | `deezer_dl`-Modul (vendored Rusteer): ARL-Session, `download_track(id, quality)` → Bytes + Datei; Fehlerbilder (invalid ARL, kein Lossless-Tier, 403/404)               | Unit-Tests für URL-/Key-Bau + Fehler-Mapping; Live-Matrix 128/320/flac grün (manuell) |
-| **M2**            | Integration in den Worker: statt `deemix::add_to_queue` direkt laden → `store_objects`/`sat_track_download`; **ISRC-Tag** setzen (`tags.rs`); Status/Timings im Run-Log | Bestehende Worker-Tests grün; ein Track landet mit korrektem ISRC im Store            |
-| **M3**            | Sidecar entkoppeln: `DEEMIX_URL` optional, Queue-Polling nur im Sidecar-Modus; Health zeigt „native" vs. „sidecar"                                                      | Ohne Docker laufen Downloads; mit `DEEMIX_URL` unverändert als Fallback               |
-| **M4** (optional) | **Qobuz** als Lossless-Quelle (unverschlüsselte FLACs, nur signierte Requests) — echtes Hi-Res ohne Decrypt                                                             | Spike-Ergebnis + Entscheidung; nur mit vorhandenem Abo                                |
+| M                 | Inhalt                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Akzeptanz                                                                                                                 |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **M1**            | `deezer_dl`-Modul (vendored Rusteer): ARL-Session, `download_track(id, quality)` → Bytes + Datei; Fehlerbilder (invalid ARL, kein Lossless-Tier, 403/404)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Unit-Tests für URL-/Key-Bau + Fehler-Mapping; Live-Matrix 128/320/flac grün (manuell)                                     |
+| **M2**            | Integration in den Worker: statt `deemix::add_to_queue` direkt laden → `store_objects`/`sat_track_download`; **ISRC-Tag** setzen (`tags.rs`); Status/Timings im Run-Log                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Bestehende Worker-Tests grün; ein Track landet mit korrektem ISRC im Store                                                |
+| **M3**            | **deemix ersatzlos entfernen**: `deemix.rs` löschen; Sidecar-Queue-Polling und die Artist-Order-Phase (die nur über `deemix::add_to_queue(artist_url)` existiert) raus; **#517 zurückbauen** (das hat die Optionalität gerade eingebaut: `DOWNLOAD_BACKEND`-Default `auto`, `sidecarConfigured`/`backend` in `/health` + `/worker`, Hub-Badge „Quelle", `DEEMIX_URL`-Default); `GET /queue` auf den nativen Zweig reduzieren; `DOWNLOAD_BACKEND` ersatzlos streichen; Env entkoppeln (`DEEMIX_ARL` → `DEEZER_ARL`, `DEEMIX_BITRATE` → Qualitätswahl, `DEEMIX_URL`/`DEEMIX_DOWNLOAD_DIR` streichen); `deploy/deemix-api.compose.yml` + Deemix-Schritte in `setup.sh` löschen; README/`.env.example`/`AGENT.md`/`docs/DECISIONS.md` auf den einen Pfad umschreiben | `grep -ri deemix music-api/src` leer; Downloads laufen ohne jede deemix-Config; `/music-api/queue` zeigt die native Queue |
+| **M4** (optional) | **Qobuz** als Lossless-Quelle (unverschlüsselte FLACs, nur signierte Requests) — echtes Hi-Res ohne Decrypt                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Spike-Ergebnis + Entscheidung; nur mit vorhandenem Abo                                                                    |
 
 ## Risiken
 
 - **Protokoll-Drift**: Deezer-Internals ändern sich; Rusteer ist klein → Fork/Vendor heißt, wir
-  patchen selbst. Abgefedert durch yt-dlp-Fallback und den optionalen Sidecar.
+  patchen selbst. Es gibt **keinen** Sidecar mehr als Netz — verbleibender Fallback ist yt-dlp
+  (anderer Provider), sonst schlägt der Download sichtbar fehl.
 - **Lizenz-Hygiene**: MIT (Rusteer) einhalten; aus deemix(-remastered, GPL-3.0) **keinen** Code
   übernehmen, nur Verhalten ableiten.
 - **ARL-Handling**: Tokens laufen ab (der ARL in der lokalen Shell war abgelaufen, der auf dem
@@ -91,9 +104,11 @@ yt-dlp-Fallback. `deemix.rs` bleibt als **optionaler Fallback**, wenn `DEEMIX_UR
 
 ## Akzeptanz (Plan)
 
-- [ ] Downloads funktionieren **ohne** Docker/Node (deemix-Sidecar gestoppt, Store bekommt Dateien)
+- [ ] Downloads funktionieren **ohne** jede deemix-Installation (kein Container, kein Port, kein Node)
 - [ ] Qualitätsmatrix 128/320/flac gegen echten ARL belegt (manuell, dokumentiert)
 - [ ] ISRC-Tag in MP3 und FLAC vorhanden; Vault findet die Datei über ISRC
-- [ ] Mit gesetzter `DEEMIX_URL` verhält sich alles wie heute (Fallback-Pfad getestet)
+- [ ] `grep -ri deemix music-api/src` ist leer (Code, Config, Deploy, Doku) — es gibt keinen Pfad-Schalter mehr
+- [ ] Hub-Ops-UI (`/music-api/queue`) zeigt die native Work-Queue statt der deemix-Queue
+- [ ] `DEEMIX_ARL` ist zu `DEEZER_ARL` geworden; der alte Name wird mit Warnung weiter akzeptiert (kein Bruch beim Prod-Deploy)
 - [ ] Keine Secrets in Logs (ARL nie geloggt, auch nicht in Fehlermeldungen)
 - [ ] MIT-/Fremd-Lizenzhinweise im Repo vorhanden
