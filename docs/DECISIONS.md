@@ -2137,3 +2137,69 @@ ersatzlos.
   Node; yt-dlp bleibt der Pfad für Nicht-Deezer-Quellen.
 - **Historie bleibt lesbar:** die alten Tabellen werden nicht gelöscht; die
   historischen ADRs 038/064/065/067 werden nicht umgeschrieben.
+
+---
+
+## ADR-083: Spelunke-Hub — Apple Music als Playlist-/Metadaten-Quelle (kein Acquire, MUT ohne Refresh)
+
+**Date**: 2026-11-16
+**Status**: Proposed (entscheidet `plans/proposed/apple-music-source.md`)
+**Relates**: ADR-065 (music-api = Download-Autorität), ADR-074 (Hub, lokale Accounts),
+ADR-075 (Spelunke Tag-Layer), ADR-079 (music-api = ISRC→{BPM,Key}-Autorität),
+ADR-065 + `plans/proposed/unified-work-queue.md` (`record_source`-Vokabular)
+
+**Context**: Der Hub soll Apple Music anbinden, damit Nutzer ihre Apple-Playlists im Hub
+sehen und fehlende Tracks über den bestehenden ISRC-Order-Pfad beschaffen können. Zwei
+Eigenschaften von Apple Music begrenzen den Entwurfsraum hart: (a) kein Audio (FairPlay)
+und keine Audio-Features — Apple kann Acquire- und BPM/Key-Autorität nicht übernehmen;
+(b) der Music User Token ist ~6 Monate gültig, hat **keinen** Refresh und ist nur über
+MusicKit (Browser) erneuerbar. Zusätzlich liefern Apple-_Library_-Objekte kein `isrc`,
+nur `playParams.catalogId` — die ISRC entsteht erst über einen Katalog-Lookup.
+
+**Decision**:
+
+1. **Rolle: Quelle, nicht Ziel.** Apple ist Playlist- und Metadaten-Quelle; music-api
+   bleibt der einzige Downloader und die einzige BPM/Key-Autorität. `POST /orders` wird
+   **nicht** um einen `source`-Wert erweitert — Apple-Tracks kommen als ISRC an.
+2. **Zwei Stufen, Stufe 0 zuerst.** (0) öffentliche Apple-Playlist per URL importieren +
+   Katalog-Metadaten, allein mit dem Developer-Token; (1) MusicKit-Connect für die
+   persönliche Bibliothek. Stufe 0 ist ohne User-Token nützlich und damit der Fallback,
+   falls `authorize()` scheitert.
+3. **Service-String `apple_music` im Hub, `record_source='applemusic'` im Vault.** Die
+   Inkonsistenz ist bewusst (Vault-Vokabular folgt `unified-work-queue.md`); sie lebt in
+   genau zwei Konstanten und wird nur an der Vault-Grenze umgerechnet.
+4. **ISRC-Auflösung als eigener Pipeline-Schritt.** `playParams.catalogId` →
+   `catalog_songs_by_ids` (300er-Batches) → `hub_tracks.isrc`, mit negativem Cache
+   (`hub_apple_isrc_misses`, TTL) für Uploads ohne Katalogeintrag. `crawl::touch_tracks`
+   läuft **nach** der Auflösung — vorher ist es ein stiller No-Op (`crawl.rs:116-118`).
+5. **`hub_service_accounts` wird rebuilt** (SQLite kann den CHECK nicht `ALTER`n). Der
+   Rebuild ist gefahrlos, solange **nichts** die Tabelle referenziert; das wird als
+   Design-Regel in `music-hub/AGENT.md` festgeschrieben. `-- no-transaction` ist bei
+   sqlx-SQLite wirkungslos, `PRAGMA foreign_keys=OFF` daher keine Option.
+6. **`refresh_token` bleibt bei Apple bewusst NULL** — es gibt keinen Refresh. Folge:
+   `needs_reconnect` muss service-abhängig werden, sonst meldet `/api/hub/me` dauerhaft
+   „reconnect" (`api.rs:536-539`).
+7. **Metadaten-Provenienz nicht über `source`.** Apple-Pushes lassen
+   `MetadataItem.source` leer — ein non-null-Wert überschreibt die Herkunft der
+   BPM/Key-Werte (`db.rs:991`) — und setzen stattdessen `record_source='applemusic'`.
+
+**Consequences**:
+
+- `music-hub` bekommt mit `p256` seine erste Krypto-Dependency (ES256-Signatur des
+  Developer-Tokens). `cargo build --locked` bleibt das Gate, `Cargo.lock` wird
+  mitcommittet.
+- Migration **056** ist die einzige irreversible Stelle des Features: Tabellen-Rebuild
+  von `hub_service_accounts`. Sie friert nach dem ersten Deploy ein (Checksummen).
+- **Design-Regel neu:** keine Tabelle/View darf `hub_service_accounts` referenzieren,
+  sonst ist der Rebuild-Weg versperrt (`PRAGMA foreign_keys=OFF` ist unter sqlx-SQLite
+  nicht verfügbar). Gehört in `music-hub/AGENT.md`.
+- v1-Lücke bleibt bewusst offen: `service='spotify'` ist an ~54 Stellen hartcodiert.
+  Apple-Playlists sind ingeste't, sichtbar und als Tag-Quelle nutzbar — aber nicht
+  Push-Ziel, nicht Now-Playing, nicht überall gefiltert.
+- Apple ist die erste Quelle mit periodischer Nutzer-Interaktion (6-Monats-Token). Ohne
+  Reconnect-Banner und `reauth`-Status stirbt der Sync lautlos — das ist der Preis
+  gegenüber Spotify.
+- music-api wird nur minimal angefasst (Wire-Felder, `record_source`-Durchreichung,
+  `track_detail`-Härtung), weil `POST /metadata` bereits quellenagnostisch ist.
+- Rate-Limits bleiben empirisch: Apple publiziert keine Zahlen → Drosselung + 429-Backoff
+  statt Quota-Modell.
