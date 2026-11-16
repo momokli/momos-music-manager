@@ -5,6 +5,10 @@
 //! `call_api`/`get_media_url` now check the HTTP status *before* parsing the
 //! body, and the ARL is never stored on the struct (only placed in the cookie
 //! jar).
+//!
+//! This vendored surface is retained in full even where the M1 track-download
+//! path does not call every helper.
+#![allow(dead_code)]
 
 use reqwest::{cookie::Jar, Client, Url};
 use serde_json::{json, Value};

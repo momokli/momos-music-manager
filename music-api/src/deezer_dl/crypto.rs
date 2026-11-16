@@ -11,6 +11,10 @@
 //! - Every 3rd block (0, 3, 6, 9...) is encrypted with Blowfish CBC
 //! - Other blocks are left unencrypted
 //! - The encryption key is derived from the song ID
+//!
+//! This vendored surface is retained in full even where the M1 track-download
+//! path does not call every helper.
+#![allow(dead_code)]
 
 use md5::{Digest, Md5};
 use std::fs::File;
