@@ -93,10 +93,10 @@ attachment; filename="order-<orderId>.zip"`), instead of pulling `GET
 Tracks that are not currently servable (not ready, file missing) are **skipped
 silently** — the archive never fails because of one missing track.
 
-| Query `format` | Behaviour |
-|----------------|-----------|
-| `flac` / `320` / `128` | Only that format; tracks without it are skipped. |
-| *(omitted)* | Best-available per track: `flac` → `320` → `128`. |
+| Query `format`         | Behaviour                                         |
+| ---------------------- | ------------------------------------------------- |
+| `flac` / `320` / `128` | Only that format; tracks without it are skipped.  |
+| _(omitted)_            | Best-available per track: `flac` → `320` → `128`. |
 
 Entry names are cosmetic: `"<artist> - <title>"` sanitised (path/control
 characters stripped, whitespace collapsed, ~150 chars max), falling back to the
@@ -104,13 +104,13 @@ track key when both are empty; collisions get a ` (n)` suffix. The extension
 follows the format used (`.flac` / `.mp3`). The client keeps its own
 ISRC↔file mapping.
 
-| Status | When |
-|--------|------|
-| `200` | Order exists and ≥1 track is servable → ZIP. |
-| `400` | `format` is set but not `flac`/`320`/`128`. |
-| `404` | Order id is unknown. |
-| `409` | Order exists but no track is servable in the selected (or best-available) format. Body: `{"error":"no downloadable tracks"}`. |
-| `500` | DB/IO error (temp file, ZIP write). |
+| Status | When                                                                                                                          |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `200`  | Order exists and ≥1 track is servable → ZIP.                                                                                  |
+| `400`  | `format` is set but not `flac`/`320`/`128`.                                                                                   |
+| `404`  | Order id is unknown.                                                                                                          |
+| `409`  | Order exists but no track is servable in the selected (or best-available) format. Body: `{"error":"no downloadable tracks"}`. |
+| `500`  | DB/IO error (temp file, ZIP write).                                                                                           |
 
 ### `GET /orders?status=open|done|partial&limit=50`
 
@@ -135,11 +135,26 @@ Read-only view of the backup store for one ISRC. The ISRC is normalised first.
   "isrc": "AEA0D1846146",
   "count": 3,
   "variants": [
-    { "hash": "…", "kind": "flac", "size": 123, "contentType": "audio/flac",
-      "name": "AEA0D1846146.flac", "originalPath": null,
-      "stemType": null, "groupKey": null, "createdAt": 1700000000 }
+    {
+      "hash": "…",
+      "kind": "flac",
+      "size": 123,
+      "contentType": "audio/flac",
+      "name": "AEA0D1846146.flac",
+      "originalPath": null,
+      "stemType": null,
+      "groupKey": null,
+      "createdAt": 1700000000
+    }
   ],
-  "groups": [ { "groupKey": "grp-1", "stems": [ /* … */ ] } ]
+  "groups": [
+    {
+      "groupKey": "grp-1",
+      "stems": [
+        /* … */
+      ]
+    }
+  ]
 }
 ```
 
@@ -174,8 +189,14 @@ Returns the tier of the account behind `DEEMIX_ARL`, so the hub can warn when
 FLAC is impossible:
 
 ```json
-{ "offer": "Deezer HiFi", "lossless": true, "high": true, "low": true,
-  "userId": 1234567, "canStreamFlac": true }
+{
+  "offer": "Deezer HiFi",
+  "lossless": true,
+  "high": true,
+  "low": true,
+  "userId": 1234567,
+  "canStreamFlac": true
+}
 ```
 
 The tier is probed once at startup (spawned, off the boot path) and cached; the
@@ -413,8 +434,13 @@ Download backend: `DOWNLOAD_BACKEND` selects where Deezer audio comes from —
 `native` downloads via the vendored `deezer_dl` module, `sidecar` hands the
 track to the deemix instance behind `DEEMIX_URL`, and `auto` resolves per
 environment (native when `DEEMIX_ARL` is set, else sidecar). The **default is
-`sidecar`**, which keeps the pre-existing deemix pipeline; `native` is an
-explicit opt-in. Blank or unknown values fall back to `sidecar`.
+`native`**: the API acquires Deezer audio itself, with no sidecar, no Node and no
+Docker. Blank or unknown values also fall back to `native`.
+
+> **Upgrade note (0.5.0).** Before 0.5.0 every download went through the deemix
+> sidecar. An existing installation therefore switches to the native path on
+> upgrade without any operator action. The sidecar stays available as an
+> explicit fallback: set `DOWNLOAD_BACKEND=sidecar` to keep the old pipeline.
 
 Queue tuning: `QUEUE_MAX_ATTEMPTS` (default `3`), `QUEUE_RETRY_BASE_SECS` (`60`)
 and `QUEUE_RETRY_MAX_SECS` (`1800`) shape the bounded retry backoff. The download

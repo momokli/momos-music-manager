@@ -6,12 +6,12 @@ use std::time::Duration;
 /// Where Deezer audio is acquired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DownloadBackend {
-    /// Download natively via the vendored `deezer_dl` module (explicit opt-in).
-    Native,
-    /// Hand the track to the deemix sidecar (`DEEMIX_URL`). This is the default.
+    /// Download natively via the vendored `deezer_dl` module. This is the default.
     #[default]
+    Native,
+    /// Hand the track to the deemix sidecar (`DEEMIX_URL`) — explicit fallback.
     Sidecar,
-    /// Explicit opt-in: native when an ARL is configured, else sidecar.
+    /// Pick per environment: native when an ARL is configured, else sidecar.
     Auto,
 }
 
@@ -53,7 +53,7 @@ pub struct Config {
     /// Deezer ARL used to authenticate with deemix.
     pub deemix_arl: String,
     /// Where Deezer audio comes from: native, sidecar, or auto. Defaults to
-    /// `sidecar`.
+    /// `native`.
     pub download_backend: DownloadBackend,
     /// Requested deemix bitrate (1 = 128, 3 = 320, 9 = FLAC).
     pub deemix_bitrate: u8,
@@ -208,19 +208,17 @@ fn analyzer_url_from_env() -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// Parse `DOWNLOAD_BACKEND`: blank/unknown → `Sidecar` (unknown warns once).
+/// Parse `DOWNLOAD_BACKEND`: blank/unknown → `Native` (unknown warns once).
 fn parse_download_backend(raw: &str) -> DownloadBackend {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return DownloadBackend::Sidecar;
+        return DownloadBackend::Native;
     }
     match DownloadBackend::parse(trimmed) {
         Some(b) => b,
         None => {
-            tracing::warn!(
-                "unknown DOWNLOAD_BACKEND '{trimmed}' — defaulting to sidecar"
-            );
-            DownloadBackend::Sidecar
+            tracing::warn!("unknown DOWNLOAD_BACKEND '{trimmed}' — defaulting to native");
+            DownloadBackend::Native
         }
     }
 }
@@ -251,27 +249,45 @@ mod tests {
 
     #[test]
     fn download_backend_parses_case_insensitively() {
-        assert_eq!(DownloadBackend::parse("native"), Some(DownloadBackend::Native));
-        assert_eq!(DownloadBackend::parse("Sidecar"), Some(DownloadBackend::Sidecar));
-        assert_eq!(DownloadBackend::parse(" AUTO "), Some(DownloadBackend::Auto));
+        assert_eq!(
+            DownloadBackend::parse("native"),
+            Some(DownloadBackend::Native)
+        );
+        assert_eq!(
+            DownloadBackend::parse("Sidecar"),
+            Some(DownloadBackend::Sidecar)
+        );
+        assert_eq!(
+            DownloadBackend::parse(" AUTO "),
+            Some(DownloadBackend::Auto)
+        );
         assert_eq!(DownloadBackend::parse("qobuz"), None);
         assert_eq!(DownloadBackend::parse(""), None);
     }
 
     #[test]
-    fn download_backend_defaults_to_sidecar() {
-        assert_eq!(DownloadBackend::default(), DownloadBackend::Sidecar);
-        assert_eq!(parse_download_backend(""), DownloadBackend::Sidecar);
-        assert_eq!(parse_download_backend("nonsense"), DownloadBackend::Sidecar);
-        assert_eq!(parse_download_backend("native"), DownloadBackend::Native);
+    fn download_backend_defaults_to_native() {
+        assert_eq!(DownloadBackend::default(), DownloadBackend::Native);
+        assert_eq!(parse_download_backend(""), DownloadBackend::Native);
+        assert_eq!(parse_download_backend("nonsense"), DownloadBackend::Native);
+        assert_eq!(parse_download_backend("sidecar"), DownloadBackend::Sidecar);
     }
 
     #[test]
     fn auto_resolves_by_arl_presence() {
         assert_eq!(DownloadBackend::Auto.resolve(true), DownloadBackend::Native);
-        assert_eq!(DownloadBackend::Auto.resolve(false), DownloadBackend::Sidecar);
+        assert_eq!(
+            DownloadBackend::Auto.resolve(false),
+            DownloadBackend::Sidecar
+        );
         // A concrete choice is never overridden by the ARL.
-        assert_eq!(DownloadBackend::Sidecar.resolve(true), DownloadBackend::Sidecar);
-        assert_eq!(DownloadBackend::Native.resolve(false), DownloadBackend::Native);
+        assert_eq!(
+            DownloadBackend::Sidecar.resolve(true),
+            DownloadBackend::Sidecar
+        );
+        assert_eq!(
+            DownloadBackend::Native.resolve(false),
+            DownloadBackend::Native
+        );
     }
 }
