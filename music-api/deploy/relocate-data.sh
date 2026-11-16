@@ -35,7 +35,6 @@ def setkey(lines, key, val):
 
 lines = p.read_text().splitlines()
 lines = setkey(lines, "DATA_DIR", "/data/public/media/music-api")
-lines = setkey(lines, "DEEMIX_DOWNLOAD_DIR", "/data/public/media/music-api/incoming")
 lines = setkey(lines, "DATABASE_URL", "/opt/music-api/data/music-api.db")
 p.write_text("\n".join(lines) + "\n")
 print("   env updated")
@@ -45,12 +44,7 @@ echo "== 3. systemd unit path =="
 sudo sed -i 's|^ReadWritePaths=.*|ReadWritePaths=/opt/music-api/data /data/public/media/music-api|' /etc/systemd/system/music-api.service
 sudo systemctl daemon-reload
 
-echo "== 4. compose mount =="
-if [ -f /tmp/deemix-api.compose.yml ]; then
-    sudo sed -i 's|/opt/music-api/data/incoming:/downloads|/data/public/media/music-api/incoming:/downloads|' /tmp/deemix-api.compose.yml
-fi
-
-echo "== 5. rewrite stored paths in the ledger DB =="
+echo "== 4. rewrite stored paths in the ledger DB =="
 python3 - <<'PY'
 import sqlite3
 con = sqlite3.connect("/opt/music-api/data/music-api.db")
@@ -69,9 +63,8 @@ print("   rows updated:", con.total_changes)
 con.close()
 PY
 
-echo "== 6. restart =="
+echo "== 5. restart =="
 sudo systemctl restart music-api
-sudo docker compose -f /tmp/deemix-api.compose.yml up -d
 sleep 3
 curl -s --max-time 5 http://127.0.0.1:8710/health
 echo
