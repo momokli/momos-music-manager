@@ -664,6 +664,8 @@ pub async fn cancel_order(pool: &Pool<Sqlite>, order_id: &str) -> anyhow::Result
 /// Insert (or complete) a `ready` track row. Existing paths are never
 /// overwritten; the row is `ready` because the file is on disk. This is what
 /// hands the file to the analysis worker (`path_flac`).
+///
+/// Used by the integration tests / future crawl ingest.
 pub async fn ingest_ready_track(
     pool: &Pool<Sqlite>,
     isrc: &str,
@@ -699,16 +701,6 @@ pub async fn ingest_ready_track(
     .await?;
     refresh_orders_for_isrc(pool, isrc).await?;
     Ok(())
-}
-
-pub async fn downloading_tracks(pool: &Pool<Sqlite>) -> anyhow::Result<Vec<Track>> {
-    // Only Deezer rows are polled here; non-Deezer (yt-dlp) downloads run on
-    // their own background tasks.
-    Ok(sqlx::query_as::<_, Track>(
-        "SELECT * FROM tracks WHERE state = 'downloading' AND source = 'deezer'",
-    )
-    .fetch_all(pool)
-    .await?)
 }
 
 pub async fn mark_resolved(

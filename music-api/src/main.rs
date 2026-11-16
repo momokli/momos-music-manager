@@ -87,7 +87,6 @@ async fn main() -> anyhow::Result<()> {
         paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ytdlp_sem: Arc::new(tokio::sync::Semaphore::new(ytdlp_concurrency)),
         finalize_sem: Arc::new(tokio::sync::Semaphore::new(transcode_concurrency)),
-        finalizing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         analysis_sem: Arc::new(tokio::sync::Semaphore::new(analysis_concurrency)),
         analyzing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         analysis_backoff: Default::default(),

@@ -124,7 +124,6 @@ async fn harness_opts(opts: HarnessOpts) -> Harness {
         paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ytdlp_sem: Arc::new(tokio::sync::Semaphore::new(ytdlp_concurrency)),
         finalize_sem: Arc::new(tokio::sync::Semaphore::new(config_transcode_concurrency)),
-        finalizing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         analysis_sem: Arc::new(tokio::sync::Semaphore::new(1)),
         analyzing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         analysis_backoff: Default::default(),

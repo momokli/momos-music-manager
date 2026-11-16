@@ -63,8 +63,6 @@ pub struct AppState {
     pub ytdlp_sem: Arc<tokio::sync::Semaphore>,
     /// Bounds concurrent `finalize` (copy + transcode) jobs.
     pub finalize_sem: Arc<tokio::sync::Semaphore>,
-    /// ISRCs with a `finalize` task currently in flight (dedupe guard).
-    pub finalizing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Bounds concurrent analyzer calls (BPM/key, CPU-heavy).
     pub analysis_sem: Arc<tokio::sync::Semaphore>,
     /// ISRCs with an analysis task currently in flight (dedupe guard).
