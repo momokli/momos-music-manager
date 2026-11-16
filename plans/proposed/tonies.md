@@ -16,16 +16,16 @@
 **Fertiger Client existiert**: `~/dev/tonie` v0.2.1 (eigenes Repo `momokli/tonie`) spricht die
 inoffizielle Tonies-API bereits vollständig:
 
-| Baustein | Fundstelle | Nutzen |
-| --- | --- | --- |
-| Auth: Keycloak `login.tonies.com/auth/realms/tonies/…/token` (password grant + refresh on 401) | `src/tonies.rs:24`, `:45` | Account-Verbindung |
-| `GET /v2/me`, `/v2/households`, `/v2/households/{hid}/creativetonies[/{ctid}]` | `src/tonies.rs:227–258` | Haushalt, Tonies, Ist-Kapitel |
-| `POST /v2/file` → **presigned S3** (`fileId` + URL + Felder) | `src/tonies.rs:259–262` | Hub lädt die Bytes selbst hoch → **keine öffentlichen Track-URLs** |
-| Multipart-PUT zu S3, `Content-Type: audio/mpeg`, Felder zuerst, Datei zuletzt | `src/tonies.rs:269–330` | MP3-Upload |
-| `POST …/chapters` `{title, file}` | `src/tonies.rs:340` | Kapitel anhängen |
-| `PATCH …/creativetonies/{ctid}` `{chapters:[…]}` — leeres Array löscht alles | `src/tonies.rs:363–378` | Der Sync-Primitiv |
-| `Chapter { id, title, file, seconds, transcoding, type }` ist `Serialize` | `src/tonies.rs:81–91` | Bestehende Kapitel im PATCH **wiederverwenden** → kein Re-Upload |
-| Kapazität `secondsPresent` + `secondsRemaining` (≈ 5400 s = 90 min), `transcoding`, `live` | `src/tonies.rs:58–80`, `:382`, `:393` | Fit-Budget + „fertig getranscodiert?" |
+| Baustein                                                                                       | Fundstelle                            | Nutzen                                                             |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------ |
+| Auth: Keycloak `login.tonies.com/auth/realms/tonies/…/token` (password grant + refresh on 401) | `src/tonies.rs:24`, `:45`             | Account-Verbindung                                                 |
+| `GET /v2/me`, `/v2/households`, `/v2/households/{hid}/creativetonies[/{ctid}]`                 | `src/tonies.rs:227–258`               | Haushalt, Tonies, Ist-Kapitel                                      |
+| `POST /v2/file` → **presigned S3** (`fileId` + URL + Felder)                                   | `src/tonies.rs:259–262`               | Hub lädt die Bytes selbst hoch → **keine öffentlichen Track-URLs** |
+| Multipart-PUT zu S3, `Content-Type: audio/mpeg`, Felder zuerst, Datei zuletzt                  | `src/tonies.rs:269–330`               | MP3-Upload                                                         |
+| `POST …/chapters` `{title, file}`                                                              | `src/tonies.rs:340`                   | Kapitel anhängen                                                   |
+| `PATCH …/creativetonies/{ctid}` `{chapters:[…]}` — leeres Array löscht alles                   | `src/tonies.rs:363–378`               | Der Sync-Primitiv                                                  |
+| `Chapter { id, title, file, seconds, transcoding, type }` ist `Serialize`                      | `src/tonies.rs:81–91`                 | Bestehende Kapitel im PATCH **wiederverwenden** → kein Re-Upload   |
+| Kapazität `secondsPresent` + `secondsRemaining` (≈ 5400 s = 90 min), `transcoding`, `live`     | `src/tonies.rs:58–80`, `:382`, `:393` | Fit-Budget + „fertig getranscodiert?"                              |
 
 **Hub-Seite bringt den Rest schon mit**:
 
@@ -39,12 +39,13 @@ inoffizielle Tonies-API bereits vollständig:
 
 ## Entscheidungen (genommen, im Review änderbar)
 
-| # | Entscheidung | Begründung / Alternative |
-| --- | --- | --- |
-| D1 | **Credentials im Hub** (Login-Formular, Passwort bzw. Refresh-Token **verschlüsselt at rest**, wie bei Spotify) | Nur so funktionieren „URL + Button" **und** späterer Autosync ohne laufenden Rechner. Alternative (kellner macht den Upload) bleibt möglich, weil der Client als eigenes Modul geschnitten wird. |
-| D2 | **Format `mp3-128` als Default**, `mp3-320` pro Binding umschaltbar | 90 min ≈ 86 MB @128 vs. ≈ 216 MB @320; Toniebox ist ein Kinder-Lautsprecher. Musik-API hält beides. |
-| D3 | **Quelle**: M1 nur Spotify-Playlist, M2 zusätzlich **Backpack/Tag** (gleicher Sync-Kern, anderer Resolver) | Playlist ist der beschriebene Flow; Backpack/Tag ist die Hub-Logik und fällt fast gratis ab. |
-| D4 | **Code-Ort**: Modul `music-hub/src/tonies/{mod,client,sync}.rs` — kein neues Release-Artefakt | Kein neuer Komponenten-Tag/Versionierungsstrang; lässt sich später als Crate herausziehen, wenn kellner es braucht. |
+| #   | Entscheidung                                                                                                    | Begründung / Alternative                                                                                                                                                                         |
+| --- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| D1  | **Credentials im Hub** (Login-Formular, Passwort bzw. Refresh-Token **verschlüsselt at rest**, wie bei Spotify) | Nur so funktionieren „URL + Button" **und** späterer Autosync ohne laufenden Rechner. Alternative (kellner macht den Upload) bleibt möglich, weil der Client als eigenes Modul geschnitten wird. |
+| D2  | **Format `mp3-128` als Default**, `mp3-320` pro Binding umschaltbar                                             | 90 min ≈ 86 MB @128 vs. ≈ 216 MB @320; Toniebox ist ein Kinder-Lautsprecher. Musik-API hält beides.                                                                                              |
+| D3  | **Quelle**: M1 nur Spotify-Playlist, M2 zusätzlich **Backpack/Tag** (gleicher Sync-Kern, anderer Resolver)      | Playlist ist der beschriebene Flow; Backpack/Tag ist die Hub-Logik und fällt fast gratis ab.                                                                                                     |
+| D4  | **Code-Ort**: Modul `music-hub/src/tonies/{mod,client,sync}.rs` — kein neues Release-Artefakt                   | Kein neuer Komponenten-Tag/Versionierungsstrang; lässt sich später als Crate herausziehen, wenn kellner es braucht.                                                                              |
+| D5  | **Erkennung = billiges Listing-Polling** (10–15 min pro User) — Spotify hat keinen Playlist-Webhook             | Ohne Polling bleibt `snapshot_id` bis zum manuellen „Fetch" alt: `ingest::fetch_playlists()` wird nur aus CLI (`main.rs:634`) und `POST …/fetch` (`web.rs:702`) gerufen, es gibt **keinen Loop** |
 
 ## Datenmodell (eine additive Migration)
 
@@ -79,20 +80,35 @@ hub_tonie_syncs(id, binding_id, started_at, finished_at, status,
 
 ## Trigger
 
+**Faktenlage (verifiziert):** Spotify schickt **nichts** — die Web API hat keinen Playlist-Change-
+Webhook, und der Hub hat auch keinen Receiver. Der Hub erkennt Änderungen heute **nur auf
+Knopfdruck**: `ingest::fetch_playlists()` (Listing `/me/playlists`, schreibt `snapshot_id`) wird
+ausschließlich vom CLI (`main.rs:634`) und der Web-Route `POST …/fetch` (`web.rs:702`) aufgerufen —
+**kein Loop**. Der Worker holt Items danach nur, wenn `snapshot_id <> last_synced_snapshot`
+(`worker.rs:457–470`). Ohne Klick bleibt die Playlist also stale — das ist ein bestehender
+Produktfehler des Hubs, nicht nur ein Tonie-Problem.
+
+- **Voraussetzung (M1a)**: periodischer **Listing-Poll** im Worker — `/me/playlists?limit=50`
+  (paged), Cadence 10–15 min pro verbundenem User, mit 429-Backoff. Budget: 3 User × ~2 Requests /
+  15 min ≈ **24 Requests/Stunde** — gegen Spotifys Rolling-Window irrelevant. Das teure
+  Item-Fetching bleibt snapshot-gated (nur bei echter Änderung).
 - **Manuell (M2)**: `POST /tonies/{id}/sync` — htmx, Session-Owner only, pro User rate-limited,
   Antwort als Toast (`12 Kapitel, 61 min — 3 passten nicht mehr, 1 nicht im Vault`).
 - **Automatisch (M3)**: Hook **direkt nach** `last_synced_snapshot = snapshot_id`
   (`worker.rs:506`): `UPDATE hub_tonie_bindings SET dirty_since = now()` für die Bindings dieser
   Playlist. Ein neuer Hub-Loop (`LOOP_NAMES` erweitern) konsumiert `dirty`-Bindings.
   **Debounce**: erst nach einer Ruhephase (Default 5 min ohne weitere Änderung) und nur, wenn
-  sich der *gepasste Prefix* tatsächlich unterscheidet; Mindestabstand pro Tonie (Default 10 min).
+  sich der _gepasste Prefix_ tatsächlich unterscheidet; Mindestabstand pro Tonie (Default 10 min).
 
-> **Spotify-Budget**: Der Autosync erzeugt **null zusätzliche Spotify-Requests** — er hängt an
-> der bestehenden Snapshot-Erkennung. Es wird nichts zusätzlich gepollt.
+> **Spotify-Budget (korrigiert):** Der Tonie-Autosync erzeugt **keine zusätzlichen**
+> Spotify-Requests _gegeben_ das Listing-Polling aus M1a — er hängt an dessen
+> Snapshot-Erkennung. Es ist **nicht** „null Requests": das Listing-Polling ist neu und nötig,
+> weil heute gar nichts automatisch pollt.
 
 ## UI
 
 `/tonies` (Session-geschützt, pro User):
+
 - Account-Zustand: verbunden / „neu verbinden" (Token abgelaufen).
 - Karte pro Kreativ-Tonie: Kapazitätsbalken („63 min / 90 min"), Quelle (Playlist/Backpack/Tag),
   Format, Modus (manual/auto), **„Sync now"**, letzter Sync mit Diff + übersprungenen Tracks.
@@ -100,11 +116,12 @@ hub_tonie_syncs(id, binding_id, started_at, finished_at, status,
 
 ## Meilensteine
 
-| M | Inhalt | Akzeptanz |
-| --- | --- | --- |
-| **M1** | Client-Modul (Auth, Liste, Kapitel lesen, `request_upload`/S3/`chapters`/`PATCH`, `live`), Account-Verbindung, `/tonies` read-only (Tonies + Kapazität) | Tests gegen gemockte Tonies-API; kein Netz in CI; 401 → „neu verbinden" |
-| **M2** | Bindings + manueller Sync (Greedy-Fit, Diff, Upload, Transcoding-Poll), Run-Log | Fit-Grenzfälle + alle drei Diff-Fälle getestet; kein Re-Upload bei unverändertem Prefix |
-| **M3** | Auto-Sync über den Worker-Hook + Debounce + Loop-Health | Ein Playlist-Refresh markiert dirty; zweiter Refresh ohne Änderung erzeugt keinen Sync |
+| M       | Inhalt                                                                                                                                                                          | Akzeptanz                                                                                       |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| **M1**  | Client-Modul (Auth, Liste, Kapitel lesen, `request_upload`/S3/`chapters`/`PATCH`, `live`), Account-Verbindung, `/tonies` read-only (Tonies + Kapazität)                         | Tests gegen gemockte Tonies-API; kein Netz in CI; 401 → „neu verbinden"                         |
+| **M1a** | Periodischer **Playlist-Listing-Poll** im Worker (`/me/playlists`, Cadence 10–15 min, 429-Backoff, Health-Sichtbarkeit) — Voraussetzung für Autosync, nutzt auch dem Hub selbst | `snapshot_id` wird ohne Klick frisch; Request-Budget im Log nachvollziehbar (3 User ≈ 24 Req/h) |
+| **M2**  | Bindings + manueller Sync (Greedy-Fit, Diff, Upload, Transcoding-Poll), Run-Log                                                                                                 | Fit-Grenzfälle + alle drei Diff-Fälle getestet; kein Re-Upload bei unverändertem Prefix         |
+| **M3**  | Auto-Sync über den Worker-Hook + Debounce + Loop-Health                                                                                                                         | Ein Playlist-Refresh markiert dirty; zweiter Refresh ohne Änderung erzeugt keinen Sync          |
 
 ## Tests
 
@@ -135,6 +152,6 @@ hub_tonie_syncs(id, binding_id, started_at, finished_at, status,
 - [ ] `cargo test` in `music-hub/` grün, neue Tonie-Tests enthalten, kein Netzwerk in CI
 - [ ] `/tonies` erreichbar, nur eigene Bindings sichtbar
 - [ ] Manueller Sync: Kapazität korrekt gefüllt, Diff ohne Re-Upload, Toast mit Zusammenfassung
-- [ ] Auto-Sync erzeugt **keine** zusätzlichen Spotify-Requests
+- [ ] Auto-Sync erzeugt **keine zusätzlichen** Spotify-Requests (abgesehen vom Listing-Poll aus M1a — der fehlt auch dem Hub selbst)
 - [ ] Keine Tonies-Credentials in Logs, Templates oder Fehlermeldungen
 - [ ] Live-Test dokumentiert (echter Tonie), inkl. der vier offenen Punkte oben
