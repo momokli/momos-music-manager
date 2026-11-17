@@ -34,6 +34,13 @@ pub const TONIES_AUTH_BASE: &str = "tonies_auth_base";
 pub const TONIES_API_BASE: &str = "tonies_api_base";
 /// Master key for the encrypted Tonies refresh token (secret, never logged).
 pub const TONIES_SECRET_KEY: &str = "tonies_secret_key";
+// ── Tonies Auto-Sync (#503) ─────────────────────────────────────────────
+/// Master switch for automatic Tonie syncs (`mode='auto'` bindings).
+pub const TONIE_AUTOSYNC_ENABLED: &str = "tonie_autosync_enabled";
+/// Quiet period (seconds) after the last playlist change before a sync may run.
+pub const TONIE_AUTOSYNC_QUIET_SECS: &str = "tonie_autosync_quiet_secs";
+/// Minimum spacing (seconds) between two automatic syncs of the same binding.
+pub const TONIE_AUTOSYNC_MIN_INTERVAL_SECS: &str = "tonie_autosync_min_interval_secs";
 pub const REGISTRATION_OPEN: &str = "registration_open";
 
 // Bounded touch-cascade (#hub-crawl-everything).
@@ -270,6 +277,22 @@ pub const SETTINGS: &[SettingSpec] = &[
         200.0,
     ),
     flag(CRAWL_ORDER_ON_TOUCH, "Downloads bei Beruehrung ordern", "1"),
+    // ── Tonies Auto-Sync (#503) ─────────────────────────────────────────────
+    flag(TONIE_AUTOSYNC_ENABLED, "Tonies Auto-Sync aktiv", "1"),
+    num(
+        TONIE_AUTOSYNC_QUIET_SECS,
+        "Auto-Sync: Ruhephase (Sekunden)",
+        "300",
+        0.0,
+        86_400.0,
+    ),
+    num(
+        TONIE_AUTOSYNC_MIN_INTERVAL_SECS,
+        "Auto-Sync: Mindestabstand (Sekunden)",
+        "600",
+        0.0,
+        604_800.0,
+    ),
     num(
         CRAWL_NOWPLAYING_BOOST,
         "Download-Prioritaet: Now-Playing-Boost",

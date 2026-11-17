@@ -3597,16 +3597,11 @@ struct ToniesConnectForm {
 }
 
 /// Resolve the household id: prefer the configured/first household, else the
-/// id carried by `/v2/me`.
+/// id carried by `/v2/me`. Delegates to the shared helper.
 async fn tonies_resolve_household(
     client: &mut crate::tonies::client::ToniesClient,
 ) -> Option<String> {
-    if let Ok(hs) = client.get_households().await {
-        if let Some(id) = hs.into_iter().find_map(|h| h.id) {
-            return Some(id);
-        }
-    }
-    client.get_me().await.ok().and_then(|m| m.household_id)
+    crate::tonies::resolve_household(client).await
 }
 
 async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
@@ -4047,51 +4042,14 @@ async fn tonies_binding_delete(
 
 // ── Tonies sync run (#502) ────────────────────────────────────────────────────
 
-/// Why building a Tonies client for a user failed.
-struct ToniesClientError {
-    /// Categorised, credential-free message.
-    message: String,
-    /// The stored token could not be read → offer "reconnect".
-    needs_reconnect: bool,
-}
-
-/// Build a Tonies client for `uid` from the stored, still-encrypted refresh
-/// token (extracted from `tonies_page`). The token is decrypted in memory only —
-/// it is never logged, rendered, or put into an error message.
+/// Build a Tonies client for `uid` from persisted, encrypted state. Delegates
+/// to the shared pool/cfg helper so the worker auto-sync uses the exact same
+/// construction. The token is decrypted in memory only.
 async fn tonies_client_for(
     st: &AppState,
     uid: i64,
-) -> Result<crate::tonies::client::ToniesClient, ToniesClientError> {
-    let key = st.cfg.tonies_key().map_err(|e| ToniesClientError {
-        message: format!("{e}"),
-        needs_reconnect: false,
-    })?;
-    let secret_enc = crate::tonies::load_secret_enc(&st.pool, uid)
-        .await
-        .map_err(|e| {
-            tracing::warn!("tonies secret load failed for user {uid}: {e:#}");
-            ToniesClientError {
-                message: "Tonies-Verbindung konnte nicht geladen werden".to_string(),
-                needs_reconnect: false,
-            }
-        })?
-        .unwrap_or_default();
-    let refresh_token =
-        crate::tonies::decrypt_secret(key, &secret_enc).map_err(|_| ToniesClientError {
-            message: "Tonies-Sitzung konnte nicht gelesen werden — bitte neu verbinden."
-                .to_string(),
-            needs_reconnect: true,
-        })?;
-    let tokens = crate::tonies::Tokens {
-        access_token: String::new(),
-        refresh_token: Some(refresh_token),
-        expires_at: 0,
-    };
-    Ok(crate::tonies::client::ToniesClient::with_tokens(
-        &st.cfg.tonies_auth_base,
-        &st.cfg.tonies_api_base,
-        tokens,
-    ))
+) -> Result<crate::tonies::client::ToniesClient, crate::tonies::ClientError> {
+    crate::tonies::client_for(&st.pool, &st.cfg, uid).await
 }
 
 #[derive(Deserialize)]
@@ -4166,70 +4124,12 @@ async fn tonies_sync(
 }
 
 /// Do the actual work of a run. Never fails: any error becomes a `status='error'`
-/// outcome (credential-free) that the caller writes to the run log.
+/// outcome (credential-free) that the caller writes to the run log. Delegates
+/// to the shared pool/cfg exec so the worker auto-sync behaves identically.
 async fn execute_sync(
     st: &AppState,
     uid: i64,
     binding: &crate::tonies::Binding,
 ) -> crate::tonies::run::RunOutcome {
-    use crate::tonies::run::{RunOutcome, STATUS_ERROR};
-
-    let fail = |msg: String| RunOutcome {
-        status: STATUS_ERROR.to_string(),
-        error: Some(msg),
-        ..Default::default()
-    };
-
-    let mut client = match tonies_client_for(st, uid).await {
-        Ok(c) => c,
-        Err(e) => return fail(e.message),
-    };
-
-    let household = match crate::tonies::load_account(&st.pool, uid)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|a| a.household_id)
-        .filter(|h| !h.is_empty())
-    {
-        Some(h) => h,
-        None => match tonies_resolve_household(&mut client).await {
-            Some(h) => h,
-            None => return fail("Household konnte nicht ermittelt werden".to_string()),
-        },
-    };
-
-    let Some(source_id) = binding.source_id else {
-        return fail("Keine Quelle verknüpft".to_string());
-    };
-    let desired = match crate::tonies::sync::desired_from_playlist(&st.pool, source_id).await {
-        Ok(d) => d,
-        Err(e) => return fail(format!("Playlist konnte nicht gelesen werden: {e}")),
-    };
-
-    // Readiness: one music-api status call per distinct ISRC.
-    let isrcs: Vec<String> = desired.iter().filter_map(|t| t.isrc.clone()).collect();
-    let ready = crate::tonies::run::readiness(&st.cfg, isrcs).await;
-
-    // Byte source: the real music-api download, mapped via `binding.format`.
-    let cfg = st.cfg.clone();
-    let format = binding.format.clone();
-    let fetch = move |isrc: &str| {
-        let cfg = cfg.clone();
-        let format = format.clone();
-        let isrc = isrc.to_string();
-        async move { crate::music_api::file_bytes(&cfg, &isrc, &format).await }
-    };
-
-    let opts = crate::tonies::run::SyncOptions::default();
-    crate::tonies::run::run_sync(
-        &mut client,
-        &household,
-        binding,
-        desired,
-        |isrc| ready.contains(isrc),
-        fetch,
-        &opts,
-    )
-    .await
+    crate::tonies::run::execute_binding(&st.pool, &st.cfg, uid, binding).await
 }

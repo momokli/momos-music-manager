@@ -610,6 +610,79 @@ where
     }
 }
 
+/// Execute one binding end-to-end: build the Tonies client, resolve the
+/// household, read the desired tracks from the bound playlist, check vault
+/// readiness, then run the sync (Tonies + music-api; **never** Spotify).
+///
+/// Never fails: any error becomes a `status='error'` outcome (credential-free)
+/// that the caller writes to the run log. Shared by the web handler
+/// (`/tonies/{id}/sync`) and the worker auto-sync, so behaviour is identical.
+pub async fn execute_binding(
+    pool: &SqlitePool,
+    cfg: &Config,
+    uid: i64,
+    binding: &Binding,
+) -> RunOutcome {
+    let fail = |msg: String| RunOutcome {
+        status: STATUS_ERROR.to_string(),
+        error: Some(msg),
+        ..Default::default()
+    };
+
+    let mut client = match crate::tonies::client_for(pool, cfg, uid).await {
+        Ok(c) => c,
+        Err(e) => return fail(e.message),
+    };
+
+    let household = match crate::tonies::load_account(pool, uid)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|a| a.household_id)
+        .filter(|h| !h.is_empty())
+    {
+        Some(h) => h,
+        None => match crate::tonies::resolve_household(&mut client).await {
+            Some(h) => h,
+            None => return fail("Household konnte nicht ermittelt werden".to_string()),
+        },
+    };
+
+    let Some(source_id) = binding.source_id else {
+        return fail("Keine Quelle verknüpft".to_string());
+    };
+    let desired = match super::sync::desired_from_playlist(pool, source_id).await {
+        Ok(d) => d,
+        Err(e) => return fail(format!("Playlist konnte nicht gelesen werden: {e}")),
+    };
+
+    // Readiness: one music-api status call per distinct ISRC.
+    let isrcs: Vec<String> = desired.iter().filter_map(|t| t.isrc.clone()).collect();
+    let ready = readiness(cfg, isrcs).await;
+
+    // Byte source: the real music-api download, mapped via `binding.format`.
+    let cfg = cfg.clone();
+    let format = binding.format.clone();
+    let fetch = move |isrc: &str| {
+        let cfg = cfg.clone();
+        let format = format.clone();
+        let isrc = isrc.to_string();
+        async move { crate::music_api::file_bytes(&cfg, &isrc, &format).await }
+    };
+
+    let opts = SyncOptions::default();
+    run_sync(
+        &mut client,
+        &household,
+        binding,
+        desired,
+        |isrc| ready.contains(isrc),
+        fetch,
+        &opts,
+    )
+    .await
+}
+
 /// One-line, credential-free summary for the htmx toast.
 pub fn summary(o: &RunOutcome) -> String {
     let mut msg = format!("{} Kapitel, {} min", o.chapters_after, o.seconds / 60);
