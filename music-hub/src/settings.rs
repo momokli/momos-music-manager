@@ -46,6 +46,13 @@ pub const TONIE_AUTOSYNC_QUIET_SECS: &str = "tonie_autosync_quiet_secs";
 pub const TONIE_AUTOSYNC_MIN_INTERVAL_SECS: &str = "tonie_autosync_min_interval_secs";
 pub const REGISTRATION_OPEN: &str = "registration_open";
 
+// Playlist listing poll (#506)
+/// Master switch for the periodic `/me/playlists` listing poll.
+pub const PLAYLIST_POLL_ENABLED: &str = "playlist_poll_enabled";
+/// Cadence (seconds) between two listing polls. Default 900 (15 min); the
+/// worker clamps it to at least 60 s.
+pub const PLAYLIST_POLL_INTERVAL_SECS: &str = "playlist_poll_interval_secs";
+
 // Bounded touch-cascade (#hub-crawl-everything).
 /// Master switch for the Spotify touch-cascade loop.
 pub const CRAWL_ENABLED: &str = "crawl_enabled";

@@ -164,7 +164,7 @@ pub(crate) async fn access_token(pool: &SqlitePool, cfg: &Config, user_id: i64) 
 }
 
 /// `GET /me`, persisting the remote id + display name.
-async fn remote_profile(
+pub(crate) async fn remote_profile(
     pool: &SqlitePool,
     base: &str,
     token: &str,
@@ -197,7 +197,7 @@ async fn remote_profile(
 }
 
 /// Upsert a playlist's metadata only (no items). Returns the local playlist id.
-async fn upsert_playlist_meta(
+pub(crate) async fn upsert_playlist_meta(
     pool: &SqlitePool,
     user_id: i64,
     pl: &Value,
@@ -288,7 +288,7 @@ pub(crate) async fn store_playlist_items(
 }
 
 /// The API exposes items only for owned/collaborative playlists.
-fn is_owned(pl: &Value, remote_id: &str) -> bool {
+pub(crate) fn is_owned(pl: &Value, remote_id: &str) -> bool {
     pl["collaborative"].as_bool().unwrap_or(false) || pl["owner"]["id"].as_str() == Some(remote_id)
 }
 

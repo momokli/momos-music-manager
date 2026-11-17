@@ -10,6 +10,7 @@
                     <th scope="col">Loop</th>
                     <th scope="col">Letzter Lauf</th>
                     <th scope="col">Iterationen</th>
+                    <th scope="col">Requests</th>
                     <th scope="col">Status</th>
                     <th scope="col">Aktion</th>
                 </tr>
@@ -20,6 +21,7 @@
                     <td>{{ w.name }}</td>
                     <td>{{ w.last_run }}</td>
                     <td>{{ w.iterations }}</td>
+                    <td>{{ w.requests }}</td>
                     <td>
                         {% if w.paused %}<span class="hub-badge hub-badge-no">pausiert</span>
                         {% else if w.last_worked %}<span class="hub-badge hub-badge-ok">läuft</span>
