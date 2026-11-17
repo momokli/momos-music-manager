@@ -32,6 +32,9 @@ pub const YOUTUBE_CLIENT_SECRET: &str = "youtube_client_secret";
 pub const TONIES_AUTH_BASE: &str = "tonies_auth_base";
 /// Tonies REST API base (`https://api.tonies.com`).
 pub const TONIES_API_BASE: &str = "tonies_api_base";
+/// Keycloak client for the Tonies token endpoint (placeholder default, see
+/// `tonies::client::DEFAULT_CLIENT_ID`).
+pub const TONIES_CLIENT_ID: &str = "tonies_client_id";
 /// Master key for the encrypted Tonies refresh token (secret, never logged).
 pub const TONIES_SECRET_KEY: &str = "tonies_secret_key";
 // ── Tonies Auto-Sync (#503) ─────────────────────────────────────────────
@@ -245,6 +248,7 @@ pub const SETTINGS: &[SettingSpec] = &[
     text(MUSIC_API_TOKEN, "music-api Token", true),
     text(TONIES_AUTH_BASE, "Tonies Auth-Base (Keycloak)", false),
     text(TONIES_API_BASE, "Tonies API-Base", false),
+    text(TONIES_CLIENT_ID, "Tonies Client-ID (Keycloak)", false),
     text(TONIES_SECRET_KEY, "Tonies Secret-Key (Token-Verschluesselung)", true),
     // ── Touch-cascade (#hub-crawl-everything) ───────────────────────────────
     flag(CRAWL_ENABLED, "Touch-Cascade aktiv", "1"),

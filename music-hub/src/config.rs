@@ -35,6 +35,9 @@ pub struct Config {
     pub tonies_auth_base: String,
     /// Tonies REST API base (`TONIES_API_BASE`), e.g. `https://api.tonies.com`.
     pub tonies_api_base: String,
+    /// Keycloak client for the token endpoint (see
+    /// `tonies::client::DEFAULT_CLIENT_ID` — the default is a placeholder).
+    pub tonies_client_id: String,
     /// Master key for encrypting the Tonies refresh token at rest
     /// (`HUB_TONIES_SECRET_KEY`). Never logged, never rendered.
     pub tonies_secret_key: Option<String>,
@@ -87,6 +90,8 @@ impl Config {
                 .unwrap_or_else(|| crate::tonies::client::DEFAULT_AUTH_BASE.to_string()),
             tonies_api_base: env("TONIES_API_BASE")
                 .unwrap_or_else(|| crate::tonies::client::DEFAULT_API_BASE.to_string()),
+            tonies_client_id: env("TONIES_CLIENT_ID")
+                .unwrap_or_else(|| crate::tonies::client::DEFAULT_CLIENT_ID.to_string()),
             tonies_secret_key: env("HUB_TONIES_SECRET_KEY"),
         }
     }
@@ -121,6 +126,7 @@ impl Config {
             music_api_token: None,
             tonies_auth_base: crate::tonies::client::DEFAULT_AUTH_BASE.to_string(),
             tonies_api_base: crate::tonies::client::DEFAULT_API_BASE.to_string(),
+            tonies_client_id: crate::tonies::client::DEFAULT_CLIENT_ID.to_string(),
             // Deterministic key so web integration tests can exercise the
             // encrypted account store without a host env var.
             tonies_secret_key: Some("hub-tonies-test-secret".to_string()),
@@ -165,6 +171,7 @@ impl Config {
             }
             crate::settings::TONIES_AUTH_BASE => self.tonies_auth_base = value.into(),
             crate::settings::TONIES_API_BASE => self.tonies_api_base = value.into(),
+            crate::settings::TONIES_CLIENT_ID => self.tonies_client_id = value.into(),
             crate::settings::TONIES_SECRET_KEY => self.tonies_secret_key = Some(value.into()),
             _ => {}
         }
