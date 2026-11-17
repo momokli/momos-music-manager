@@ -36,7 +36,10 @@ log() { printf '%s hub-deploy: %s\n' "$(date -Is)" "$*"; }
 # Überlappung mit einem manuellen Lauf verhindern (Build dauert ~1,5 min).
 # Gemeinsamer Lock mit dem api-Deploy: beide benutzen denselben Quell-Klon.
 exec 9>"$HOME/.mmm-deploy.lock"
-if ! flock -n 9; then log "läuft bereits — skip"; exit 0; fi
+# NICHT `-n`: beide Timer (hub/api) feuern in derselben Sekunde und teilen den
+# Quell-Klon. Mit "nicht warten" verliert der zweite Deploy jede Runde und faellt
+# still aus. Warten ist gedeckelt durch TimeoutStartSec=900 der Units.
+if ! flock -w 900 9; then log "wartet auf anderen Deploy (Timeout)"; exit 0; fi
 
 if [ ! -d "$SRC/.git" ]; then
   log "klone $URL → $SRC"
