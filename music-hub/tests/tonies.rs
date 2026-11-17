@@ -739,3 +739,252 @@ async fn tonies_page_without_playlists_shows_hint() {
     );
     assert!(html.contains("binding-ct1"), "binding area expected per card");
 }
+
+/// Mock serving Keycloak + read endpoints with an empty creativetonies list
+/// (household still resolves), to exercise the "no Tonies" empty state.
+async fn mock_read_empty_tonies() -> String {
+    let app = Router::new()
+        .route("/realms/tonies/protocol/openid-connect/token", post(token_handler))
+        .route(
+            "/v2/me",
+            get(|| async { Json(json!({"email": "me@example.com", "householdId": "hh1"})) }),
+        )
+        .route(
+            "/v2/households",
+            get(|| async { Json(json!({"households": [{"id": "hh1", "name": "Home"}]})) }),
+        )
+        .route(
+            "/v2/households/{hid}/creativetonies",
+            get(|| async { Json(json!({"creativetonies": []})) }),
+        )
+        .with_state(data_base_state());
+    serve(app).await
+}
+
+// ── tests: end-to-end page + full binding lifecycle (#500) ──────────────────
+
+/// E2E: a connected user sees their own playlists offered as binding sources on
+/// `/tonies`, and every card carries the capacity bar whose values equal the
+/// mocked API's `secondsPresent`/`secondsRemaining`.
+#[tokio::test]
+async fn tonies_page_lists_playlists_as_options_with_capacity() {
+    let auth = mock_read(data_base_state()).await;
+    let app = spawn_web(&auth, &auth).await;
+    let (uid, cookie) = app.user_with_password("t-e2e", "pw").await;
+    tonies::save_account(&app.pool, uid, Some("hh1"), Some("e2e@example.com"), REFRESH, KEY)
+        .await
+        .unwrap();
+    let pl = insert_playlist(&app.pool, uid, "sp-e2e", "Chill Mix").await;
+
+    let html = app
+        .client()
+        .get(app.url("/tonies"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    // The user's own playlist is offered as an <option> of the picker.
+    let opt = format!("<option value=\"{pl}\">Chill Mix</option>");
+    assert!(html.contains(&opt), "playlist option missing: {opt}");
+    // Capacity bar mirrors the mock (3780 s present, 5400 s total).
+    assert!(html.contains("63 min / 90 min"), "capacity text missing");
+    assert!(html.contains("value=\"70\""), "capacity percent missing");
+}
+
+/// Editing an existing binding re-uses the same row (no duplicate) and the page
+/// reflects the new playlist/format/mode.
+#[tokio::test]
+async fn binding_edit_updates_in_place_via_web() {
+    let auth = mock_read(data_base_state()).await;
+    let app = spawn_web(&auth, &auth).await;
+    let (uid, cookie) = app.user_with_password("t-edit", "pw").await;
+    tonies::save_account(&app.pool, uid, Some("hh1"), Some("edit@example.com"), REFRESH, KEY)
+        .await
+        .unwrap();
+    let p1 = insert_playlist(&app.pool, uid, "e-1", "First").await;
+    let p2 = insert_playlist(&app.pool, uid, "e-2", "Second").await;
+
+    let s1 = p1.to_string();
+    let r1 = app
+        .client()
+        .post(app.url("/tonies/ct1/binding"))
+        .header("cookie", &cookie)
+        .form(&[
+            ("tonie_name", "Story One"),
+            ("source_id", s1.as_str()),
+            ("format", "mp3-128"),
+            ("mode", "manual"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), StatusCode::OK);
+
+    let s2 = p2.to_string();
+    let r2 = app
+        .client()
+        .post(app.url("/tonies/ct1/binding"))
+        .header("cookie", &cookie)
+        .form(&[
+            ("tonie_name", "Story One"),
+            ("source_id", s2.as_str()),
+            ("format", "mp3-320"),
+            ("mode", "auto"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), StatusCode::OK);
+    let trig = r2
+        .headers()
+        .get("hx-trigger")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(trig.contains("\"kind\":\"ok\""), "expected ok toast: {trig}");
+
+    let list = tonies::list_bindings(&app.pool, uid).await.unwrap();
+    assert_eq!(list.len(), 1, "edit must not create a second row");
+    assert_eq!(list[0].source_id, Some(p2));
+    assert_eq!(list[0].format, "mp3-320");
+    assert_eq!(list[0].mode, "auto");
+
+    let html = app
+        .client()
+        .get(app.url("/tonies"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html.contains("Second"), "page should show the edited source");
+}
+
+/// User B never sees A's binding source name on their own `/tonies` page.
+#[tokio::test]
+async fn binding_is_not_visible_across_users() {
+    let auth = mock_read(data_base_state()).await;
+    let app = spawn_web(&auth, &auth).await;
+    let (a, ca) = app.user_with_password("t-vis-a", "pw").await;
+    let (b, cb) = app.user_with_password("t-vis-b", "pw").await;
+    tonies::save_account(&app.pool, a, Some("hh1"), Some("a@example.com"), REFRESH, KEY)
+        .await
+        .unwrap();
+    tonies::save_account(&app.pool, b, Some("hh1"), Some("b@example.com"), REFRESH, KEY)
+        .await
+        .unwrap();
+    let pl_a = insert_playlist(&app.pool, a, "vis-a", "A Secret List").await;
+    tonies::upsert_binding(
+        &app.pool, a, "ct1", Some("Story One"), "playlist", Some(pl_a), "mp3-320", "auto",
+    )
+    .await
+    .unwrap();
+
+    let html_b = app
+        .client()
+        .get(app.url("/tonies"))
+        .header("cookie", &cb)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !html_b.contains("A Secret List"),
+        "B must not see A's binding source"
+    );
+
+    let html_a = app
+        .client()
+        .get(app.url("/tonies"))
+        .header("cookie", &ca)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html_a.contains("A Secret List"), "A still sees their own binding");
+}
+
+/// The owner deleting their own binding removes the row, returns an ok toast and
+/// re-renders the picker.
+#[tokio::test]
+async fn binding_delete_removes_own_row_with_toast() {
+    let auth = mock_read(data_base_state()).await;
+    let app = spawn_web(&auth, &auth).await;
+    let (uid, cookie) = app.user_with_password("t-del-own", "pw").await;
+    tonies::save_account(&app.pool, uid, Some("hh1"), Some("own@example.com"), REFRESH, KEY)
+        .await
+        .unwrap();
+    let pl = insert_playlist(&app.pool, uid, "d-1", "To Delete").await;
+    tonies::upsert_binding(&app.pool, uid, "ct1", None, "playlist", Some(pl), "mp3-128", "manual")
+        .await
+        .unwrap();
+
+    let resp = app
+        .client()
+        .post(app.url("/tonies/ct1/binding/delete"))
+        .header("cookie", &cookie)
+        .form(&[("tonie_name", "Story One")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let trig = resp
+        .headers()
+        .get("hx-trigger")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(trig.contains("\"kind\":\"ok\""), "expected ok toast: {trig}");
+    let body = resp.text().await.unwrap();
+    assert!(!body.contains("hub-card"), "no message-card in delete response");
+    assert!(tonies::get_binding(&app.pool, uid, "ct1").await.unwrap().is_none());
+    assert!(body.contains("Quelle wählen"), "picker should return after delete");
+}
+
+#[tokio::test]
+async fn binding_delete_requires_session() {
+    let auth = mock_read(data_base_state()).await;
+    let app = spawn_web(&auth, &auth).await;
+    let resp = app
+        .client()
+        .post(app.url("/tonies/ct1/binding/delete"))
+        .form(&[("tonie_name", "Story One")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn tonies_page_without_creativetonies_shows_empty_state() {
+    let auth = mock_read_empty_tonies().await;
+    let app = spawn_web(&auth, &auth).await;
+    let (uid, cookie) = app.user_with_password("t-notonies", "pw").await;
+    tonies::save_account(&app.pool, uid, Some("hh1"), Some("n@example.com"), REFRESH, KEY)
+        .await
+        .unwrap();
+    let html = app
+        .client()
+        .get(app.url("/tonies"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        html.contains("Keine Kreativ-Tonies"),
+        "empty-state for a household without Tonies expected"
+    );
+}
