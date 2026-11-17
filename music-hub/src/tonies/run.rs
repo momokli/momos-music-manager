@@ -221,6 +221,23 @@ pub async fn claim_run(pool: &SqlitePool, binding_id: i64) -> Result<Claim> {
     let stale_cutoff = (now - chrono::Duration::seconds(STALE_SECS)).to_rfc3339();
     let rate_cutoff = (now - chrono::Duration::seconds(MIN_INTERVAL_SECS)).to_rfc3339();
 
+    // Reap a `running` row that never finished (crash, kill) so the partial
+    // UNIQUE index below cannot be blocked forever by a stale row. Only rows
+    // older than STALE_SECS are reaped; a genuinely live run is left alone.
+    sqlx::query(
+        "UPDATE hub_tonie_syncs
+            SET status = ?2, finished_at = ?3, error = ?4
+          WHERE binding_id = ?1 AND status = 'running' AND started_at <= ?5",
+    )
+    .bind(binding_id)
+    .bind(STATUS_ERROR)
+    .bind(now.to_rfc3339())
+    .bind("Lauf abgebrochen (stale)")
+    .bind(&stale_cutoff)
+    .execute(pool)
+    .await
+    .context("Tonies-Sync-Status konnte nicht gelesen werden")?;
+
     let live: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM hub_tonie_syncs
           WHERE binding_id = ?1 AND status = 'running' AND started_at > ?2",
@@ -246,16 +263,23 @@ pub async fn claim_run(pool: &SqlitePool, binding_id: i64) -> Result<Claim> {
         return Ok(Claim::RateLimited);
     }
 
-    let id: i64 = sqlx::query_scalar(
+    // Atomic claim: the partial UNIQUE index (migration 059) allows at most one
+    // `running` row per binding, so a racing INSERT loses with a
+    // UNIQUE-constraint error instead of starting a second parallel run.
+    let inserted = sqlx::query_scalar::<_, i64>(
         "INSERT INTO hub_tonie_syncs (binding_id, started_at, status)
          VALUES (?1, ?2, 'running') RETURNING id",
     )
     .bind(binding_id)
     .bind(now.to_rfc3339())
     .fetch_one(pool)
-    .await
-    .context("Tonies-Sync-Lauf konnte nicht angelegt werden")?;
-    Ok(Claim::Started(id))
+    .await;
+
+    match inserted {
+        Ok(id) => Ok(Claim::Started(id)),
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Ok(Claim::Busy),
+        Err(e) => Err(e).context("Tonies-Sync-Lauf konnte nicht angelegt werden"),
+    }
 }
 
 /// Write the outcome of `run_id` and mirror it onto the binding
@@ -264,6 +288,9 @@ pub async fn finish_run(pool: &SqlitePool, run_id: i64, outcome: &RunOutcome) ->
     let finished = chrono::Utc::now().to_rfc3339();
     let skipped_json =
         serde_json::to_string(&outcome.skipped_json()).unwrap_or_else(|_| "[]".to_string());
+    // Only a run that actually reconciled the Tonie clears the "unsynced"
+    // signal. `error`/`timeout` wrote nothing, so `dirty_since` must stay put.
+    let reconciled = matches!(outcome.status.as_str(), STATUS_OK | STATUS_NOOP);
 
     let mut tx = pool
         .begin()
@@ -292,12 +319,15 @@ pub async fn finish_run(pool: &SqlitePool, run_id: i64, outcome: &RunOutcome) ->
 
     sqlx::query(
         "UPDATE hub_tonie_bindings
-            SET last_sync_at = ?2, last_sync_status = ?3, dirty_since = NULL, updated_at = ?2
+            SET last_sync_at = ?2, last_sync_status = ?3,
+                dirty_since = CASE WHEN ?4 THEN NULL ELSE dirty_since END,
+                updated_at = ?2
           WHERE id = (SELECT binding_id FROM hub_tonie_syncs WHERE id = ?1)",
     )
     .bind(run_id)
     .bind(&finished)
     .bind(&outcome.status)
+    .bind(reconciled)
     .execute(&mut *tx)
     .await
     .context("Tonies-Binding-Status konnte nicht aktualisiert werden")?;
@@ -809,5 +839,63 @@ mod tests {
         let rows = list_syncs(&pool, bid, 5).await.unwrap();
         assert_eq!(rows[0].status, STATUS_ERROR);
         assert_eq!(rows[0].error.as_deref(), Some("S3-Upload antwortete 500"));
+    }
+
+    #[tokio::test]
+    async fn running_index_blocks_a_second_live_row() {
+        let (pool, bid) = pool_with_binding().await;
+        let Claim::Started(_) = claim_run(&pool, bid).await.unwrap() else {
+            panic!("expected Started");
+        };
+
+        // The partial UNIQUE index (migration 059) rejects a second `running`
+        // row for the same binding — the storage-level race guard.
+        let err = sqlx::query(
+            "INSERT INTO hub_tonie_syncs (binding_id, started_at, status)
+             VALUES (?1, ?2, 'running')",
+        )
+        .bind(bid)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap_err();
+        match err {
+            sqlx::Error::Database(e) => assert!(e.is_unique_violation()),
+            other => panic!("expected unique violation, got {other:?}"),
+        }
+
+        // And a second claim is refused as Busy, never a second running row.
+        assert_eq!(claim_run(&pool, bid).await.unwrap(), Claim::Busy);
+        let running: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM hub_tonie_syncs WHERE binding_id = ?1 AND status = 'running'",
+        )
+        .bind(bid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(running, 1);
+    }
+
+    #[tokio::test]
+    async fn error_run_keeps_dirty_signal() {
+        let (pool, bid) = pool_with_binding().await;
+        let Claim::Started(id) = claim_run(&pool, bid).await.unwrap() else {
+            panic!("expected Started");
+        };
+        let out = error_outcome(vec![], 3, 0, "S3-Upload antwortete 500".to_string());
+        finish_run(&pool, id, &out).await.unwrap();
+
+        let (dirty, last_status): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT dirty_since, last_sync_status FROM hub_tonie_bindings WHERE id = ?1",
+        )
+        .bind(bid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(last_status.as_deref(), Some(STATUS_ERROR));
+        assert!(
+            dirty.is_some(),
+            "a failed run must not clear the dirty_since signal"
+        );
     }
 }
