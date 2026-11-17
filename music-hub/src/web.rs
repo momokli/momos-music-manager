@@ -3556,8 +3556,8 @@ struct ToniesPage {
     email: String,
     household: String,
     cards: Vec<ToniesCard>,
-    /// The user's own Spotify playlists, offered as binding sources.
-    playlists: Vec<PlaylistOption>,
+    /// The user's selectable binding sources (playlists / backpacks / tags).
+    sources: SourceGroups,
 }
 
 struct ToniesCard {
@@ -3572,15 +3572,48 @@ struct ToniesCard {
     runs: Vec<crate::tonies::run::SyncRow>,
 }
 
-/// One selectable playlist source for a Tonie binding.
-struct PlaylistOption {
+/// One selectable binding source (#500/#504): its row id and display name.
+/// Playlists, backpacks and tags all render as the same shape.
+struct SourceOption {
     id: i64,
     name: String,
 }
 
-/// The rendered view of a Tonie binding (playlist name resolved, no user ids).
+/// The user's selectable binding sources, grouped by kind (#504). Also used to
+/// resolve a stored binding's display name (with a `Kind #id` fallback when the
+/// source was deleted).
+#[derive(Default)]
+struct SourceGroups {
+    playlists: Vec<SourceOption>,
+    backpacks: Vec<SourceOption>,
+    tags: Vec<SourceOption>,
+}
+
+impl SourceGroups {
+    /// Display label for `kind`/`id`, falling back to `Kind #id` when the source
+    /// no longer exists (deleted playlist/tag/backpack, acceptance #2).
+    fn label(&self, kind: &str, id: i64) -> String {
+        let (list, fallback) = match kind {
+            crate::tonies::bindings::SOURCE_BACKPACK => (&self.backpacks, "Backpack"),
+            crate::tonies::bindings::SOURCE_TAG => (&self.tags, "Tag"),
+            _ => (&self.playlists, "Playlist"),
+        };
+        list.iter()
+            .find(|o| o.id == id)
+            .map(|o| o.name.clone())
+            .unwrap_or_else(|| format!("{fallback} #{id}"))
+    }
+
+    /// True when no source of any kind is selectable (drives the empty hint).
+    fn is_empty(&self) -> bool {
+        self.playlists.is_empty() && self.backpacks.is_empty() && self.tags.is_empty()
+    }
+}
+
+/// The rendered view of a Tonie binding (source name resolved, no user ids).
 struct BindingView {
     source_id: i64,
+    source_kind: String,
     source_name: String,
     format: String,
     mode: String,
@@ -3588,6 +3621,13 @@ struct BindingView {
     last_sync_at: String,
     /// Last sync status token (`ok`/`noop`/`timeout`/`error`).
     last_sync_status: String,
+}
+
+impl BindingView {
+    /// German label for the source kind (`Playlist` | `Backpack` | `Tag`).
+    fn kind_label(&self) -> &str {
+        crate::tonies::bindings::source_kind_label(&self.source_kind)
+    }
 }
 
 #[derive(Deserialize)]
@@ -3628,7 +3668,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
             email: String::new(),
             household: String::new(),
             cards: Vec::new(),
-            playlists: Vec::new(),
+            sources: SourceGroups::default(),
         });
     };
 
@@ -3647,7 +3687,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                 email: account.email.clone().unwrap_or_default(),
                 household: account.household_id.clone().unwrap_or_default(),
                 cards: Vec::new(),
-                playlists: Vec::new(),
+                sources: SourceGroups::default(),
             });
         }
         Err(e) => {
@@ -3660,7 +3700,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                 email: account.email.clone().unwrap_or_default(),
                 household: String::new(),
                 cards: Vec::new(),
-                playlists: Vec::new(),
+                sources: SourceGroups::default(),
             });
         }
     };
@@ -3671,10 +3711,8 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
             .unwrap_or_default(),
     };
 
-    // The user's own Spotify playlists are the selectable binding sources.
-    let playlists = tonies_playlists(&st.pool, uid).await;
-    let playlist_names: std::collections::HashMap<i64, String> =
-        playlists.iter().map(|p| (p.id, p.name.clone())).collect();
+    // The user's selectable binding sources (playlists / backpacks / tags).
+    let sources = tonies_source_groups(&st.pool, uid).await;
     let bindings: std::collections::HashMap<String, crate::tonies::Binding> =
         crate::tonies::list_bindings(&st.pool, uid)
             .await
@@ -3690,7 +3728,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
             for t in list.iter() {
                 let cap = crate::tonies::Capacity::from_tonie(t);
                 let id = t.id.clone().unwrap_or_default();
-                let binding = bindings.get(&id).map(|b| binding_view(b, &playlist_names));
+                let binding = bindings.get(&id).map(|b| binding_view(b, &sources));
                 let runs = match bindings.get(&id) {
                     Some(b) => crate::tonies::run::list_syncs(
                         &st.pool,
@@ -3724,7 +3762,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                 email: account.email.clone().unwrap_or_default(),
                 household,
                 cards,
-                playlists,
+                sources,
             })
         }
         Err(crate::tonies::client::ToniesError::AuthExpired) => {
@@ -3738,7 +3776,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                 email: account.email.clone().unwrap_or_default(),
                 household,
                 cards: Vec::new(),
-                playlists: Vec::new(),
+                sources: SourceGroups::default(),
             })
         }
         Err(e) => {
@@ -3753,7 +3791,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                 email: account.email.clone().unwrap_or_default(),
                 household,
                 cards: Vec::new(),
-                playlists: Vec::new(),
+                sources: SourceGroups::default(),
             })
         }
     }
@@ -3800,7 +3838,7 @@ async fn tonies_connect_inner(
             email: form.email.clone(),
             household: String::new(),
             cards: Vec::new(),
-            playlists: Vec::new(),
+            sources: SourceGroups::default(),
         })
     };
 
@@ -3859,7 +3897,7 @@ async fn tonies_connect_inner(
 }
 
 /// The user's own Spotify playlists, offered as binding sources.
-async fn tonies_playlists(pool: &SqlitePool, uid: i64) -> Vec<PlaylistOption> {
+async fn tonies_playlists(pool: &SqlitePool, uid: i64) -> Vec<SourceOption> {
     sqlx::query(
         "SELECT id, name FROM hub_playlists
           WHERE user_id = ?1 AND service = 'spotify' AND name IS NOT NULL
@@ -3870,26 +3908,73 @@ async fn tonies_playlists(pool: &SqlitePool, uid: i64) -> Vec<PlaylistOption> {
     .await
     .unwrap_or_default()
     .into_iter()
-    .map(|r| PlaylistOption {
+    .map(|r| SourceOption {
         id: r.get("id"),
         name: r.get::<Option<String>, _>("name").unwrap_or_default(),
     })
     .collect()
 }
 
-/// Map a stored binding to its rendered view, resolving the playlist name (with
-/// a `Playlist #id` fallback when the source playlist is gone).
-fn binding_view(
-    b: &crate::tonies::Binding,
-    names: &std::collections::HashMap<i64, String>,
-) -> BindingView {
+/// The user's own backpacks, offered as binding sources (#504).
+async fn tonies_backpacks(pool: &SqlitePool, uid: i64) -> Vec<SourceOption> {
+    sqlx::query(
+        "SELECT id, name FROM hub_backpacks
+          WHERE user_id = ?1
+          ORDER BY name COLLATE NOCASE",
+    )
+    .bind(uid)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| SourceOption {
+        id: r.get("id"),
+        name: r.get::<String, _>("name"),
+    })
+    .collect()
+}
+
+/// The user's own tags, offered as binding sources (#504).
+async fn tonies_tags(pool: &SqlitePool, uid: i64) -> Vec<SourceOption> {
+    sqlx::query(
+        "SELECT id, name FROM hub_tags
+          WHERE owner_user_id = ?1
+          ORDER BY name COLLATE NOCASE",
+    )
+    .bind(uid)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| SourceOption {
+        id: r.get("id"),
+        name: r.get::<String, _>("name"),
+    })
+    .collect()
+}
+
+/// All selectable sources of one user, grouped by kind.
+async fn tonies_source_groups(pool: &SqlitePool, uid: i64) -> SourceGroups {
+    SourceGroups {
+        playlists: tonies_playlists(pool, uid).await,
+        backpacks: tonies_backpacks(pool, uid).await,
+        tags: tonies_tags(pool, uid).await,
+    }
+}
+
+/// Map a stored binding to its rendered view, resolving the source name (with a
+/// `Kind #id` fallback when the source is gone).
+fn binding_view(b: &crate::tonies::Binding, sources: &SourceGroups) -> BindingView {
     let source_id = b.source_id.unwrap_or(0);
-    let source_name = names
-        .get(&source_id)
-        .cloned()
-        .unwrap_or_else(|| format!("Playlist #{source_id}"));
+    // No linked source: name it instead of the misleading `Kind #0` fallback.
+    // `source_id` stays 0 so the picker shows nothing selected.
+    let source_name = match b.source_id {
+        Some(_) => sources.label(&b.source_kind, source_id),
+        None => "Keine Quelle verknüpft".to_string(),
+    };
     BindingView {
         source_id,
+        source_kind: b.source_kind.clone(),
         source_name,
         format: b.format.clone(),
         mode: b.mode.clone(),
@@ -3904,7 +3989,7 @@ fn binding_view(
 #[template(path = "_partials/tonie_binding.html")]
 struct TonieBindingFragment {
     c: ToniesCard,
-    playlists: Vec<PlaylistOption>,
+    sources: SourceGroups,
 }
 
 /// Render `#binding-{tonie_id}` for the given user (used by save/delete/sync).
@@ -3914,9 +3999,7 @@ async fn tonies_binding_fragment(
     tonie_id: &str,
     tonie_name: String,
 ) -> Response {
-    let playlists = tonies_playlists(&st.pool, uid).await;
-    let names: std::collections::HashMap<i64, String> =
-        playlists.iter().map(|p| (p.id, p.name.clone())).collect();
+    let sources = tonies_source_groups(&st.pool, uid).await;
     let binding_row = crate::tonies::get_binding(&st.pool, uid, tonie_id)
         .await
         .ok()
@@ -3927,7 +4010,7 @@ async fn tonies_binding_fragment(
             .unwrap_or_default(),
         None => Vec::new(),
     };
-    let binding = binding_row.as_ref().map(|b| binding_view(b, &names));
+    let binding = binding_row.as_ref().map(|b| binding_view(b, &sources));
     render(&TonieBindingFragment {
         c: ToniesCard {
             id: tonie_id.to_string(),
@@ -3938,7 +4021,7 @@ async fn tonies_binding_fragment(
             binding,
             runs,
         },
-        playlists,
+        sources,
     })
 }
 
@@ -3946,12 +4029,64 @@ async fn tonies_binding_fragment(
 struct TonieBindingForm {
     #[serde(default)]
     tonie_name: Option<String>,
+    /// Source kind (`playlist` | `backpack` | `tag`). Optional: the combined
+    /// `source_id` value (`kind:id`) wins; a bare numeric id defaults to playlist.
     #[serde(default)]
-    source_id: Option<i64>,
+    source_kind: Option<String>,
+    /// Either `"<kind>:<id>"` (the picker) or a bare numeric id (playlist, #500).
+    #[serde(default)]
+    source_id: Option<String>,
     #[serde(default)]
     format: Option<String>,
     #[serde(default)]
     mode: Option<String>,
+}
+
+/// Parse the picker's `source_id` value into `(kind, id)`.
+///
+/// Accepts the combined `"<kind>:<id>"` form the picker submits, and (for
+/// back-compat with the #500 playlist-only form) a bare numeric id, which then
+/// uses `kind_hint` or defaults to `playlist`.
+fn parse_source(kind_hint: Option<&str>, raw: &str) -> Option<(String, i64)> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    match raw.split_once(':') {
+        Some((kind, id)) => Some((kind.trim().to_string(), id.trim().parse().ok()?)),
+        None => {
+            let id: i64 = raw.parse().ok()?;
+            let kind = kind_hint
+                .filter(|k| !k.is_empty())
+                .unwrap_or(crate::tonies::bindings::SOURCE_PLAYLIST);
+            Some((kind.to_string(), id))
+        }
+    }
+}
+
+/// The display name of `user_id`'s own source of `kind`/`id`, or `None` when it
+/// does not exist or is not owned by the user (ownership is checked per kind).
+async fn owned_source_name(
+    pool: &SqlitePool,
+    uid: i64,
+    kind: &str,
+    id: i64,
+) -> Option<String> {
+    use crate::tonies::bindings::{SOURCE_BACKPACK, SOURCE_PLAYLIST, SOURCE_TAG};
+    let sql = match kind {
+        SOURCE_PLAYLIST => {
+            "SELECT name FROM hub_playlists WHERE id = ?1 AND user_id = ?2 AND service = 'spotify'"
+        }
+        SOURCE_BACKPACK => "SELECT name FROM hub_backpacks WHERE id = ?1 AND user_id = ?2",
+        SOURCE_TAG => "SELECT name FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2",
+        _ => return None,
+    };
+    sqlx::query_scalar(sql)
+        .bind(id)
+        .bind(uid)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None)
 }
 
 /// Save (create/update) the source binding of one Kreativ-Tonie. The playlist
@@ -3980,22 +4115,20 @@ async fn tonies_binding_save(
     } else if !crate::tonies::valid_mode(&mode) {
         ("Unbekannter Modus.".to_string(), "err")
     } else {
-        match form.source_id {
-            None => ("Keine Playlist gewählt.".to_string(), "err"),
-            Some(sid) => {
-                // Ownership: the source playlist must belong to this user.
-                let owned: Option<String> = sqlx::query_scalar(
-                    "SELECT name FROM hub_playlists
-                      WHERE id = ?1 AND user_id = ?2 AND service = 'spotify'",
-                )
-                .bind(sid)
-                .bind(uid)
-                .fetch_optional(&st.pool)
-                .await
-                .unwrap_or(None);
-                match owned {
+        let parsed = form
+            .source_id
+            .as_deref()
+            .and_then(|raw| parse_source(form.source_kind.as_deref(), raw));
+        match parsed {
+            None => ("Keine Quelle gewählt.".to_string(), "err"),
+            Some((source_kind, _)) if !crate::tonies::valid_source_kind(&source_kind) => {
+                ("Unbekannte Quellenart.".to_string(), "err")
+            }
+            Some((source_kind, sid)) => {
+                // Ownership: the source must belong to this user (per kind).
+                match owned_source_name(&st.pool, uid, &source_kind, sid).await {
                     None => (
-                        "Playlist nicht gefunden oder nicht dein Eigentum.".to_string(),
+                        "Quelle nicht gefunden oder nicht dein Eigentum.".to_string(),
                         "err",
                     ),
                     Some(name) => {
@@ -4006,7 +4139,7 @@ async fn tonies_binding_save(
                             uid,
                             &tonie_id,
                             tn,
-                            "playlist",
+                            &source_kind,
                             Some(sid),
                             &format,
                             &mode,

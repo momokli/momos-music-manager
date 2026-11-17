@@ -863,3 +863,196 @@ async fn sync_endpoint_requires_session() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ── tests: source kinds (#504) ──────────────────────────────────────────────
+
+/// Acceptance #2: a binding whose source no longer exists (e.g. the playlist was
+/// deleted) is **not** cascaded away — the run reports a clear error instead.
+#[tokio::test]
+async fn execute_binding_reports_missing_source_and_keeps_binding() {
+    let (base, _m) = mock_all().await;
+    let app = spawn_web(&base).await;
+    let (uid, _cookie) = app.user_with_password("src-gone", "pw").await;
+    music_hub::tonies::save_account(
+        &app.pool,
+        uid,
+        Some("hh1"),
+        Some("g@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
+    // A binding pointing at a playlist id that does not exist.
+    music_hub::tonies::upsert_binding(
+        &app.pool,
+        uid,
+        "ct1",
+        Some("Story"),
+        "playlist",
+        Some(999_999),
+        "mp3-128",
+        "manual",
+    )
+    .await
+    .unwrap();
+    let b = music_hub::tonies::get_binding(&app.pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let cfg = cfg_for(&base);
+    let outcome = music_hub::tonies::execute_binding(&app.pool, &cfg, uid, &b).await;
+    assert_eq!(outcome.status, run::STATUS_ERROR);
+    let err = outcome.error.unwrap_or_default();
+    assert!(
+        err.contains("Quelle"),
+        "error should name the source problem: {err}"
+    );
+
+    // The binding survives the deleted source (acceptance #2).
+    assert!(
+        music_hub::tonies::get_binding(&app.pool, uid, "ct1")
+            .await
+            .unwrap()
+            .is_some(),
+        "binding must remain after its source was deleted"
+    );
+}
+
+/// #504 ownership guard at run level: a binding of user A that (e.g. after an
+/// id reuse) points at a source owned by user B must fail loudly and never read
+/// the foreign source; the binding itself survives.
+#[tokio::test]
+async fn execute_binding_rejects_foreign_source_and_keeps_binding() {
+    let (base, _m) = mock_all().await;
+    let app = spawn_web(&base).await;
+    let (uid_a, _cookie) = app.user_with_password("src-owner-a", "pw").await;
+    let (uid_b, _cookie_b) = app.user_with_password("src-owner-b", "pw").await;
+    music_hub::tonies::save_account(
+        &app.pool,
+        uid_a,
+        Some("hh1"),
+        Some("g@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
+
+    // A playlist owned by B, then A's binding points at that id.
+    let foreign_playlist: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_playlists (user_id, service, playlist_id, name, fetched_at)
+         VALUES (?1, 'spotify', 'pl-b', 'Bob Mix', '2026-01-01T00:00:00+00:00') RETURNING id",
+    )
+    .bind(uid_b)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_ne!(uid_a, uid_b, "two distinct users are required");
+
+    music_hub::tonies::upsert_binding(
+        &app.pool,
+        uid_a,
+        "ct1",
+        Some("Story"),
+        "playlist",
+        Some(foreign_playlist),
+        "mp3-128",
+        "manual",
+    )
+    .await
+    .unwrap();
+    let b = music_hub::tonies::get_binding(&app.pool, uid_a, "ct1")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let cfg = cfg_for(&base);
+    let outcome = music_hub::tonies::execute_binding(&app.pool, &cfg, uid_a, &b).await;
+    assert_eq!(outcome.status, run::STATUS_ERROR);
+    let err = outcome.error.unwrap_or_default();
+    assert!(
+        err.contains("Quelle"),
+        "error should name the source problem: {err}"
+    );
+    assert!(
+        music_hub::tonies::get_binding(&app.pool, uid_a, "ct1")
+            .await
+            .unwrap()
+            .is_some(),
+        "binding must remain after a foreign-source rejection"
+    );
+}
+
+/// A backpack source is resolved and synced like a playlist: the run dispatches
+/// on `source_kind`, not on a hard-coded playlist lookup.
+#[tokio::test]
+async fn execute_binding_with_backpack_source_syncs() {
+    let (base, m) = mock_all().await;
+    *m.ready.lock().unwrap() = ["a"].iter().map(|s| s.to_string()).collect();
+    let app = spawn_web(&base).await;
+    let (uid, _cookie) = app.user_with_password("src-bp", "pw").await;
+    music_hub::tonies::save_account(
+        &app.pool,
+        uid,
+        Some("hh1"),
+        Some("bp@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
+
+    let pl = insert_playlist(&app.pool, uid, "bp-pl", "Bundle Mix").await;
+    let t = insert_track(&app.pool, "bp-s1", Some("a"), "A", 100_000).await;
+    sqlx::query(
+        "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, 0)",
+    )
+    .bind(pl)
+    .bind(t)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    let bp: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_backpacks (user_id, name, is_active, created_at, updated_at)
+         VALUES (?1, 'Bundle', 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+         RETURNING id",
+    )
+    .bind(uid)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO hub_backpack_items (backpack_id, source_kind, source_playlist_id, position, added_at)
+         VALUES (?1, 'playlist', ?2, 0, '2026-01-01T00:00:00+00:00')",
+    )
+    .bind(bp)
+    .bind(pl)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    music_hub::tonies::upsert_binding(
+        &app.pool,
+        uid,
+        "ct1",
+        Some("Story"),
+        "backpack",
+        Some(bp),
+        "mp3-128",
+        "manual",
+    )
+    .await
+    .unwrap();
+    let b = music_hub::tonies::get_binding(&app.pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.source_kind, "backpack");
+
+    let cfg = cfg_for(&base);
+    let outcome = music_hub::tonies::execute_binding(&app.pool, &cfg, uid, &b).await;
+    assert_eq!(outcome.status, run::STATUS_OK, "error: {:?}", outcome.error);
+    assert_eq!(outcome.added, 1);
+}

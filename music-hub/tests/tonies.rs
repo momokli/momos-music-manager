@@ -516,6 +516,33 @@ async fn insert_playlist(
     .expect("insert playlist")
 }
 
+/// Insert an owned backpack for `user_id`.
+async fn insert_backpack(pool: &sqlx::SqlitePool, user_id: i64, name: &str) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO hub_backpacks (user_id, name, is_active, created_at, updated_at)
+         VALUES (?1, ?2, 1, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00') RETURNING id",
+    )
+    .bind(user_id)
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .expect("insert backpack")
+}
+
+/// Insert an owned tag for `owner_user_id`.
+async fn insert_tag(pool: &sqlx::SqlitePool, owner_user_id: i64, slug: &str, name: &str) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO hub_tags (owner_user_id, slug, name, created_at)
+         VALUES (?1, ?2, ?3, '2026-01-01T00:00:00+00:00') RETURNING id",
+    )
+    .bind(owner_user_id)
+    .bind(slug)
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .expect("insert tag")
+}
+
 #[tokio::test]
 async fn binding_store_is_user_scoped() {
     let app = common::spawn().await;
@@ -735,8 +762,8 @@ async fn tonies_page_without_playlists_shows_hint() {
         .await
         .unwrap();
     assert!(
-        html.contains("Noch keine Spotify-Playlists"),
-        "empty-state hint expected when the user has no playlists"
+        html.contains("Noch keine Quelle"),
+        "empty-state hint expected when the user has no sources"
     );
     assert!(html.contains("binding-ct1"), "binding area expected per card");
 }
@@ -788,8 +815,9 @@ async fn tonies_page_lists_playlists_as_options_with_capacity() {
         .await
         .unwrap();
 
-    // The user's own playlist is offered as an <option> of the picker.
-    let opt = format!("<option value=\"{pl}\">Chill Mix</option>");
+    // The user's own playlist is offered as an <option> of the picker; the
+    // value carries the kind so ids never collide across kinds (#504).
+    let opt = format!("<option value=\"playlist:{pl}\">Chill Mix</option>");
     assert!(html.contains(&opt), "playlist option missing: {opt}");
     // Capacity bar mirrors the mock (3780 s present, 5400 s total).
     assert!(html.contains("63 min / 90 min"), "capacity text missing");
@@ -988,4 +1016,132 @@ async fn tonies_page_without_creativetonies_shows_empty_state() {
         html.contains("Keine Kreativ-Tonies"),
         "empty-state for a household without Tonies expected"
     );
+}
+
+// ── tests: backpack / tag source kind via HTTP (#504) ───────────────────────
+
+/// Posting the picker's `"backpack:<id>"` value persists a binding whose
+/// `source_kind` is `backpack` (not the playlist default) and renders the
+/// backpack name + kind badge in the swapped fragment.
+#[tokio::test]
+async fn binding_save_accepts_backpack_source() {
+    let auth = mock_read(data_base_state()).await;
+    let app = spawn_web(&auth, &auth).await;
+    let (uid, cookie) = app.user_with_password("t-bp", "pw").await;
+    tonies::save_account(&app.pool, uid, Some("hh1"), Some("bp@example.com"), REFRESH, KEY)
+        .await
+        .unwrap();
+    let bp = insert_backpack(&app.pool, uid, "My Backpack").await;
+
+    let src = format!("backpack:{bp}");
+    let resp = app
+        .client()
+        .post(app.url("/tonies/ct1/binding"))
+        .header("cookie", &cookie)
+        .form(&[
+            ("tonie_name", "Story One"),
+            ("source_id", src.as_str()),
+            ("format", "mp3-128"),
+            ("mode", "manual"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let trig = resp
+        .headers()
+        .get("hx-trigger")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(trig.contains("\"kind\":\"ok\""), "expected ok toast: {trig}");
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("My Backpack"), "fragment should show the backpack name");
+    assert!(body.contains("Backpack"), "fragment should show the kind badge");
+
+    // Persisted with the backpack kind, not the playlist default.
+    let b = tonies::get_binding(&app.pool, uid, "ct1").await.unwrap().unwrap();
+    assert_eq!(b.source_kind, "backpack");
+    assert_eq!(b.source_id, Some(bp));
+}
+
+/// Posting the picker's `"tag:<id>"` value persists a `tag` binding and renders
+/// the tag name + kind badge.
+#[tokio::test]
+async fn binding_save_accepts_tag_source() {
+    let auth = mock_read(data_base_state()).await;
+    let app = spawn_web(&auth, &auth).await;
+    let (uid, cookie) = app.user_with_password("t-tg", "pw").await;
+    tonies::save_account(&app.pool, uid, Some("hh1"), Some("tg@example.com"), REFRESH, KEY)
+        .await
+        .unwrap();
+    let tag = insert_tag(&app.pool, uid, "bedtime", "Bedtime").await;
+
+    let src = format!("tag:{tag}");
+    let resp = app
+        .client()
+        .post(app.url("/tonies/ct1/binding"))
+        .header("cookie", &cookie)
+        .form(&[
+            ("tonie_name", "Story One"),
+            ("source_id", src.as_str()),
+            ("format", "mp3-128"),
+            ("mode", "manual"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let trig = resp
+        .headers()
+        .get("hx-trigger")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(trig.contains("\"kind\":\"ok\""), "expected ok toast: {trig}");
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Bedtime"), "fragment should show the tag name");
+
+    let b = tonies::get_binding(&app.pool, uid, "ct1").await.unwrap().unwrap();
+    assert_eq!(b.source_kind, "tag");
+    assert_eq!(b.source_id, Some(tag));
+}
+
+/// A backpack owned by another user is rejected with an error toast and no row
+/// is written (ownership is enforced per kind).
+#[tokio::test]
+async fn binding_save_rejects_unowned_backpack() {
+    let auth = mock_read(data_base_state()).await;
+    let app = spawn_web(&auth, &auth).await;
+    let (a, _ca) = app.user_with_password("t-bp-own-a", "pw").await;
+    let (b, cb) = app.user_with_password("t-bp-own-b", "pw").await;
+    tonies::save_account(&app.pool, b, Some("hh1"), Some("b@example.com"), REFRESH, KEY)
+        .await
+        .unwrap();
+    let bp_a = insert_backpack(&app.pool, a, "A Only Backpack").await;
+
+    let src = format!("backpack:{bp_a}");
+    let resp = app
+        .client()
+        .post(app.url("/tonies/ct1/binding"))
+        .header("cookie", &cb)
+        .form(&[
+            ("tonie_name", "Story One"),
+            ("source_id", src.as_str()),
+            ("format", "mp3-128"),
+            ("mode", "manual"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let trig = resp
+        .headers()
+        .get("hx-trigger")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(trig.contains("\"kind\":\"err\""), "expected err toast: {trig}");
+    assert!(tonies::get_binding(&app.pool, b, "ct1").await.unwrap().is_none());
+    assert!(tonies::get_binding(&app.pool, a, "ct1").await.unwrap().is_none());
 }
