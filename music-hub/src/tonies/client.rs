@@ -21,13 +21,18 @@ pub const DEFAULT_API_BASE: &str = "https://api.tonies.com";
 pub const REALM: &str = "tonies";
 /// Public token-endpoint path (within the realm).
 pub const TOKEN_PATH: &str = "/protocol/openid-connect/token";
-/// Fallback client id for the password grant.
+/// Client id for the password grant.
 ///
-/// **Placeholder.** The live login answers `invalid_client` for it (verified
-/// 2026-11-17): the real id has to be read off the official app (DevTools →
-/// `POST …/protocol/openid-connect/token` → `client_id`) and set via
-/// `TONIES_CLIENT_ID` or the `tonies_client_id` setting.
-pub const DEFAULT_CLIENT_ID: &str = "tonies-webapp";
+/// Verified 2026-11-17 against the live endpoint: `tonies-webapp` answers
+/// `invalid_client`, while `my-tonies` answers `invalid_grant` (i.e. the client
+/// exists and the password grant is allowed). Same value as the reference client
+/// `~/dev/tonie` (`src/tonies.rs:36`). Override via `TONIES_CLIENT_ID` /
+/// `tonies_client_id` if Tonies ever renames it.
+pub const DEFAULT_CLIENT_ID: &str = "my-tonies";
+
+/// Scope the reference client requests; without it the token may miss the
+/// `openid` claims the API expects.
+pub const SCOPE: &str = "openid";
 
 /// Typed client error. `AuthExpired` means "the user must reconnect".
 #[derive(Debug)]
@@ -107,6 +112,7 @@ pub async fn login(
         .form(&[
             ("grant_type", "password"),
             ("client_id", client_id),
+            ("scope", SCOPE),
             ("username", email),
             ("password", password),
         ])
@@ -124,6 +130,7 @@ pub async fn refresh(auth_base: &str, client_id: &str, refresh_token: &str) -> T
         .form(&[
             ("grant_type", "refresh_token"),
             ("client_id", client_id),
+            ("scope", SCOPE),
             ("refresh_token", refresh_token),
         ])
         .send()
