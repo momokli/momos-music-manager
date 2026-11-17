@@ -1,0 +1,71 @@
+{% extends "base.html" %} {% block title %}Tonies — Spelunke{% endblock %} {% block
+content %}
+<hgroup>
+    <h1>Tonies</h1>
+    <p class="hub-muted">
+        Verbinde dein Tonies-Konto, um deine Kreativ-Tonies und deren
+        Restlaufzeit zu sehen. Nur Lesen — es wird nichts verändert.
+    </p>
+</hgroup>
+
+{% if !message.is_empty() %}
+    <article class="hub-card">{{ message }}</article>
+{% endif %}
+
+{% if !connected %}
+<article>
+    <header><h3>Tonies-Konto verbinden</h3></header>
+    <form method="post" action="/tonies/connect"
+          style="display:flex; flex-direction:column; gap:0.5rem; max-width:24rem">
+        <label>E-Mail
+            <input type="email" name="email" value="{{ email }}" autocomplete="username" required />
+        </label>
+        <label>Passwort
+            <input type="password" name="password" autocomplete="current-password" required />
+        </label>
+        <button type="submit">Verbinden</button>
+    </form>
+    <p class="hub-muted">
+        Das Passwort wird nur einmalig zum Anmelden verwendet und nie
+        gespeichert.
+    </p>
+</article>
+{% else if needs_reconnect %}
+<article>
+    <header><h3>Neu verbinden</h3></header>
+    <form method="post" action="/tonies/reconnect"
+          style="display:flex; flex-direction:column; gap:0.5rem; max-width:24rem">
+        <label>E-Mail
+            <input type="email" name="email" value="{{ email }}" autocomplete="username" required />
+        </label>
+        <label>Passwort
+            <input type="password" name="password" autocomplete="current-password" required />
+        </label>
+        <button type="submit">Neu verbinden</button>
+    </form>
+</article>
+{% else %}
+<article>
+    <header>
+        <h3>Verbunden</h3>
+        <p class="hub-muted">{{ email }}{% if !household.is_empty() %} · Household {{ household }}{% endif %}</p>
+    </header>
+</article>
+
+{% if cards.is_empty() %}
+<p class="hub-empty">Keine Kreativ-Tonies in diesem Household gefunden.</p>
+{% else %}
+<div class="hub-backpack-grid">
+    {% for c in cards %}
+    <article class="hub-backpack-card" data-ctid="{{ c.id }}">
+        <header>
+            <h3>{{ c.title }}</h3>
+            <p class="hub-muted">{{ c.minutes_present }} min / {{ c.minutes_total }} min</p>
+        </header>
+        <progress value="{{ c.percent }}" max="100"></progress>
+    </article>
+    {% endfor %}
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}
