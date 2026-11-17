@@ -278,6 +278,14 @@ Unit-Tests (`worker.rs mod health_tests`): `loop_registry_has_seven_including_pl
 - Keine Regression: Suite-Delta gegenüber Baseline 714 → 719 (+5 neue Tests), 0 failed.
 - Kein Produktionscode in diesem Schritt geändert (nur Progress-Datei).
 
+## PR
+
+- PR: **#570** — https://github.com/momokli/momos-music-manager/pull/570
+- Base: `main` ← Head: `feat/506-playlist-listing-poll`
+- Titel: `feat(hub): periodischer Playlist-Listing-Poll hält snapshot_id frisch (#506)`
+- Body enthält `Closes #506` (verifiziert).
+- Commit: `44da888` (9 Dateien, +802/−16), gepusht nach origin.
+
 ## Status
 
 - [x] Dispatch-Validität geprüft: kein gemergter PR für #506, Feature fehlt → Pipeline.
@@ -287,5 +295,5 @@ Unit-Tests (`worker.rs mod health_tests`): `loop_registry_has_seven_including_pl
 - [x] Stage 3 developer (Code + Tests grün, nicht committet)
 - [ ] Stage 4 verifier
 - [ ] Stage 5 tester
-- [ ] Stage 6 PR
+- [x] Stage 6 PR (#570)
 - [ ] Stage 7 review
