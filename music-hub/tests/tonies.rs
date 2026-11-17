@@ -306,6 +306,7 @@ async fn upload_primitives_send_expected_bodies() {
         id: Some("ch1".into()),
         title: Some("Intro".into()),
         file: Some("file-1".into()),
+        ..Default::default()
     }];
     client.patch_chapters("hh1", "ct1", &chapters).await.unwrap();
     let p = st.patches.lock().unwrap();

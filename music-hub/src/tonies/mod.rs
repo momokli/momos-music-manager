@@ -7,9 +7,14 @@
 
 pub mod bindings;
 pub mod client;
+pub mod sync;
 
 pub use bindings::{
     Binding, delete_binding, get_binding, list_bindings, upsert_binding, valid_format, valid_mode,
+};
+pub use sync::{
+    DesiredTrack, DiffKind, DiffPlan, FitPlan, SkipReason, SkippedTrack, dedupe_by_isrc,
+    desired_from_playlist, greedy_fit, ms_to_seconds, plan_diff,
 };
 
 use anyhow::{Context, Result, bail};
@@ -132,7 +137,7 @@ pub struct CreativeTonie {
 
 /// One chapter of a creative Tonie. Serialisable so it can be reused verbatim
 /// in a `PATCH …/creativetonies/{ctid}` body.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Chapter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -140,6 +145,9 @@ pub struct Chapter {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    /// Chapter length in seconds, when known. Additive and tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<i64>,
 }
 
 /// Capacity snapshot for a creative Tonie, in seconds.
