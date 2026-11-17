@@ -427,3 +427,17 @@ Problem; Funktion/Tests/Akzeptanz waren bereits PASS. **Merge noch offen: CI pen
 Alle Review-Blocker erledigt → PR ist inhaltlich mergebar; sobald CI grün ist,
 `clanker-gh pr merge 570 --squash --delete-branch`, danach `Closes #506` →
 `clanker-gh issue close 506 --reason completed`.
+
+## Abschluss (Retry-Dispatch, nach CI)
+
+Stand: 2026-11-17 ~19:39, Branch `feat/506-playlist-listing-poll`, HEAD `e575817`, PR #570.
+
+**Verdikt: FERTIG — alle CI-Checks grün, PR ist `CLEAN`/`MERGEABLE`, offen.**
+
+`clanker-gh pr checks 570`: „Build + Test (cargo)" pass (6m48s), „Build + Test (hub)" pass
+(3m39s), „cargo fmt/clippy" pass, „Conventional-Commit-Titel" pass, „Issue-Referenz im PR"
+pass, „MMM freeze guard" pass. `mergeStateStatus: CLEAN`, `mergeable: MERGEABLE`.
+
+PR-Body erste Zeile `Closes #506` ⇒ GitHub schließt das Issue beim Merge (WIP-Slot frei).
+Merge bleibt beim Menschen (Repo-Konvention: `momokli`/`app/momo-claw` mergen) — kein
+Selbst-Merge durch den Orchestrator.
