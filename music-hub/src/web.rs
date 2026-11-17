@@ -3848,7 +3848,12 @@ async fn tonies_connect_inner(
     };
 
     let tokens =
-        match crate::tonies::client::login(&st.cfg.tonies_auth_base, &form.email, &form.password)
+        match crate::tonies::client::login(
+            &st.cfg.tonies_auth_base,
+            &st.cfg.tonies_client_id,
+            &form.email,
+            &form.password,
+        )
             .await
         {
             Ok(t) => t,
@@ -3866,10 +3871,11 @@ async fn tonies_connect_inner(
         );
     };
 
-    let mut client = crate::tonies::client::ToniesClient::with_tokens(
+    let mut client = crate::tonies::client::ToniesClient::with_tokens_and_client(
         &st.cfg.tonies_auth_base,
         &st.cfg.tonies_api_base,
         tokens,
+        &st.cfg.tonies_client_id,
     );
     let household = tonies_resolve_household(&mut client).await;
 

@@ -1,9 +1,10 @@
 # Active Plans
 
-**57 done** · **2 in progress** · **28 proposed**
+**57 done** · **2 in progress** · **29 proposed**
 
 ## Proposed
 
+- [accounts-mail](proposed/accounts-mail.md) — `docs/accounts-mail-plan` (Magic-Links: Registrierung per Einladung + Passwort-Reset, Admin-Links fuer beliebige User; Token nur als Hash, single-use, TTL; Mail hinter einem Provider-Trait — Milestone `hub-accounts-0.33.0`, Provider-Entscheidung in #555)
 - [apple-music-source](proposed/apple-music-source.md) — `feat/apple-music-source` (Apple Music als Playlist-/Metadaten-Quelle, **kein** Acquire: öffentliche Playlist-URL + MusicKit-Library → ISRCs → bestehender Order-Flow; Migration 056 rebuildet `hub_service_accounts`; MUT hat keinen Refresh → Reconnect-UX; Faktenblatt in `music-hub/docs/apple-music.md`)
 - [native-deezer-download](proposed/native-deezer-download.md) — **in progress** (M1 #509, M2 #510 gemergt; Deezer-Audio **in** music-api laden statt deemix-Sidecar: Rusteer MIT vendoren, 128/320/FLAC live getestet; **M3 = deemix ersatzlos entfernen** — kein Sidecar, kein Fallback, kein Node/Docker)
 - [tonies](proposed/tonies.md) — `feat/hub-tonies` (Spotify-Playlist/Backpack → Kreativ-Tonie: greedy Prefix bis 90 min, mp3-128, Diff ohne Re-Upload; Autosync hängt an der bestehenden `snapshot_id`-Erkennung im Worker → 0 zusätzliche Spotify-Requests)
