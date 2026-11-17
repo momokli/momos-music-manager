@@ -17,6 +17,7 @@
 #
 # Nutzung: continuous-deploy.sh [--dry-run]
 # Exit: 0 = ok / nichts zu tun · 3 = Setup-/Build-Fehler · 4 = Health-Gate rot (zurückgerollt)
+#       5 = neue Migration mit zerstörendem SQL (blockiert)
 set -uo pipefail
 
 SRC="${HUB_DEPLOY_SRC:-$HOME/mmm-deploy-src}"
@@ -33,7 +34,8 @@ DRY=0
 log() { printf '%s hub-deploy: %s\n' "$(date -Is)" "$*"; }
 
 # Überlappung mit einem manuellen Lauf verhindern (Build dauert ~1,5 min).
-exec 9>"$HOME/.hub-deploy.lock"
+# Gemeinsamer Lock mit dem api-Deploy: beide benutzen denselben Quell-Klon.
+exec 9>"$HOME/.mmm-deploy.lock"
 if ! flock -n 9; then log "läuft bereits — skip"; exit 0; fi
 
 if [ ! -d "$SRC/.git" ]; then
@@ -67,6 +69,25 @@ APPLIED="$(sqlite3 "$TREE/hub.db" 'SELECT count(*) FROM _sqlx_migrations' 2>/dev
 if [ "$NEW_MIG" -gt "$APPLIED" ]; then
   log "neue Migrationen ($APPLIED → $NEW_MIG): sichere hub.db"
   sqlite3 "$TREE/hub.db" ".backup $HOME/hub.db.autodeploy" || { log "FEHLER db-backup"; exit 3; }
+
+  # Zerstörende Migrationen blockieren. Die SQLx-Transaktion plus Health-Gate fangen
+  # eine *fehlschlagende* Migration ab — nicht eine, die erfolgreich Daten vernichtet
+  # (das DB-Backup hilft dann nur unter Verlust aller seither geschriebenen Daten).
+  MAXAPPLIED="$(sqlite3 "$TREE/hub.db" 'SELECT COALESCE(MAX(version),0) FROM _sqlx_migrations' 2>/dev/null || echo 0)"
+  DESTRUCTIVE="$(git -C "$SRC" ls-tree -r --name-only FETCH_HEAD music-hub/migrations | while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      v="$(basename "$f" | sed 's/^0*//; s/_.*//')"
+      [ "$v" -gt "$MAXAPPLIED" ] 2>/dev/null || continue
+      git -C "$SRC" show "FETCH_HEAD:$f" 2>/dev/null \
+        | grep -inE '\b(drop[[:space:]]+(table|column|index)|delete[[:space:]]+from|truncate|rename[[:space:]]+to)\b' \
+        | sed "s|^|$(basename "$f"):|"
+    done)"
+  if [ -n "$DESTRUCTIVE" ] && [ "${HUB_DEPLOY_ALLOW_DESTRUCTIVE:-0}" != "1" ]; then
+    log "BLOCKIERT — neue Migration mit zerstörendem SQL (Binary-Rollback deckt das nicht ab):"
+    printf '%s\n' "$DESTRUCTIVE" | head -10
+    log "Freigabe nur bewusst: HUB_DEPLOY_ALLOW_DESTRUCTIVE=1 (vorher DB-Backup ansehen)"
+    exit 5
+  fi
 fi
 
 git -C "$SRC" archive FETCH_HEAD music-hub | tar -x -C "$TREE" --strip-components=1 \
