@@ -323,26 +323,41 @@ async fn unchanged_refresh_does_not_trigger_sync() {
     let uid = seed_user(&pool, "t2-noop").await;
     link_spotify(&pool, uid).await;
 
-    // items_available = 1 and snapshot == last_synced → the job query skips it.
-    let pl = insert_playlist(&pool, uid, "same", Some("snap-1"), Some("snap-1"), 1).await;
+    // First refresh: the remote snapshot differs → the job body runs and the
+    // hook marks the auto binding dirty (same path as T1).
+    let pl = insert_playlist(&pool, uid, "same", Some("snap-2"), Some("snap-1"), 0).await;
     let auto = insert_binding(&pool, uid, "ct-auto", pl, "auto", None).await;
 
     let mut cfg = Config::for_test("sqlite::memory:");
     cfg.spotify_api_base = sp_base;
 
     let worked = music_hub::worker::playlist_jobs(&pool, &cfg).await.unwrap();
+    assert!(worked, "the changed playlist was refreshed");
+    let dirty_first = dirty_of(&pool, auto)
+        .await
+        .expect("first refresh marks the binding dirty");
+    assert_eq!(sp.hits.lock().unwrap().len(), 1, "one Spotify request");
+
+    // Second refresh: `last_synced_snapshot` now equals `snapshot_id`, so the
+    // job query skips the playlist — the body (and the hook) never run again.
+    let worked = music_hub::worker::playlist_jobs(&pool, &cfg).await.unwrap();
     assert!(!worked, "no job selected for an unchanged playlist");
-    assert!(
-        dirty_of(&pool, auto).await.is_none(),
-        "dirty_since must stay NULL"
+    assert_eq!(
+        dirty_of(&pool, auto).await.as_deref(),
+        Some(dirty_first.as_str()),
+        "dirty_since is not re-marked by the second refresh"
     );
-    assert_eq!(sp.hits.lock().unwrap().len(), 0, "no Spotify request");
+    assert_eq!(
+        sp.hits.lock().unwrap().len(),
+        1,
+        "no extra Spotify request on the second refresh"
+    );
 
     let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_tonie_syncs")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(runs, 0, "no run-log entry");
+    assert_eq!(runs, 0, "no run-log entry for an unchanged refresh");
 }
 
 // ── T3: the quiet period suppresses a freshly dirty binding ─────────────────
@@ -420,4 +435,16 @@ async fn autosync_makes_no_spotify_requests() {
         "autosync must never touch Spotify: {:?}",
         sp.hits.lock().unwrap()
     );
+
+    // …and the run genuinely wrote a chapter (not a silent no-op): the Tonies
+    // mock received exactly one chapter POST, and the run-log recorded it.
+    let uploads = m.uploads.lock().unwrap();
+    assert_eq!(uploads.len(), 1, "exactly one chapter was written");
+    assert_eq!(
+        uploads[0].get("title").and_then(Value::as_str),
+        Some("Song One"),
+        "the written chapter carries the track title"
+    );
+    assert_eq!(rows[0].added, Some(1), "run-log records one added chapter");
+    assert_eq!(rows[0].chapters_after, Some(1), "one chapter after the run");
 }
