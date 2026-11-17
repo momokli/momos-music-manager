@@ -30,6 +30,14 @@ pub struct Config {
     pub youtube_client_secret: Option<String>,
     pub music_api_base: String,
     pub music_api_token: Option<String>,
+    /// Tonies Keycloak auth base (`TONIES_AUTH_BASE`), e.g.
+    /// `https://login.tonies.com/auth`. Overridable so tests target a mock.
+    pub tonies_auth_base: String,
+    /// Tonies REST API base (`TONIES_API_BASE`), e.g. `https://api.tonies.com`.
+    pub tonies_api_base: String,
+    /// Master key for encrypting the Tonies refresh token at rest
+    /// (`HUB_TONIES_SECRET_KEY`). Never logged, never rendered.
+    pub tonies_secret_key: Option<String>,
 }
 
 impl Config {
@@ -75,6 +83,11 @@ impl Config {
             music_api_base: env("MUSIC_API_BASE")
                 .unwrap_or_else(|| "http://127.0.0.1:8710".to_string()),
             music_api_token: env("MUSIC_API_TOKEN"),
+            tonies_auth_base: env("TONIES_AUTH_BASE")
+                .unwrap_or_else(|| crate::tonies::client::DEFAULT_AUTH_BASE.to_string()),
+            tonies_api_base: env("TONIES_API_BASE")
+                .unwrap_or_else(|| crate::tonies::client::DEFAULT_API_BASE.to_string()),
+            tonies_secret_key: env("HUB_TONIES_SECRET_KEY"),
         }
     }
 
@@ -106,6 +119,11 @@ impl Config {
             youtube_client_secret: None,
             music_api_base: "http://127.0.0.1:8710".to_string(),
             music_api_token: None,
+            tonies_auth_base: crate::tonies::client::DEFAULT_AUTH_BASE.to_string(),
+            tonies_api_base: crate::tonies::client::DEFAULT_API_BASE.to_string(),
+            // Deterministic key so web integration tests can exercise the
+            // encrypted account store without a host env var.
+            tonies_secret_key: Some("hub-tonies-test-secret".to_string()),
         }
     }
 
@@ -145,8 +163,24 @@ impl Config {
             crate::settings::YOUTUBE_CLIENT_SECRET => {
                 self.youtube_client_secret = Some(value.into())
             }
+            crate::settings::TONIES_AUTH_BASE => self.tonies_auth_base = value.into(),
+            crate::settings::TONIES_API_BASE => self.tonies_api_base = value.into(),
+            crate::settings::TONIES_SECRET_KEY => self.tonies_secret_key = Some(value.into()),
             _ => {}
         }
+    }
+
+    /// The Tonies master key, or a clear error when it is unset. The value is
+    /// never included in the message.
+    pub fn tonies_key(&self) -> Result<&str> {
+        self.tonies_secret_key
+            .as_deref()
+            .filter(|k| !k.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "HUB_TONIES_SECRET_KEY nicht gesetzt — Tonies-Verbindung ist deaktiviert"
+                )
+            })
     }
 
     pub fn spotify_creds(&self) -> Result<(&str, &str)> {
