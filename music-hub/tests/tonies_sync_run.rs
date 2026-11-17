@@ -700,6 +700,156 @@ async fn sync_endpoint_is_owner_scoped() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+/// Acceptance: a transcoding poll timeout must still leave a `status='timeout'`
+/// **log entry** (not just an in-memory outcome), and it wrote nothing that
+/// reconciles the Tonie, so the `dirty_since` signal stays.
+#[tokio::test]
+async fn timeout_run_is_logged_as_timeout() {
+    let (base, m) = mock_all().await;
+    *m.ready.lock().unwrap() = ["a"].iter().map(|s| s.to_string()).collect();
+    *m.transcoding.lock().unwrap() = true; // never settles
+    // At least one chapter so the poll can observe the transcoding flag.
+    *m.chapters.lock().unwrap() = vec![json!({"id": "ch0", "title": "Old", "seconds": 10})];
+
+    let pool = music_hub::db::connect("sqlite::memory:").await.unwrap();
+    let uid: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_users (slug, display_name, created_at)
+         VALUES ('sync-timeout', 'Timeout', '2026-01-01T00:00:00+00:00') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let bid: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_tonie_bindings
+             (user_id, tonie_id, source_kind, source_id, format, mode, dirty_since,
+              created_at, updated_at)
+         VALUES (?1, 'ct1', 'playlist', NULL, 'mp3-128', 'manual',
+                 '2026-01-01T00:00:00+00:00',
+                 '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+         RETURNING id",
+    )
+    .bind(uid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let run::Claim::Started(run_id) = run::claim_run(&pool, bid).await.unwrap() else {
+        panic!("expected a started run");
+    };
+
+    let cfg = cfg_for(&base);
+    let mut client = ToniesClient::with_tokens(&base, &base, Tokens::default());
+    let desired = vec![track(Some("a"), "A", 100)];
+    let ready = run::readiness(&cfg, desired.iter().filter_map(|t| t.isrc.clone())).await;
+    let mut b = binding();
+    b.id = bid;
+    let opts = SyncOptions {
+        poll_attempts: 2,
+        poll_interval: Duration::from_millis(1),
+    };
+    let outcome = run::run_sync(
+        &mut client,
+        "hh1",
+        &b,
+        desired,
+        |isrc| ready.contains(isrc),
+        fetcher(cfg.clone()),
+        &opts,
+    )
+    .await;
+
+    assert_eq!(outcome.status, run::STATUS_TIMEOUT);
+    run::finish_run(&pool, run_id, &outcome).await.unwrap();
+
+    let rows = run::list_syncs(&pool, bid, 5).await.unwrap();
+    assert_eq!(rows.len(), 1, "a timed-out run must still be logged");
+    assert_eq!(rows[0].status, run::STATUS_TIMEOUT);
+    assert_eq!(rows[0].added, Some(1), "upload happened before the poll");
+
+    let dirty: Option<String> =
+        sqlx::query_scalar("SELECT dirty_since FROM hub_tonie_bindings WHERE id = ?1")
+            .bind(bid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        dirty.is_some(),
+        "a timeout wrote nothing reconciled — dirty_since must stay"
+    );
+}
+
+/// Acceptance: a second run while one is live is refused with `Busy` —
+/// verified end-to-end through the endpoint's `HX-Trigger` toast, and no second
+/// run row is created.
+#[tokio::test]
+async fn busy_sync_returns_busy_toast() {
+    let (base, _m) = mock_all().await;
+    let app = spawn_web(&base).await;
+    let (uid, cookie) = app.user_with_password("sync-busy", "pw").await;
+    music_hub::tonies::save_account(
+        &app.pool,
+        uid,
+        Some("hh1"),
+        Some("busy@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
+    let pl = insert_playlist(&app.pool, uid, "busy-1", "Busy").await;
+    music_hub::tonies::upsert_binding(
+        &app.pool,
+        uid,
+        "ct1",
+        Some("Story"),
+        "playlist",
+        Some(pl),
+        "mp3-128",
+        "manual",
+    )
+    .await
+    .unwrap();
+    let b = music_hub::tonies::get_binding(&app.pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Simulate a live run started just now (younger than STALE_SECS).
+    sqlx::query(
+        "INSERT INTO hub_tonie_syncs (binding_id, started_at, status)
+         VALUES (?1, ?2, 'running')",
+    )
+    .bind(b.id)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let resp = app
+        .client()
+        .post(app.url("/tonies/ct1/sync"))
+        .header("cookie", &cookie)
+        .form(&[("tonie_name", "Story")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let trig = resp
+        .headers()
+        .get("hx-trigger")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // The HX-Trigger header JSON-escapes umlauts, so assert on a distinct
+    // ASCII substring of the Busy message (vs. the rate-limit message).
+    assert!(
+        trig.contains("bereits") && trig.contains("Sync"),
+        "busy toast missing: {trig}"
+    );
+    // No second row: still exactly the pre-existing live run.
+    assert_eq!(run::list_syncs(&app.pool, b.id, 5).await.unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn sync_endpoint_requires_session() {
     let (base, _m) = mock_all().await;
