@@ -651,6 +651,7 @@ pub async fn execute_binding(
 
     let desired = match super::sync::desired_for_source(
         pool,
+        uid,
         &binding.source_kind,
         binding.source_id,
     )

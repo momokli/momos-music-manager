@@ -239,20 +239,74 @@ pub async fn desired_from_playlist(
 /// A missing `source_id` ("no source linked") and an unknown kind are hard
 /// errors — an *existing but empty* source yields an empty `Vec` instead; the
 /// caller turns that emptiness into a clear error state (no silent empty sync).
+///
+/// Ownership (#504): migration 060 drops the FK on `source_id`, and the
+/// `hub_playlists`/`hub_backpacks`/`hub_tags` primary keys are plain INTEGER
+/// (no AUTOINCREMENT), so a deleted-then-recreated source can reuse an id. A
+/// binding from user A could therefore point at a source now owned by user B.
+/// We verify ownership before reading: a source that is not (or no longer)
+/// owned by `uid` resolves to an empty `Vec` — the caller turns that into an
+/// error state and **never** reads another user's tracks.
 pub async fn desired_for_source(
     pool: &SqlitePool,
+    uid: i64,
     source_kind: &str,
     source_id: Option<i64>,
 ) -> Result<Vec<DesiredTrack>> {
     let Some(source_id) = source_id else {
         anyhow::bail!("Keine Quelle verknüpft");
     };
+    if !matches!(source_kind, SOURCE_PLAYLIST | SOURCE_TAG | SOURCE_BACKPACK) {
+        anyhow::bail!("Unbekannte Quellenart: {source_kind}");
+    }
+    if !source_owned_by(pool, uid, source_kind, source_id).await? {
+        return Ok(Vec::new());
+    }
     match source_kind {
         SOURCE_PLAYLIST => desired_from_playlist(pool, source_id).await,
         SOURCE_TAG => desired_from_tag(pool, source_id).await,
         SOURCE_BACKPACK => desired_from_backpack(pool, source_id).await,
+        // Unreachable: validated above.
         other => anyhow::bail!("Unbekannte Quellenart: {other}"),
     }
+}
+
+/// Whether `source_id` of `kind` is owned by `uid` (#504).
+///
+/// Each table names its user column differently: `hub_playlists.user_id`,
+/// `hub_backpacks.user_id`, `hub_tags.owner_user_id`. A missing row is simply
+/// not owned (returns `false`).
+async fn source_owned_by(
+    pool: &SqlitePool,
+    uid: i64,
+    kind: &str,
+    id: i64,
+) -> Result<bool> {
+    let found: Option<i64> = match kind {
+        SOURCE_PLAYLIST => {
+            sqlx::query_scalar("SELECT 1 FROM hub_playlists WHERE id = ?1 AND user_id = ?2")
+                .bind(id)
+                .bind(uid)
+                .fetch_optional(pool)
+                .await?
+        }
+        SOURCE_BACKPACK => {
+            sqlx::query_scalar("SELECT 1 FROM hub_backpacks WHERE id = ?1 AND user_id = ?2")
+                .bind(id)
+                .bind(uid)
+                .fetch_optional(pool)
+                .await?
+        }
+        SOURCE_TAG => {
+            sqlx::query_scalar("SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2")
+                .bind(id)
+                .bind(uid)
+                .fetch_optional(pool)
+                .await?
+        }
+        _ => return Ok(false),
+    };
+    Ok(found.is_some())
 }
 
 /// Desired tracks of a tag: its resolved hub tracks (`hub_track_resolved_tags`),

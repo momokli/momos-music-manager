@@ -165,13 +165,13 @@ fn chapters(desired: &[DesiredTrack]) -> BTreeSet<(String, i64)> {
 #[tokio::test]
 async fn playlist_tag_and_backpack_yield_the_same_chapters() {
     let w = world().await;
-    let pl = tonies::desired_for_source(&w.pool, "playlist", Some(w.playlist))
+    let pl = tonies::desired_for_source(&w.pool, 1, "playlist", Some(w.playlist))
         .await
         .unwrap();
-    let tag = tonies::desired_for_source(&w.pool, "tag", Some(w.tag))
+    let tag = tonies::desired_for_source(&w.pool, 1, "tag", Some(w.tag))
         .await
         .unwrap();
-    let bp = tonies::desired_for_source(&w.pool, "backpack", Some(w.backpack))
+    let bp = tonies::desired_for_source(&w.pool, 1, "backpack", Some(w.backpack))
         .await
         .unwrap();
 
@@ -209,7 +209,7 @@ async fn playlist_respects_position_order() {
         .await
         .unwrap();
     }
-    let d = tonies::desired_for_source(&w.pool, "playlist", Some(shuffled))
+    let d = tonies::desired_for_source(&w.pool, 1, "playlist", Some(shuffled))
         .await
         .unwrap();
     assert_eq!(
@@ -231,7 +231,7 @@ async fn empty_sources_resolve_to_empty_lists() {
         ("tag", empty_tag),
         ("backpack", empty_bp),
     ] {
-        let d = tonies::desired_for_source(&w.pool, kind, Some(id))
+        let d = tonies::desired_for_source(&w.pool, 1, kind, Some(id))
             .await
             .unwrap();
         assert!(d.is_empty(), "{kind} should resolve to an empty list");
@@ -241,13 +241,65 @@ async fn empty_sources_resolve_to_empty_lists() {
 #[tokio::test]
 async fn unknown_kind_and_missing_source_are_errors() {
     let w = world().await;
-    let err = tonies::desired_for_source(&w.pool, "lens", Some(1))
+    let err = tonies::desired_for_source(&w.pool, 1, "lens", Some(1))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Unbekannte Quellenart"), "{err}");
 
-    let err = tonies::desired_for_source(&w.pool, "playlist", None)
+    let err = tonies::desired_for_source(&w.pool, 1, "playlist", None)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Keine Quelle"), "{err}");
+}
+
+/// #504 ownership guard: a source owned by another user must never resolve —
+/// the caller gets an empty list (turned into an error state), not a foreign read.
+#[tokio::test]
+async fn foreign_source_resolves_to_empty_for_all_kinds() {
+    let w = world().await;
+    let bob = insert_user(&w.pool, "bob").await;
+
+    // Bob owns a populated playlist, tag and backpack (not user 1).
+    let b = insert_track(&w.pool, "s-x", "isrc-x", "X", 120_000).await;
+    let bob_pl = insert_playlist(&w.pool, bob, "pl-bob", "Bob Mix").await;
+    sqlx::query(
+        "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, 0)",
+    )
+    .bind(bob_pl)
+    .bind(b)
+    .execute(&w.pool)
+    .await
+    .unwrap();
+    let bob_tag = insert_tag(&w.pool, bob, "bob", "Bob Tag").await;
+    sqlx::query("INSERT INTO hub_track_resolved_tags (track_id, tag_id) VALUES (?1, ?2)")
+        .bind(b)
+        .bind(bob_tag)
+        .execute(&w.pool)
+        .await
+        .unwrap();
+    let bob_bp = insert_backpack(&w.pool, bob, "Bob Bundle").await;
+    sqlx::query(
+        "INSERT INTO hub_backpack_items (backpack_id, source_kind, source_playlist_id, position, added_at)
+         VALUES (?1, 'playlist', ?2, 0, ?3)",
+    )
+    .bind(bob_bp)
+    .bind(bob_pl)
+    .bind(TS)
+    .execute(&w.pool)
+    .await
+    .unwrap();
+
+    for (kind, id) in [
+        ("playlist", bob_pl),
+        ("tag", bob_tag),
+        ("backpack", bob_bp),
+    ] {
+        let d = tonies::desired_for_source(&w.pool, 1, kind, Some(id))
+            .await
+            .unwrap();
+        assert!(
+            d.is_empty(),
+            "user 1 must not read user {bob}'s {kind} (id {id})"
+        );
+    }
 }

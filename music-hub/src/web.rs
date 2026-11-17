@@ -3966,7 +3966,12 @@ async fn tonies_source_groups(pool: &SqlitePool, uid: i64) -> SourceGroups {
 /// `Kind #id` fallback when the source is gone).
 fn binding_view(b: &crate::tonies::Binding, sources: &SourceGroups) -> BindingView {
     let source_id = b.source_id.unwrap_or(0);
-    let source_name = sources.label(&b.source_kind, source_id);
+    // No linked source: name it instead of the misleading `Kind #0` fallback.
+    // `source_id` stays 0 so the picker shows nothing selected.
+    let source_name = match b.source_id {
+        Some(_) => sources.label(&b.source_kind, source_id),
+        None => "Keine Quelle verknüpft".to_string(),
+    };
     BindingView {
         source_id,
         source_kind: b.source_kind.clone(),

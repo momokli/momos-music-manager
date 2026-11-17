@@ -10,6 +10,17 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Tonies-Quelle — Backpack/Tag als Quelle, Resolver-Dispatch** (#504) —
+  ein Tonie-Binding kann jetzt neben einer Playlist auch einen **Backpack** oder
+  einen **Tag** als Quelle nutzen. Der Resolver `tonies::sync::desired_for_source`
+  dispatcht auf `source_kind` und liefert dieselbe `desired`-Liste (Playlist nach
+  `position`, Tag nach Hub-Track-id, Backpack in Resolver-Reihenfolge); der
+  Tonie-Picker der Web-UI bietet die wählbaren Backpacks/Tags mit an, und ein
+  leerer oder entfernter Quell-Verweis führt in den klaren Fehlerzustand
+  („Quelle ist leer oder nicht mehr vorhanden") statt in einen stillen Leersync.
+  Beim Auflösen wird das **Eigentum** der Quelle geprüft (nach Migration `060`
+  ohne FK): eine fremde oder nicht mehr eigene Quelle ergibt eine leere Liste,
+  nie einen Fremd-Read. **Kein Version-Bump.**
 - feat: **Tonies Auto-Sync — Worker-Hook auf `snapshot_id` + Debounce** (#503) —
   `mode='auto'`-Tonie-Bindings werden automatisch synchronisiert, sobald sich die
   `snapshot_id` der Quell-Playlist ändert. Der Worker markiert die betroffenen

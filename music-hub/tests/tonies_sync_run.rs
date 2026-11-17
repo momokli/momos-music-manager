@@ -920,6 +920,71 @@ async fn execute_binding_reports_missing_source_and_keeps_binding() {
     );
 }
 
+/// #504 ownership guard at run level: a binding of user A that (e.g. after an
+/// id reuse) points at a source owned by user B must fail loudly and never read
+/// the foreign source; the binding itself survives.
+#[tokio::test]
+async fn execute_binding_rejects_foreign_source_and_keeps_binding() {
+    let (base, _m) = mock_all().await;
+    let app = spawn_web(&base).await;
+    let (uid_a, _cookie) = app.user_with_password("src-owner-a", "pw").await;
+    let (uid_b, _cookie_b) = app.user_with_password("src-owner-b", "pw").await;
+    music_hub::tonies::save_account(
+        &app.pool,
+        uid_a,
+        Some("hh1"),
+        Some("g@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
+
+    // A playlist owned by B, then A's binding points at that id.
+    let foreign_playlist: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_playlists (user_id, service, playlist_id, name, fetched_at)
+         VALUES (?1, 'spotify', 'pl-b', 'Bob Mix', '2026-01-01T00:00:00+00:00') RETURNING id",
+    )
+    .bind(uid_b)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_ne!(uid_a, uid_b, "two distinct users are required");
+
+    music_hub::tonies::upsert_binding(
+        &app.pool,
+        uid_a,
+        "ct1",
+        Some("Story"),
+        "playlist",
+        Some(foreign_playlist),
+        "mp3-128",
+        "manual",
+    )
+    .await
+    .unwrap();
+    let b = music_hub::tonies::get_binding(&app.pool, uid_a, "ct1")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let cfg = cfg_for(&base);
+    let outcome = music_hub::tonies::execute_binding(&app.pool, &cfg, uid_a, &b).await;
+    assert_eq!(outcome.status, run::STATUS_ERROR);
+    let err = outcome.error.unwrap_or_default();
+    assert!(
+        err.contains("Quelle"),
+        "error should name the source problem: {err}"
+    );
+    assert!(
+        music_hub::tonies::get_binding(&app.pool, uid_a, "ct1")
+            .await
+            .unwrap()
+            .is_some(),
+        "binding must remain after a foreign-source rejection"
+    );
+}
+
 /// A backpack source is resolved and synced like a playlist: the run dispatches
 /// on `source_kind`, not on a hard-coded playlist lookup.
 #[tokio::test]
