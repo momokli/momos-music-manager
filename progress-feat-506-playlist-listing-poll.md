@@ -304,8 +304,9 @@ Stand: 2026-11-17, Branch `feat/506-playlist-listing-poll`, HEAD `3c05cb8`, PR #
 (base `main` ← head; `Closes #506`). Geprüft mit `clanker-git diff origin/main...HEAD`,
 `clanker-gh pr view 570` und lokalem `cargo test --locked` (musik-hub).
 
-**Verdikt: REQUEST_CHANGES** — Funktion/Code/Tests sind einwandfrei (alle Fakten-Punkte
-PASS), aber der PR ist nach Repo-Regel **unvollständig** und darf so nicht gemergt werden:
+**Verdikt: REQUEST_CHANGES → nach Rework 1: APPROVE** (Re-Review unten; beide Blocker
+behoben) — Funktion/Code/Tests sind einwandfrei (alle Fakten-Punkte
+PASS); zum Review-Zeitpunkt war der PR nach Repo-Regel **unvollständig**:
 
 ### Blocker (merge-blockierend, beide nicht funktional)
 
@@ -395,3 +396,34 @@ Kontext, Loop/Cadence, Backoff, Request-Zähler, **Kein Version-Bump.**).
 - [x] Blocker 1 (UI-Screenshot) behoben
 - [x] Blocker 2 (CHANGELOG) behoben
 - [x] PR-Body aktualisiert (Screenshot + `Closes #506`)
+
+## Re-Review 1
+
+Stand: 2026-11-17, Branch `feat/506-playlist-listing-poll`, HEAD `6a7d6fb`, PR #570.
+Geprüft mit `clanker-git diff origin/main...HEAD`, `clanker-gh pr view 570` und
+`clanker-gh pr checks 570`.
+
+**Verdikt: APPROVE** — beide nicht-funktionalen Blocker vollständig behoben, kein neues
+Problem; Funktion/Tests/Akzeptanz waren bereits PASS. **Merge noch offen: CI pending.**
+
+### Blocker-Prüfung
+
+| # | Blocker | Befund |
+| --- | --- | --- |
+| 1 | UI-Screenshot der geänderten Admin-Statusansicht | ✅ behoben. `docs/screenshots/hub-ops-status-panel-requests.png` (2880×2600, 518 099 B) ist in `3fc2885` committet (Blob in `HEAD`-Tree) und gepusht; raw-URL → **HTTP 200**; im PR-Body unter `## Screenshots` eingebettet. Bild geprüft: Tabelle „Hub-Worker" mit allen **7 Loops** (inkl. `playlists`) und der neuen Spalte **„Requests"** — genau die geänderte Ansicht. |
+| 2 | CHANGELOG-Eintrag | ✅ behoben. `music-hub/CHANGELOG.md` `## [Unreleased] → ### Added` erster Eintrag „Periodischer Playlist-Listing-Poll hält `snapshot_id` frisch (#506)" (im Diff von `3fc2885`; kein Version-Bump, konventionskonform). |
+
+### Keine neuen Probleme
+
+| Prüfpunkt | Befund |
+| --- | --- |
+| Rework-Scope | ✅ `3fc2885` betrifft nur `docs/screenshots/…png` + `music-hub/CHANGELOG.md`; `6a7d6fb` nur die Progress-Datei. **Kein Produktions-/Testcode geändert** (`git diff 44da888..HEAD --stat` ohne `src/`/`tests/`) ⇒ kein neues Funktionsrisiko. |
+| `Closes #506` | ✅ weiterhin erste Zeile des PR-Body (verifiziert via `clanker-gh pr view 570`); Check „Issue-Referenz im PR" **pass**. |
+| Diff-Unverändert ggü. Review | ✅ Code-Diff `origin/main...HEAD` unverändert zur bereits PASS-geprüften Version (nur +Screenshot, +CHANGELOG, +Progress). |
+| CI | ⏳ `mergeStateStatus: BLOCKED`; `Build + Test (cargo)`, `Build + Test (hub)`, `cargo fmt/clippy` noch `IN_PROGRESS`; Qualitäts-Checks (Conventional-Commit, Issue-Referenz, MMM freeze guard) **pass**. ⇒ **waiting on CI: #570**, kein Merge-Versuch, kein Retry-Loop. |
+
+### Nächster Schritt
+
+Alle Review-Blocker erledigt → PR ist inhaltlich mergebar; sobald CI grün ist,
+`clanker-gh pr merge 570 --squash --delete-branch`, danach `Closes #506` →
+`clanker-gh issue close 506 --reason completed`.
