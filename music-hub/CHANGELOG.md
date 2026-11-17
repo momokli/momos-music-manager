@@ -10,6 +10,17 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Periodischer Playlist-Listing-Poll hält `snapshot_id` frisch** (#506) —
+  Spotify schickt keinen Playlist-Change-Webhook, deshalb blieb
+  `hub_playlists.snapshot_id` bisher stale, bis ein Mensch „Fetch" drückte (der Worker
+  holt Items nur bei geänderter `snapshot_id`). Ein neuer Worker-Loop `playlists` ruft
+  pro verbundenem Spotify-User periodisch `get_all_items("/me/playlists?limit=50")` →
+  `fetch_playlists()` auf (Listing-only, **kein** Item-Fetch im selben Tick), mit
+  konfigurierbarer Cadence (`playlist_poll_enabled` Default `true`,
+  `playlist_poll_interval_secs` Default `900`, Clamp `.max(60)`), 429-/Quota-Backoff
+  über die vorhandenen Helfer und einem kumulativen Request-Zähler, der als `requests`
+  im `/api/hub/status`-JSON und als Spalte „Requests" im Admin-Panel sichtbar ist.
+  **Kein Version-Bump.**
 - feat: **Tonies-Quelle — Backpack/Tag als Quelle, Resolver-Dispatch** (#504) —
   ein Tonie-Binding kann jetzt neben einer Playlist auch einen **Backpack** oder
   einen **Tag** als Quelle nutzen. Der Resolver `tonies::sync::desired_for_source`
