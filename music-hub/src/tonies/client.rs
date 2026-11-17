@@ -21,9 +21,13 @@ pub const DEFAULT_API_BASE: &str = "https://api.tonies.com";
 pub const REALM: &str = "tonies";
 /// Public token-endpoint path (within the realm).
 pub const TOKEN_PATH: &str = "/protocol/openid-connect/token";
-/// Public client id used for the password grant. TODO(live): confirm against
-/// the reference client — only the mechanics are exercised in M1.
-pub const CLIENT_ID: &str = "tonies-webapp";
+/// Fallback client id for the password grant.
+///
+/// **Placeholder.** The live login answers `invalid_client` for it (verified
+/// 2026-11-17): the real id has to be read off the official app (DevTools →
+/// `POST …/protocol/openid-connect/token` → `client_id`) and set via
+/// `TONIES_CLIENT_ID` or the `tonies_client_id` setting.
+pub const DEFAULT_CLIENT_ID: &str = "tonies-webapp";
 
 /// Typed client error. `AuthExpired` means "the user must reconnect".
 #[derive(Debug)]
@@ -91,13 +95,18 @@ async fn parse_tokens(resp: reqwest::Response, what: &str) -> TResult<Tokens> {
 }
 
 /// Keycloak password grant. Never logs the password.
-pub async fn login(auth_base: &str, email: &str, password: &str) -> TResult<Tokens> {
+pub async fn login(
+    auth_base: &str,
+    client_id: &str,
+    email: &str,
+    password: &str,
+) -> TResult<Tokens> {
     let client = reqwest::Client::new();
     let resp = client
         .post(token_url(auth_base))
         .form(&[
             ("grant_type", "password"),
-            ("client_id", CLIENT_ID),
+            ("client_id", client_id),
             ("username", email),
             ("password", password),
         ])
@@ -108,13 +117,13 @@ pub async fn login(auth_base: &str, email: &str, password: &str) -> TResult<Toke
 }
 
 /// Exchange a refresh token for a fresh access token.
-pub async fn refresh(auth_base: &str, refresh_token: &str) -> TResult<Tokens> {
+pub async fn refresh(auth_base: &str, client_id: &str, refresh_token: &str) -> TResult<Tokens> {
     let client = reqwest::Client::new();
     let resp = client
         .post(token_url(auth_base))
         .form(&[
             ("grant_type", "refresh_token"),
-            ("client_id", CLIENT_ID),
+            ("client_id", client_id),
             ("refresh_token", refresh_token),
         ])
         .send()
@@ -138,6 +147,9 @@ pub struct ToniesClient {
     http: reqwest::Client,
     auth_base: String,
     api_base: String,
+    /// Keycloak client for the token exchange; `DEFAULT_CLIENT_ID` unless the
+    /// configured one was passed in.
+    client_id: String,
     access_token: Option<String>,
     expires_at: i64,
     refresh_token: Option<String>,
@@ -145,10 +157,16 @@ pub struct ToniesClient {
 
 impl ToniesClient {
     pub fn new(auth_base: &str, api_base: &str) -> Self {
+        Self::with_client_id(auth_base, api_base, DEFAULT_CLIENT_ID)
+    }
+
+    /// Like [`Self::new`], but with an explicit Keycloak client id.
+    pub fn with_client_id(auth_base: &str, api_base: &str, client_id: &str) -> Self {
         ToniesClient {
             http: reqwest::Client::new(),
             auth_base: auth_base.trim_end_matches('/').to_string(),
             api_base: api_base.trim_end_matches('/').to_string(),
+            client_id: client_id.trim().to_string(),
             access_token: None,
             expires_at: 0,
             refresh_token: None,
@@ -157,6 +175,18 @@ impl ToniesClient {
 
     pub fn with_tokens(auth_base: &str, api_base: &str, tokens: Tokens) -> Self {
         let mut c = Self::new(auth_base, api_base);
+        c.set_tokens(tokens);
+        c
+    }
+
+    /// [`Self::with_tokens`] with an explicit Keycloak client id.
+    pub fn with_tokens_and_client(
+        auth_base: &str,
+        api_base: &str,
+        tokens: Tokens,
+        client_id: &str,
+    ) -> Self {
+        let mut c = Self::with_client_id(auth_base, api_base, client_id);
         c.set_tokens(tokens);
         c
     }
@@ -188,7 +218,7 @@ impl ToniesClient {
             .refresh_token
             .clone()
             .ok_or(ToniesError::AuthExpired)?;
-        match refresh(&self.auth_base, &rt).await {
+        match refresh(&self.auth_base, &self.client_id, &rt).await {
             Ok(tokens) => {
                 self.set_tokens(tokens);
                 Ok(())

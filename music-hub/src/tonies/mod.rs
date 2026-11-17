@@ -265,10 +265,11 @@ pub async fn client_for(
         refresh_token: Some(refresh_token),
         expires_at: 0,
     };
-    Ok(client::ToniesClient::with_tokens(
+    Ok(client::ToniesClient::with_tokens_and_client(
         &cfg.tonies_auth_base,
         &cfg.tonies_api_base,
         tokens,
+        &cfg.tonies_client_id,
     ))
 }
 
