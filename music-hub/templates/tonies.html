@@ -61,6 +61,11 @@ content %}
         <header>
             <h3>{{ c.title }}</h3>
             <p class="hub-muted">{{ c.minutes_present }} min / {{ c.minutes_total }} min</p>
+            {% if let Some(b) = c.binding %}
+                {% if !b.last_sync_status.is_empty() %}
+                <p class="hub-muted">Letzter Sync: {{ b.last_sync_status }} · {{ b.last_sync_at }}</p>
+                {% endif %}
+            {% endif %}
         </header>
         <progress value="{{ c.percent }}" max="100"></progress>
         {% include "_partials/tonie_binding.html" %}

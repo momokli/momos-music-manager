@@ -7,10 +7,15 @@
 
 pub mod bindings;
 pub mod client;
+pub mod run;
 pub mod sync;
 
 pub use bindings::{
     Binding, delete_binding, get_binding, list_bindings, upsert_binding, valid_format, valid_mode,
+};
+pub use run::{
+    Claim, RunOutcome, SyncOptions, SyncRow, Transcoding, claim_run, finish_run, list_syncs,
+    poll_transcoding, readiness, run_sync, summary,
 };
 pub use sync::{
     DesiredTrack, DiffKind, DiffPlan, FitPlan, SkipReason, SkippedTrack, dedupe_by_isrc,
@@ -148,6 +153,13 @@ pub struct Chapter {
     /// Chapter length in seconds, when known. Additive and tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seconds: Option<i64>,
+    /// `true` while the Tonies backend is still transcoding this chapter.
+    /// Additive and tolerant; `None` means the API did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcoding: Option<bool>,
+    /// Backend chapter kind (the API's `type` field), when present.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub chapter_type: Option<String>,
 }
 
 /// Capacity snapshot for a creative Tonie, in seconds.
