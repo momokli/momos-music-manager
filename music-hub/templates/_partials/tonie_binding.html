@@ -1,13 +1,23 @@
-{# Tonie source binding (#500). Renders the current binding of one Kreativ-Tonie
-   or a form to pick a source playlist. Swapped in place by htmx
+{# Tonie source binding (#500) + sync run (#502). Renders the current binding of
+   one Kreativ-Tonie or a form to pick a source playlist. Swapped in place by htmx
    (`hx-target="#binding-{{ c.id }}"`, `hx-swap="outerHTML"`), so this file is
    both included from `tonies.html` (loop var `c`) and rendered standalone by the
-   save/delete handlers. It performs no API call — only DB-backed data. #}
+   save/delete/sync handlers. It performs no API call itself — the sync button
+   posts to `/tonies/{id}/sync` and the run log is DB-backed. #}
 <div id="binding-{{ c.id }}" class="hub-tonie-binding">
     {% if let Some(b) = c.binding %}
     <p class="hub-muted">
         Quelle: <strong>{{ b.source_name }}</strong> · {{ b.format }} · {{ b.mode }}
     </p>
+    <form
+        hx-post="/tonies/{{ c.id }}/sync"
+        hx-target="#binding-{{ c.id }}"
+        hx-swap="outerHTML"
+        style="margin:0.4rem 0"
+    >
+        <input type="hidden" name="tonie_name" value="{{ c.title }}" />
+        <button type="submit">Jetzt synchronisieren</button>
+    </form>
     <details>
         <summary>Bearbeiten</summary>
         <form
@@ -49,6 +59,32 @@
             <button type="submit" class="hub-ta-cancel">Entfernen</button>
         </form>
     </details>
+    {% if c.runs.is_empty() %}
+    <p class="hub-muted">Noch kein Sync.</p>
+    {% else %}
+    <details>
+        <summary>Sync-Verlauf</summary>
+        <ul class="hub-muted" style="list-style:none; padding-left:0">
+            {% for r in c.runs %}
+            <li>
+                <strong>{{ r.started_label() }}</strong> · {{ r.status_label() }}
+                {% if !r.duration_label().is_empty() %} · {{ r.duration_label() }}{% endif %}
+                · {{ r.chapters() }} Kapitel, {{ r.minutes() }} min
+                {% if r.added_count() > 0 %} · +{{ r.added_count() }}{% endif %}
+                {% if r.removed_count() > 0 %} · −{{ r.removed_count() }}{% endif %}
+                {% if let Some(e) = r.error %} · {{ e }}{% endif %}
+                {% if !r.skipped.is_empty() %}
+                <ul>
+                    {% for s in r.skipped %}
+                    <li>{{ s.title }} — {{ s.label() }}</li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </details>
+    {% endif %}
     {% else %}
     <details open>
         <summary>Quelle wählen</summary>

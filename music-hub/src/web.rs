@@ -60,7 +60,11 @@ pub fn router(state: AppState) -> Router {
         .route("/tonies/connect", post(tonies_connect))
         .route("/tonies/reconnect", post(tonies_reconnect))
         .route("/tonies/{tonie_id}/binding", post(tonies_binding_save))
-        .route("/tonies/{tonie_id}/binding/delete", post(tonies_binding_delete))
+        .route(
+            "/tonies/{tonie_id}/binding/delete",
+            post(tonies_binding_delete),
+        )
+        .route("/tonies/{tonie_id}/sync", post(tonies_sync))
         .route("/curate", get(curate_page).post(curate_create))
         .route("/curate/{id}", get(curate_detail))
         .route("/curate/{id}/update", post(curate_update))
@@ -3564,6 +3568,8 @@ struct ToniesCard {
     percent: i64,
     /// The current source binding for this Tonie, if any.
     binding: Option<BindingView>,
+    /// The last few sync runs of this Tonie (newest first).
+    runs: Vec<crate::tonies::run::SyncRow>,
 }
 
 /// One selectable playlist source for a Tonie binding.
@@ -3578,6 +3584,10 @@ struct BindingView {
     source_name: String,
     format: String,
     mode: String,
+    /// Last sync timestamp (RFC3339), when a run has finished.
+    last_sync_at: String,
+    /// Last sync status token (`ok`/`noop`/`timeout`/`error`).
+    last_sync_status: String,
 }
 
 #[derive(Deserialize)]
@@ -3588,7 +3598,9 @@ struct ToniesConnectForm {
 
 /// Resolve the household id: prefer the configured/first household, else the
 /// id carried by `/v2/me`.
-async fn tonies_resolve_household(client: &mut crate::tonies::client::ToniesClient) -> Option<String> {
+async fn tonies_resolve_household(
+    client: &mut crate::tonies::client::ToniesClient,
+) -> Option<String> {
     if let Ok(hs) = client.get_households().await {
         if let Some(id) = hs.into_iter().find_map(|h| h.id) {
             return Some(id);
@@ -3625,13 +3637,29 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
         });
     };
 
-    let key = match st.cfg.tonies_key() {
-        Ok(k) => k.to_string(),
+    // Build the client from the stored (encrypted) refresh token. The helper
+    // never logs or renders the token.
+    let mut client = match tonies_client_for(&st, uid).await {
+        Ok(c) => c,
+        Err(e) if e.needs_reconnect => {
+            // Wrong/rotated host key → force a fresh login (reconnect).
+            return render(&ToniesPage {
+                nav,
+                flash: String::new(),
+                message: e.message,
+                connected: true,
+                needs_reconnect: true,
+                email: account.email.clone().unwrap_or_default(),
+                household: account.household_id.clone().unwrap_or_default(),
+                cards: Vec::new(),
+                playlists: Vec::new(),
+            });
+        }
         Err(e) => {
             return render(&ToniesPage {
                 nav,
                 flash: String::new(),
-                message: format!("{e}"),
+                message: e.message,
                 connected: false,
                 needs_reconnect: false,
                 email: account.email.clone().unwrap_or_default(),
@@ -3641,54 +3669,17 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
             });
         }
     };
-
-    let secret_enc = match crate::tonies::load_secret_enc(&st.pool, uid).await {
-        Ok(Some(s)) => s,
-        Ok(None) => String::new(),
-        Err(e) => {
-            tracing::warn!("tonies secret load failed for user {uid}: {e:#}");
-            return error_page("Tonies-Verbindung konnte nicht geladen werden");
-        }
-    };
-    let refresh_token = match crate::tonies::decrypt_secret(&key, &secret_enc) {
-        Ok(t) => t,
-        Err(_) => {
-            // Wrong/rotated host key → force a fresh login (reconnect).
-            return render(&ToniesPage {
-                nav,
-                flash: String::new(),
-                message: "Tonies-Sitzung konnte nicht gelesen werden — bitte neu verbinden.".to_string(),
-                connected: true,
-                needs_reconnect: true,
-                email: account.email.clone().unwrap_or_default(),
-                household: account.household_id.clone().unwrap_or_default(),
-                cards: Vec::new(),
-                playlists: Vec::new(),
-            });
-        }
-    };
-
-    let tokens = crate::tonies::Tokens {
-        access_token: String::new(),
-        refresh_token: Some(refresh_token),
-        expires_at: 0,
-    };
-    let mut client = crate::tonies::client::ToniesClient::with_tokens(
-        &st.cfg.tonies_auth_base,
-        &st.cfg.tonies_api_base,
-        tokens,
-    );
     let household = match account.household_id.clone() {
         Some(h) if !h.is_empty() => h,
-        _ => tonies_resolve_household(&mut client).await.unwrap_or_default(),
+        _ => tonies_resolve_household(&mut client)
+            .await
+            .unwrap_or_default(),
     };
 
     // The user's own Spotify playlists are the selectable binding sources.
     let playlists = tonies_playlists(&st.pool, uid).await;
-    let playlist_names: std::collections::HashMap<i64, String> = playlists
-        .iter()
-        .map(|p| (p.id, p.name.clone()))
-        .collect();
+    let playlist_names: std::collections::HashMap<i64, String> =
+        playlists.iter().map(|p| (p.id, p.name.clone())).collect();
     let bindings: std::collections::HashMap<String, crate::tonies::Binding> =
         crate::tonies::list_bindings(&st.pool, uid)
             .await
@@ -3700,26 +3691,35 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
     let tonies = client.get_creativetonies(&household).await;
     match tonies {
         Ok(list) => {
-            let cards = list
-                .iter()
-                .map(|t| {
-                    let cap = crate::tonies::Capacity::from_tonie(t);
-                    let id = t.id.clone().unwrap_or_default();
-                    let binding = bindings.get(&id).map(|b| binding_view(b, &playlist_names));
-                    ToniesCard {
-                        id,
-                        title: t
-                            .title
-                            .clone()
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| "Kreativ-Tonie".to_string()),
-                        minutes_present: cap.minutes_present(),
-                        minutes_total: cap.minutes_total(),
-                        percent: cap.percent(),
-                        binding,
-                    }
-                })
-                .collect();
+            let mut cards = Vec::with_capacity(list.len());
+            for t in list.iter() {
+                let cap = crate::tonies::Capacity::from_tonie(t);
+                let id = t.id.clone().unwrap_or_default();
+                let binding = bindings.get(&id).map(|b| binding_view(b, &playlist_names));
+                let runs = match bindings.get(&id) {
+                    Some(b) => crate::tonies::run::list_syncs(
+                        &st.pool,
+                        b.id,
+                        crate::tonies::run::LIST_LIMIT,
+                    )
+                    .await
+                    .unwrap_or_default(),
+                    None => Vec::new(),
+                };
+                cards.push(ToniesCard {
+                    id,
+                    title: t
+                        .title
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "Kreativ-Tonie".to_string()),
+                    minutes_present: cap.minutes_present(),
+                    minutes_total: cap.minutes_total(),
+                    percent: cap.percent(),
+                    binding,
+                    runs,
+                });
+            }
             render(&ToniesPage {
                 nav,
                 flash: String::new(),
@@ -3892,6 +3892,8 @@ fn binding_view(
         source_name,
         format: b.format.clone(),
         mode: b.mode.clone(),
+        last_sync_at: b.last_sync_at.clone().unwrap_or_default(),
+        last_sync_status: b.last_sync_status.clone().unwrap_or_default(),
     }
 }
 
@@ -3904,7 +3906,7 @@ struct TonieBindingFragment {
     playlists: Vec<PlaylistOption>,
 }
 
-/// Render `#binding-{tonie_id}` for the given user (used by save/delete).
+/// Render `#binding-{tonie_id}` for the given user (used by save/delete/sync).
 async fn tonies_binding_fragment(
     st: &AppState,
     uid: i64,
@@ -3914,11 +3916,17 @@ async fn tonies_binding_fragment(
     let playlists = tonies_playlists(&st.pool, uid).await;
     let names: std::collections::HashMap<i64, String> =
         playlists.iter().map(|p| (p.id, p.name.clone())).collect();
-    let binding = crate::tonies::get_binding(&st.pool, uid, tonie_id)
+    let binding_row = crate::tonies::get_binding(&st.pool, uid, tonie_id)
         .await
         .ok()
-        .flatten()
-        .map(|b| binding_view(&b, &names));
+        .flatten();
+    let runs = match binding_row.as_ref() {
+        Some(b) => crate::tonies::run::list_syncs(&st.pool, b.id, crate::tonies::run::LIST_LIMIT)
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let binding = binding_row.as_ref().map(|b| binding_view(b, &names));
     render(&TonieBindingFragment {
         c: ToniesCard {
             id: tonie_id.to_string(),
@@ -3927,6 +3935,7 @@ async fn tonies_binding_fragment(
             minutes_total: 0,
             percent: 0,
             binding,
+            runs,
         },
         playlists,
     })
@@ -4034,4 +4043,193 @@ async fn tonies_binding_delete(
     let resp =
         tonies_binding_fragment(&st, uid, &tonie_id, form.tonie_name.unwrap_or_default()).await;
     crate::toast::apply(resp, &msg, kind)
+}
+
+// ── Tonies sync run (#502) ────────────────────────────────────────────────────
+
+/// Why building a Tonies client for a user failed.
+struct ToniesClientError {
+    /// Categorised, credential-free message.
+    message: String,
+    /// The stored token could not be read → offer "reconnect".
+    needs_reconnect: bool,
+}
+
+/// Build a Tonies client for `uid` from the stored, still-encrypted refresh
+/// token (extracted from `tonies_page`). The token is decrypted in memory only —
+/// it is never logged, rendered, or put into an error message.
+async fn tonies_client_for(
+    st: &AppState,
+    uid: i64,
+) -> Result<crate::tonies::client::ToniesClient, ToniesClientError> {
+    let key = st.cfg.tonies_key().map_err(|e| ToniesClientError {
+        message: format!("{e}"),
+        needs_reconnect: false,
+    })?;
+    let secret_enc = crate::tonies::load_secret_enc(&st.pool, uid)
+        .await
+        .map_err(|e| {
+            tracing::warn!("tonies secret load failed for user {uid}: {e:#}");
+            ToniesClientError {
+                message: "Tonies-Verbindung konnte nicht geladen werden".to_string(),
+                needs_reconnect: false,
+            }
+        })?
+        .unwrap_or_default();
+    let refresh_token =
+        crate::tonies::decrypt_secret(key, &secret_enc).map_err(|_| ToniesClientError {
+            message: "Tonies-Sitzung konnte nicht gelesen werden — bitte neu verbinden."
+                .to_string(),
+            needs_reconnect: true,
+        })?;
+    let tokens = crate::tonies::Tokens {
+        access_token: String::new(),
+        refresh_token: Some(refresh_token),
+        expires_at: 0,
+    };
+    Ok(crate::tonies::client::ToniesClient::with_tokens(
+        &st.cfg.tonies_auth_base,
+        &st.cfg.tonies_api_base,
+        tokens,
+    ))
+}
+
+#[derive(Deserialize)]
+struct ToniesSyncForm {
+    #[serde(default)]
+    tonie_name: Option<String>,
+}
+
+/// `POST /tonies/{id}/sync` — run one sync for the session user's binding.
+///
+/// Ownership: a missing or foreign binding is a 404 (never another user's
+/// Tonie). The run is rate-limited/concurrency-guarded via `claim_run` **before**
+/// any API write, so a failure still leaves a log entry. The toast summarises
+/// chapters/minutes/skipped tracks; the fragment (including the run log) is
+/// swapped in place.
+async fn tonies_sync(
+    State(st): State<AppState>,
+    Path(tonie_id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<ToniesSyncForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let uid = nav.id;
+    let tonie_name = form.tonie_name.unwrap_or_default();
+
+    // Ownership: only the owner's binding may be synced.
+    let binding = match crate::tonies::get_binding(&st.pool, uid, &tonie_id).await {
+        Ok(Some(b)) => b,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::warn!("tonies binding load failed for user {uid}: {e:#}");
+            return error_page("Tonies-Quelle konnte nicht geladen werden");
+        }
+    };
+
+    // claim_run *before* any API write: a run always leaves a log entry.
+    let run_id = match crate::tonies::run::claim_run(&st.pool, binding.id).await {
+        Ok(crate::tonies::run::Claim::Started(id)) => id,
+        Ok(crate::tonies::run::Claim::Busy) => {
+            let resp = tonies_binding_fragment(&st, uid, &tonie_id, tonie_name).await;
+            return crate::toast::apply(resp, "Ein Sync läuft bereits für diesen Tonie.", "err");
+        }
+        Ok(crate::tonies::run::Claim::RateLimited) => {
+            let resp = tonies_binding_fragment(&st, uid, &tonie_id, tonie_name).await;
+            return crate::toast::apply(
+                resp,
+                "Bitte kurz warten — der letzte Sync ist noch nicht lange her.",
+                "err",
+            );
+        }
+        Err(e) => {
+            tracing::warn!("tonies claim_run failed for user {uid}: {e:#}");
+            return error_page("Sync konnte nicht gestartet werden");
+        }
+    };
+
+    let outcome = execute_sync(&st, uid, &binding).await;
+    let msg = crate::tonies::run::summary(&outcome);
+    if let Err(e) = crate::tonies::run::finish_run(&st.pool, run_id, &outcome).await {
+        tracing::warn!("tonies finish_run failed for user {uid}: {e:#}");
+    }
+
+    let resp = tonies_binding_fragment(&st, uid, &tonie_id, tonie_name).await;
+    let kind = if outcome.status == crate::tonies::run::STATUS_ERROR {
+        "err"
+    } else {
+        "ok"
+    };
+    crate::toast::apply(resp, &msg, kind)
+}
+
+/// Do the actual work of a run. Never fails: any error becomes a `status='error'`
+/// outcome (credential-free) that the caller writes to the run log.
+async fn execute_sync(
+    st: &AppState,
+    uid: i64,
+    binding: &crate::tonies::Binding,
+) -> crate::tonies::run::RunOutcome {
+    use crate::tonies::run::{RunOutcome, STATUS_ERROR};
+
+    let fail = |msg: String| RunOutcome {
+        status: STATUS_ERROR.to_string(),
+        error: Some(msg),
+        ..Default::default()
+    };
+
+    let mut client = match tonies_client_for(st, uid).await {
+        Ok(c) => c,
+        Err(e) => return fail(e.message),
+    };
+
+    let household = match crate::tonies::load_account(&st.pool, uid)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|a| a.household_id)
+        .filter(|h| !h.is_empty())
+    {
+        Some(h) => h,
+        None => match tonies_resolve_household(&mut client).await {
+            Some(h) => h,
+            None => return fail("Household konnte nicht ermittelt werden".to_string()),
+        },
+    };
+
+    let Some(source_id) = binding.source_id else {
+        return fail("Keine Quelle verknüpft".to_string());
+    };
+    let desired = match crate::tonies::sync::desired_from_playlist(&st.pool, source_id).await {
+        Ok(d) => d,
+        Err(e) => return fail(format!("Playlist konnte nicht gelesen werden: {e}")),
+    };
+
+    // Readiness: one music-api status call per distinct ISRC.
+    let isrcs: Vec<String> = desired.iter().filter_map(|t| t.isrc.clone()).collect();
+    let ready = crate::tonies::run::readiness(&st.cfg, isrcs).await;
+
+    // Byte source: the real music-api download, mapped via `binding.format`.
+    let cfg = st.cfg.clone();
+    let format = binding.format.clone();
+    let fetch = move |isrc: &str| {
+        let cfg = cfg.clone();
+        let format = format.clone();
+        let isrc = isrc.to_string();
+        async move { crate::music_api::file_bytes(&cfg, &isrc, &format).await }
+    };
+
+    let opts = crate::tonies::run::SyncOptions::default();
+    crate::tonies::run::run_sync(
+        &mut client,
+        &household,
+        binding,
+        desired,
+        |isrc| ready.contains(isrc),
+        fetch,
+        &opts,
+    )
+    .await
 }
