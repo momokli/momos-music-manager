@@ -227,6 +227,8 @@ jobs:
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
+          # Kein checkout in diesem Job -> gh kann das Repo nicht ableiten.
+          GH_REPO: ${{ github.repository }}
           # Tag-Build -> eigenes Release. main-Build -> rollierendes Pre-Release.
           TAG: ${{ startsWith(github.ref, 'refs/tags/kellner-v') && github.ref_name || 'kellner-latest' }}
           ROLLING: ${{ startsWith(github.ref, 'refs/tags/kellner-v') && '0' || '1' }}
