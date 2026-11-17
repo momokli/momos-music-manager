@@ -3550,6 +3550,8 @@ struct ToniesPage {
     email: String,
     household: String,
     cards: Vec<ToniesCard>,
+    /// The user's own Spotify playlists, offered as binding sources.
+    playlists: Vec<PlaylistOption>,
 }
 
 struct ToniesCard {
@@ -3558,6 +3560,22 @@ struct ToniesCard {
     minutes_present: i64,
     minutes_total: i64,
     percent: i64,
+    /// The current source binding for this Tonie, if any.
+    binding: Option<BindingView>,
+}
+
+/// One selectable playlist source for a Tonie binding.
+struct PlaylistOption {
+    id: i64,
+    name: String,
+}
+
+/// The rendered view of a Tonie binding (playlist name resolved, no user ids).
+struct BindingView {
+    source_id: i64,
+    source_name: String,
+    format: String,
+    mode: String,
 }
 
 #[derive(Deserialize)]
@@ -3601,6 +3619,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
             email: String::new(),
             household: String::new(),
             cards: Vec::new(),
+            playlists: Vec::new(),
         });
     };
 
@@ -3616,6 +3635,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                 email: account.email.clone().unwrap_or_default(),
                 household: String::new(),
                 cards: Vec::new(),
+                playlists: Vec::new(),
             });
         }
     };
@@ -3641,6 +3661,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                 email: account.email.clone().unwrap_or_default(),
                 household: account.household_id.clone().unwrap_or_default(),
                 cards: Vec::new(),
+                playlists: Vec::new(),
             });
         }
     };
@@ -3660,6 +3681,34 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
         _ => tonies_resolve_household(&mut client).await.unwrap_or_default(),
     };
 
+    // The user's own Spotify playlists are the selectable binding sources.
+    let playlists: Vec<PlaylistOption> = sqlx::query(
+        "SELECT id, name FROM hub_playlists
+          WHERE user_id = ?1 AND service = 'spotify' AND name IS NOT NULL
+          ORDER BY name COLLATE NOCASE",
+    )
+    .bind(uid)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| PlaylistOption {
+        id: r.get("id"),
+        name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+    })
+    .collect();
+    let playlist_names: std::collections::HashMap<i64, String> = playlists
+        .iter()
+        .map(|p| (p.id, p.name.clone()))
+        .collect();
+    let bindings: std::collections::HashMap<String, crate::tonies::Binding> =
+        crate::tonies::list_bindings(&st.pool, uid)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|b| (b.tonie_id.clone(), b))
+            .collect();
+
     let tonies = client.get_creativetonies(&household).await;
     match tonies {
         Ok(list) => {
@@ -3667,8 +3716,22 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                 .iter()
                 .map(|t| {
                     let cap = crate::tonies::Capacity::from_tonie(t);
+                    let id = t.id.clone().unwrap_or_default();
+                    let binding = bindings.get(&id).map(|b| {
+                        let source_id = b.source_id.unwrap_or(0);
+                        let source_name = playlist_names
+                            .get(&source_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("Playlist #{source_id}"));
+                        BindingView {
+                            source_id,
+                            source_name,
+                            format: b.format.clone(),
+                            mode: b.mode.clone(),
+                        }
+                    });
                     ToniesCard {
-                        id: t.id.clone().unwrap_or_default(),
+                        id,
                         title: t
                             .title
                             .clone()
@@ -3677,6 +3740,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                         minutes_present: cap.minutes_present(),
                         minutes_total: cap.minutes_total(),
                         percent: cap.percent(),
+                        binding,
                     }
                 })
                 .collect();
@@ -3689,6 +3753,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                 email: account.email.clone().unwrap_or_default(),
                 household,
                 cards,
+                playlists,
             })
         }
         Err(crate::tonies::client::ToniesError::AuthExpired) => {
@@ -3702,6 +3767,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                 email: account.email.clone().unwrap_or_default(),
                 household,
                 cards: Vec::new(),
+                playlists: Vec::new(),
             })
         }
         Err(e) => {
@@ -3716,6 +3782,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                 email: account.email.clone().unwrap_or_default(),
                 household,
                 cards: Vec::new(),
+                playlists: Vec::new(),
             })
         }
     }
@@ -3762,6 +3829,7 @@ async fn tonies_connect_inner(
             email: form.email.clone(),
             household: String::new(),
             cards: Vec::new(),
+            playlists: Vec::new(),
         })
     };
 

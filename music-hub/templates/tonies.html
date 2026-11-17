@@ -63,6 +63,7 @@ content %}
             <p class="hub-muted">{{ c.minutes_present }} min / {{ c.minutes_total }} min</p>
         </header>
         <progress value="{{ c.percent }}" max="100"></progress>
+        {% include "_partials/tonie_binding.html" %}
     </article>
     {% endfor %}
 </div>
