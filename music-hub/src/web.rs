@@ -56,6 +56,9 @@ pub fn router(state: AppState) -> Router {
         .route("/now-playing/play/backpack/{id}", post(now_play_backpack))
         .route("/now-playing/tag", post(now_tag))
         .route("/now", get(now_page))
+        .route("/tonies", get(tonies_page))
+        .route("/tonies/connect", post(tonies_connect))
+        .route("/tonies/reconnect", post(tonies_reconnect))
         .route("/curate", get(curate_page).post(curate_create))
         .route("/curate/{id}", get(curate_detail))
         .route("/curate/{id}/update", post(curate_update))
@@ -3528,4 +3531,284 @@ async fn disconnect(
     .execute(&st.pool)
     .await;
     Redirect::to("/").into_response()
+}
+
+// ── Tonies (#499) ─────────────────────────────────────────────────────────────
+// Read-only connection page. Credentials are never persisted in plaintext and
+// never logged: only the (encrypted) refresh token lives in the DB.
+
+#[derive(Template)]
+#[template(path = "tonies.html")]
+struct ToniesPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    /// Categorised info/error message (never a credential).
+    message: String,
+    connected: bool,
+    /// The refresh token was rejected → offer "reconnect" instead of an error.
+    needs_reconnect: bool,
+    email: String,
+    household: String,
+    cards: Vec<ToniesCard>,
+}
+
+struct ToniesCard {
+    id: String,
+    title: String,
+    minutes_present: i64,
+    minutes_total: i64,
+    percent: i64,
+}
+
+#[derive(Deserialize)]
+struct ToniesConnectForm {
+    email: String,
+    password: String,
+}
+
+/// Resolve the household id: prefer the configured/first household, else the
+/// id carried by `/v2/me`.
+async fn tonies_resolve_household(client: &mut crate::tonies::client::ToniesClient) -> Option<String> {
+    if let Ok(hs) = client.get_households().await {
+        if let Some(id) = hs.into_iter().find_map(|h| h.id) {
+            return Some(id);
+        }
+    }
+    client.get_me().await.ok().and_then(|m| m.household_id)
+}
+
+async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let uid = nav.id;
+
+    let account = match crate::tonies::load_account(&st.pool, uid).await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!("tonies account load failed for user {uid}: {e:#}");
+            return error_page("Tonies-Verbindung konnte nicht geladen werden");
+        }
+    };
+    let Some(account) = account else {
+        // Not connected: show the connect form.
+        return render(&ToniesPage {
+            nav,
+            flash: String::new(),
+            message: String::new(),
+            connected: false,
+            needs_reconnect: false,
+            email: String::new(),
+            household: String::new(),
+            cards: Vec::new(),
+        });
+    };
+
+    let key = match st.cfg.tonies_key() {
+        Ok(k) => k.to_string(),
+        Err(e) => {
+            return render(&ToniesPage {
+                nav,
+                flash: String::new(),
+                message: format!("{e}"),
+                connected: false,
+                needs_reconnect: false,
+                email: account.email.clone().unwrap_or_default(),
+                household: String::new(),
+                cards: Vec::new(),
+            });
+        }
+    };
+
+    let secret_enc = match crate::tonies::load_secret_enc(&st.pool, uid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => String::new(),
+        Err(e) => {
+            tracing::warn!("tonies secret load failed for user {uid}: {e:#}");
+            return error_page("Tonies-Verbindung konnte nicht geladen werden");
+        }
+    };
+    let refresh_token = match crate::tonies::decrypt_secret(&key, &secret_enc) {
+        Ok(t) => t,
+        Err(_) => {
+            // Wrong/rotated host key → force a fresh login (reconnect).
+            return render(&ToniesPage {
+                nav,
+                flash: String::new(),
+                message: "Tonies-Sitzung konnte nicht gelesen werden — bitte neu verbinden.".to_string(),
+                connected: true,
+                needs_reconnect: true,
+                email: account.email.clone().unwrap_or_default(),
+                household: account.household_id.clone().unwrap_or_default(),
+                cards: Vec::new(),
+            });
+        }
+    };
+
+    let tokens = crate::tonies::Tokens {
+        access_token: String::new(),
+        refresh_token: Some(refresh_token),
+        expires_at: 0,
+    };
+    let mut client = crate::tonies::client::ToniesClient::with_tokens(
+        &st.cfg.tonies_auth_base,
+        &st.cfg.tonies_api_base,
+        tokens,
+    );
+    let household = match account.household_id.clone() {
+        Some(h) if !h.is_empty() => h,
+        _ => tonies_resolve_household(&mut client).await.unwrap_or_default(),
+    };
+
+    let tonies = client.get_creativetonies(&household).await;
+    match tonies {
+        Ok(list) => {
+            let cards = list
+                .iter()
+                .map(|t| {
+                    let cap = crate::tonies::Capacity::from_tonie(t);
+                    ToniesCard {
+                        id: t.id.clone().unwrap_or_default(),
+                        title: t
+                            .title
+                            .clone()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| "Kreativ-Tonie".to_string()),
+                        minutes_present: cap.minutes_present(),
+                        minutes_total: cap.minutes_total(),
+                        percent: cap.percent(),
+                    }
+                })
+                .collect();
+            render(&ToniesPage {
+                nav,
+                flash: String::new(),
+                message: account.last_error.clone().unwrap_or_default(),
+                connected: true,
+                needs_reconnect: false,
+                email: account.email.clone().unwrap_or_default(),
+                household,
+                cards,
+            })
+        }
+        Err(crate::tonies::client::ToniesError::AuthExpired) => {
+            let _ = crate::tonies::mark_error(&st.pool, uid, "Sitzung abgelaufen").await;
+            render(&ToniesPage {
+                nav,
+                flash: String::new(),
+                message: "Tonies-Sitzung abgelaufen — bitte neu verbinden.".to_string(),
+                connected: true,
+                needs_reconnect: true,
+                email: account.email.clone().unwrap_or_default(),
+                household,
+                cards: Vec::new(),
+            })
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            let _ = crate::tonies::mark_error(&st.pool, uid, &msg).await;
+            render(&ToniesPage {
+                nav,
+                flash: String::new(),
+                message: msg,
+                connected: true,
+                needs_reconnect: false,
+                email: account.email.clone().unwrap_or_default(),
+                household,
+                cards: Vec::new(),
+            })
+        }
+    }
+}
+
+async fn tonies_connect(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ToniesConnectForm>,
+) -> Response {
+    tonies_connect_inner(st, headers, form, "connect").await
+}
+
+async fn tonies_reconnect(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ToniesConnectForm>,
+) -> Response {
+    tonies_connect_inner(st, headers, form, "reconnect").await
+}
+
+/// Shared connect/reconnect: login → resolve household → store the encrypted
+/// refresh token. The password is used once and never persisted or logged.
+async fn tonies_connect_inner(
+    st: AppState,
+    headers: HeaderMap,
+    form: ToniesConnectForm,
+    _mode: &str,
+) -> Response {
+    let Some((uid, _slug)) = current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let nav = crate::ui::nav(&st, &headers, "tonies")
+        .await
+        .unwrap_or_default();
+
+    let render_plain_error = |msg: String| -> Response {
+        render(&ToniesPage {
+            nav,
+            flash: String::new(),
+            message: msg,
+            connected: false,
+            needs_reconnect: false,
+            email: form.email.clone(),
+            household: String::new(),
+            cards: Vec::new(),
+        })
+    };
+
+    let key = match st.cfg.tonies_key() {
+        Ok(k) => k.to_string(),
+        Err(e) => return render_plain_error(format!("{e}")),
+    };
+
+    let tokens =
+        match crate::tonies::client::login(&st.cfg.tonies_auth_base, &form.email, &form.password)
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("tonies login failed for user {uid}: {e}");
+                return render_plain_error(
+                    "Login fehlgeschlagen — E-Mail oder Passwort falsch.".to_string(),
+                );
+            }
+        };
+
+    let Some(refresh_token) = tokens.refresh_token.clone() else {
+        return render_plain_error(
+            "Tonies hat kein Refresh-Token geliefert — bitte erneut versuchen.".to_string(),
+        );
+    };
+
+    let mut client = crate::tonies::client::ToniesClient::with_tokens(
+        &st.cfg.tonies_auth_base,
+        &st.cfg.tonies_api_base,
+        tokens,
+    );
+    let household = tonies_resolve_household(&mut client).await;
+
+    if let Err(e) = crate::tonies::save_account(
+        &st.pool,
+        uid,
+        household.as_deref(),
+        Some(&form.email),
+        &refresh_token,
+        &key,
+    )
+    .await
+    {
+        tracing::warn!("tonies save failed for user {uid}: {e:#}");
+        return render_plain_error("Verbindung konnte nicht gespeichert werden.".to_string());
+    }
+
+    Redirect::to("/tonies").into_response()
 }

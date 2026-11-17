@@ -10,6 +10,13 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Tonies-Anbindung — Account-Verbindung + read-only `/tonies`-Seite** (#499) —
+  neues Modul `tonies` mit Keycloak-Password-Grant, automatischem Refresh-on-401 und
+  typisierten Tonies-Read-Primitiven; per-User-Account-Store mit AES-256-GCM
+  verschlüsseltem Refresh-Token at rest (`hub_tonies_accounts`, additive Migration
+  `056_hub_tonies.sql`); neue Seite `/tonies` mit Verbinden-/Neu-verbinden-Formular und
+  Kapazitäts-Karten der Kreativ-Tonies plus Navigationseintrag unter „Bibliothek“.
+  **Kein Version-Bump.**
 - feat: **Tag hygiene — rename, merge similar tags, suggestions** (#456) — a tag
   detail page (`/tag/{id}`) now surfaces owner-only **suggestions** for similar
   own tags (`tags::similar_tags`; ranked by normalised-equal > small edit

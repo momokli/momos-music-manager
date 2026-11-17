@@ -27,6 +27,13 @@ pub const SOUNDCLOUD_CLIENT_ID: &str = "soundcloud_client_id";
 pub const SOUNDCLOUD_CLIENT_SECRET: &str = "soundcloud_client_secret";
 pub const YOUTUBE_CLIENT_ID: &str = "youtube_client_id";
 pub const YOUTUBE_CLIENT_SECRET: &str = "youtube_client_secret";
+// ── Tonies (#499) ───────────────────────────────────────────────────────
+/// Keycloak auth base for Tonies (`https://login.tonies.com/auth`).
+pub const TONIES_AUTH_BASE: &str = "tonies_auth_base";
+/// Tonies REST API base (`https://api.tonies.com`).
+pub const TONIES_API_BASE: &str = "tonies_api_base";
+/// Master key for the encrypted Tonies refresh token (secret, never logged).
+pub const TONIES_SECRET_KEY: &str = "tonies_secret_key";
 pub const REGISTRATION_OPEN: &str = "registration_open";
 
 // Bounded touch-cascade (#hub-crawl-everything).
@@ -229,6 +236,9 @@ pub const SETTINGS: &[SettingSpec] = &[
     text(SPOTIFY_CLIENT_SECRET, "Spotify Client-Secret", true),
     text(MUSIC_API_BASE, "music-api Base-URL", false),
     text(MUSIC_API_TOKEN, "music-api Token", true),
+    text(TONIES_AUTH_BASE, "Tonies Auth-Base (Keycloak)", false),
+    text(TONIES_API_BASE, "Tonies API-Base", false),
+    text(TONIES_SECRET_KEY, "Tonies Secret-Key (Token-Verschluesselung)", true),
     // ── Touch-cascade (#hub-crawl-everything) ───────────────────────────────
     flag(CRAWL_ENABLED, "Touch-Cascade aktiv", "1"),
     num(

@@ -1330,6 +1330,7 @@ dependencies = [
  "ort",
  "rand 0.8.8",
  "reqwest",
+ "ring",
  "roxmltree",
  "rustfft",
  "serde",

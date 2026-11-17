@@ -62,6 +62,7 @@ pub mod tagtasks;
 pub mod tagtaskui;
 pub mod tagtypes;
 pub mod toast;
+pub mod tonies;
 pub mod traktor;
 pub mod traktor_api;
 pub mod ui;

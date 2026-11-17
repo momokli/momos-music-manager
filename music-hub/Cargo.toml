@@ -28,6 +28,9 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio-util = { version = "0.7", features = ["io"] }
 # Traktor collection.nml parsing (read-only XML).
 roxmltree = "0.20"
+# AES-256-GCM + `SystemRandom` for the Tonies refresh-token at rest (#499).
+# Already vendored via rustls, so no network fetch is required.
+ring = "0.17"
 
 # EffNet audio embeddings (Discogs-EffNet via ONNX Runtime). Optional so the
 # default/CI build stays light; enable with `--features effnet`.
