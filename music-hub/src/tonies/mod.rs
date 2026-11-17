@@ -278,12 +278,35 @@ pub async fn client_for(
 /// Resolve the household id: prefer the configured/first household, else the id
 /// carried by `/v2/me`.
 pub async fn resolve_household(client: &mut client::ToniesClient) -> Option<String> {
-    if let Ok(hs) = client.get_households().await {
-        if let Some(id) = hs.into_iter().find_map(|h| h.id) {
-            return Some(id);
+    match client.get_households().await {
+        Ok(hs) => {
+            if let Some(id) = hs.iter().find_map(|h| h.id.clone()) {
+                return Some(id);
+            }
+            // Kein stilles Scheitern: wenn die Liste da ist, aber keine id traegt,
+            // stimmt das Modell nicht mit der API ueberein (real: household blieb
+            // leer und die UI fragte `households//creativetonies` ab -> 404).
+            tracing::warn!(
+                "tonies: /v2/households lieferte {} Eintraege, aber keine id",
+                hs.len()
+            );
+        }
+        Err(e) => tracing::warn!("tonies: /v2/households fehlgeschlagen: {e}"),
+    }
+    match client.get_me().await {
+        Ok(m) => {
+            if m.household_id.as_deref().unwrap_or("").is_empty() {
+                tracing::warn!("tonies: /v2/me ohne householdId");
+                None
+            } else {
+                m.household_id
+            }
+        }
+        Err(e) => {
+            tracing::warn!("tonies: /v2/me fehlgeschlagen: {e}");
+            None
         }
     }
-    client.get_me().await.ok().and_then(|m| m.household_id)
 }
 
 /// Upsert the account, encrypting `refresh_token` at rest and clearing any
