@@ -16,7 +16,12 @@ use super::{Chapter, CreativeTonie, Household, Me, Tokens};
 /// Default Keycloak auth base; overridable per-config (`TONIES_AUTH_BASE`).
 pub const DEFAULT_AUTH_BASE: &str = "https://login.tonies.com/auth";
 /// Default REST API base; overridable per-config (`TONIES_API_BASE`).
-pub const DEFAULT_API_BASE: &str = "https://api.tonies.com";
+///
+/// `api.tonies.com` does not resolve (NXDOMAIN, verified 2026-11-17) — the real
+/// host is `api.tonie.cloud`, same as the reference client (`~/dev/tonie`,
+/// `src/tonies.rs:240`). Paths are identical (`/v2/me`, `/v2/households`,
+/// `…/creativetonies`, `…/chapters`, `/v2/file`).
+pub const DEFAULT_API_BASE: &str = "https://api.tonie.cloud";
 /// Keycloak realm used by the Tonies apps.
 pub const REALM: &str = "tonies";
 /// Public token-endpoint path (within the realm).
