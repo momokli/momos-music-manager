@@ -296,4 +296,102 @@ Unit-Tests (`worker.rs mod health_tests`): `loop_registry_has_seven_including_pl
 - [ ] Stage 4 verifier
 - [ ] Stage 5 tester
 - [x] Stage 6 PR (#570)
-- [ ] Stage 7 review
+- [x] Stage 7 review → REQUEST_CHANGES (Prozess-Gaps: Screenshot + CHANGELOG)
+
+## Review
+
+Stand: 2026-11-17, Branch `feat/506-playlist-listing-poll`, HEAD `3c05cb8`, PR #570
+(base `main` ← head; `Closes #506`). Geprüft mit `clanker-git diff origin/main...HEAD`,
+`clanker-gh pr view 570` und lokalem `cargo test --locked` (musik-hub).
+
+**Verdikt: REQUEST_CHANGES** — Funktion/Code/Tests sind einwandfrei (alle Fakten-Punkte
+PASS), aber der PR ist nach Repo-Regel **unvollständig** und darf so nicht gemergt werden:
+
+### Blocker (merge-blockierend, beide nicht funktional)
+
+1. **Frontend-Regel verletzt — kein Screenshot der geänderten Ansicht.** Der PR ändert die
+   sichtbare Admin-/Ops-Statusansicht: neue Spalte „Requests" in
+   `music-hub/templates/_partials/hub_status.html` (+ `pages.rs::WorkerRow`/`status_panel`).
+   Das ist eine UI-/Layout-Änderung im Sinne der Frontend-Pflicht („UI, Komponenten,
+   Layout … sonst gilt der PR als unvollständig und wird nicht gemergt"). Der PR-Body
+   hat **keine** Screenshots-Sektion. Präzedenz: die früheren PRs auf dieselbe Ansicht
+   (#438 `hub-ops-status-panel.png`, #439 `hub-ops-console.png`) lieferten Screenshots mit;
+   `docs/screenshots/` ist für diese Ansicht etabliert. → Vorher/Nachher- bzw. Neu-Screenshot
+   der Status-Panel-Tabelle mit der neuen „Requests"-Spalte im PR + Body ergänzen.
+
+2. **CHANGELOG-Eintrag fehlt.** #506 ist ein nutzersichtbares Feature (Playlists stale bis
+   „Fetch"). `music-hub/CHANGELOG.md` ist **nicht** Teil des Diffs. Konvention der letzten
+   Feature-PRs (#565, #552): `## [Unreleased] → ### Added`-Eintrag. → Eintrag ergänzen.
+
+### Fakten-Prüfung (alle PASS)
+
+| # | Kriterium | Befund |
+| --- | --- | --- |
+| 1 | Closing-Keyword | ✅ PR-Body enthält `Closes #506` (erste Zeile); CI-Check „Issue-Referenz im PR" pass. |
+| 2 | Akzeptanzkriterien abgedeckt | ✅ alle vier: `snapshot_id`-Update (`poll_updates_snapshot_id`), Request-Budget (`requests` in Log/JSON/Panel), 429→Backoff (`rate_limit_backs_off_without_retry_storm`, genau 1 Listing-Hit), no-token→nur Log (`user_without_token_makes_no_request`, 0 Hits). |
+| 3 | Code-Qualität / Konsistenz | ✅ neuer Loop folgt exakt dem Muster der bestehenden Loops (`is_paused`-Skip, `record`/`record_with_requests` pro Iteration). `paged` → `paged_counted` sauber via Wrapper (keine Duplikation, `paged` bleibt genutzt). Backoff/Quota off-guard (`drop(guard)` vor `backoff`) ⇒ kein Deadlock/Blockade. Cadence/Enabled pro Iteration aus `hub_settings`, Clamp `.max(60)`. Kleines `pub(crate)`-Sichtbarkeits-Öffnen in `ingest.rs` (kein Verhaltensänderung). |
+| 4 | Keine Regressionen | ✅ `LOOP_NAMES` `[&str; 7]`; einziger Fremd-Konsument `hub_ops.rs:139` validiert generisch gegen `LOOP_NAMES` (automatisch pausierbar, kein Code-Change nötig). `tests/status.rs` 6→7 + `requests`-Feld; `worker_health_snapshot_is_name_stable` zieht generisch mit. Verbleibende „all five"-Referenzen betreffen Tag-Familien, unabhängig. Keine stale „six loops"-Texte. |
+| 5 | Testbeleg nachvollziehbar | ✅ **lokal reproduziert**: `cargo test --locked --test playlist_poll --test status` → 3 + 4 grün; `cargo test --locked` (volle Suite) → Exit 0, alle Binaries `0 failed` (398 Testresult-Zeilen, 0 Fehler). Delta Baseline 714 → 719 (+5). |
+| 6 | Sicherheit | ✅ keine Secrets in Logs (nur `slug`/Statistiken); alle SQL via `sqlx`-Binds (inkl. neuer Account-Query); Settings mit Fallback + Clamp; Token wird nie ausgegeben. |
+
+### Findings (nicht blockierend)
+
+- `playlist_listing_pass`: bei Transport-`Err` aus `paged_counted` wird `stats.requests` unter­gezählt (kosmetisch, nur bei Netzfehlern).
+- `stats.updated` zählt jeden upserteten Eintrag (`upsert_playlist_meta` liefert immer `Some`), Feldname „updated" ist optimistisch; Health-`last_worked` dadurch bei ≥1 Playlist stets `true`.
+- `spotify_tick` serialisiert nur `spotify` + `playlists` (Scope-konform); `crawl`-Touch-Cascade bleibt außen vor.
+
+### Nächster Schritt
+
+Blocker 1 (Screenshot) + 2 (CHANGELOG) nachreichen → dann ist der PR mergebar
+(Funktion, Tests, Akzeptanz bereits PASS). CI-Build/Test waren zum Review-Zeitpunkt noch
+`pending` (`mergeStateStatus: BLOCKED`), daher kein Merge-Versuch.
+
+## Rework 1
+
+Stand: 2026-11-17, Branch `feat/506-playlist-listing-poll`, HEAD `3fc2885`, PR #570.
+Die beiden merge-blockierenden, **nicht-funktionalen** Review-Blocker sind behoben
+(Funktion/Tests/Akzeptanz waren bereits PASS).
+
+### Blocker 1 — Screenshot-Beleg der geänderten UI (behoben)
+
+Skill `music-hub-ui-screenshot` befolgt:
+
+1. Debug-Binary gebaut: `cargo build` → Exit 0.
+2. Test-DB + Demo-Daten unter `/home/momo/hub-shot` (`<bin> users`, `<bin> seed-demo`).
+3. Session injiziert (eine `sqlite3`-Invocation, `INSERT OR REPLACE`, `hub_session=shot1`);
+   `momo` zusätzlich `is_admin=1` (Status-Panel ist admin-only).
+4. Freier Port `3011` (`ss -ltn`), Server per `nohup … serve` gestartet (`/login` → 200).
+5. `/admin` und `/api/hub/status/panel` per `curl -H "Cookie: hub_session=shot1"` geholt;
+   das per htmx nachgeladene Panel-Fragment (+ Ereignis-Log) ins gespeicherte HTML injiziert.
+6. Headless Chromium (chromium-1243) auf `file://…/page.html` gerendert
+   (`--window-size=1440,1300 --force-device-scale-factor=2`).
+7. PNG geprüft: Tabelle „Hub-Worker" mit **allen 7 Loops** (crawl, curation, enrichment,
+   freqblog, **playlists**, spotify, tonies) und der neuen Spalte **„Requests"**, nichts
+   abgeschnitten.
+8. Abgelegt unter `docs/screenshots/hub-ops-status-panel-requests.png` (Repo-Konvention;
+   Vorgänger `hub-ops-status-panel.png`), `clanker-git` commit+push.
+9. PR-Body per REST-PATCH um `## Screenshots`-Sektion mit raw-Bildlink ergänzt.
+10. Server per `kill <pid>` beendet (Port 3011 wieder frei; **kein** `pkill -f`).
+
+### Blocker 2 — CHANGELOG-Eintrag (behoben)
+
+`music-hub/CHANGELOG.md` → `## [Unreleased] → ### Added` erster Eintrag:
+„**Periodischer Playlist-Listing-Poll hält `snapshot_id` frisch** (#506)" (analog #504/#503:
+Kontext, Loop/Cadence, Backoff, Request-Zähler, **Kein Version-Bump.**).
+
+### Belege
+
+| Prüfpunkt | Ergebnis |
+| --- | --- |
+| Screenshot-raw-URL | `https://raw.githubusercontent.com/momokli/momos-music-manager/feat/506-playlist-listing-poll/docs/screenshots/hub-ops-status-panel-requests.png` → **HTTP 200** |
+| Screenshot im PR-Body | ✅ `## Screenshots`-Sektion mit Bildlink (REST-PATCH, `.body` gegengelesen) |
+| CHANGELOG-Eintrag | ✅ im Diff (Commit `3fc2885`), unter `## [Unreleased] → ### Added` |
+| `Closes #506` | ✅ weiterhin im PR-Body (erste Zeile, verifiziert) |
+| Commit/Push | ✅ `3fc2885` → origin (`clanker-git`, Bot-Identität) |
+| Server beendet | ✅ Port 3011 frei, kein `music-hub serve`-Prozess |
+
+### Status
+
+- [x] Blocker 1 (UI-Screenshot) behoben
+- [x] Blocker 2 (CHANGELOG) behoben
+- [x] PR-Body aktualisiert (Screenshot + `Closes #506`)
