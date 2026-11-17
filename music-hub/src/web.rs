@@ -59,6 +59,8 @@ pub fn router(state: AppState) -> Router {
         .route("/tonies", get(tonies_page))
         .route("/tonies/connect", post(tonies_connect))
         .route("/tonies/reconnect", post(tonies_reconnect))
+        .route("/tonies/{tonie_id}/binding", post(tonies_binding_save))
+        .route("/tonies/{tonie_id}/binding/delete", post(tonies_binding_delete))
         .route("/curate", get(curate_page).post(curate_create))
         .route("/curate/{id}", get(curate_detail))
         .route("/curate/{id}/update", post(curate_update))
@@ -3682,21 +3684,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
     };
 
     // The user's own Spotify playlists are the selectable binding sources.
-    let playlists: Vec<PlaylistOption> = sqlx::query(
-        "SELECT id, name FROM hub_playlists
-          WHERE user_id = ?1 AND service = 'spotify' AND name IS NOT NULL
-          ORDER BY name COLLATE NOCASE",
-    )
-    .bind(uid)
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|r| PlaylistOption {
-        id: r.get("id"),
-        name: r.get::<Option<String>, _>("name").unwrap_or_default(),
-    })
-    .collect();
+    let playlists = tonies_playlists(&st.pool, uid).await;
     let playlist_names: std::collections::HashMap<i64, String> = playlists
         .iter()
         .map(|p| (p.id, p.name.clone()))
@@ -3717,19 +3705,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                 .map(|t| {
                     let cap = crate::tonies::Capacity::from_tonie(t);
                     let id = t.id.clone().unwrap_or_default();
-                    let binding = bindings.get(&id).map(|b| {
-                        let source_id = b.source_id.unwrap_or(0);
-                        let source_name = playlist_names
-                            .get(&source_id)
-                            .cloned()
-                            .unwrap_or_else(|| format!("Playlist #{source_id}"));
-                        BindingView {
-                            source_id,
-                            source_name,
-                            format: b.format.clone(),
-                            mode: b.mode.clone(),
-                        }
-                    });
+                    let binding = bindings.get(&id).map(|b| binding_view(b, &playlist_names));
                     ToniesCard {
                         id,
                         title: t
@@ -3879,4 +3855,183 @@ async fn tonies_connect_inner(
     }
 
     Redirect::to("/tonies").into_response()
+}
+
+/// The user's own Spotify playlists, offered as binding sources.
+async fn tonies_playlists(pool: &SqlitePool, uid: i64) -> Vec<PlaylistOption> {
+    sqlx::query(
+        "SELECT id, name FROM hub_playlists
+          WHERE user_id = ?1 AND service = 'spotify' AND name IS NOT NULL
+          ORDER BY name COLLATE NOCASE",
+    )
+    .bind(uid)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| PlaylistOption {
+        id: r.get("id"),
+        name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+    })
+    .collect()
+}
+
+/// Map a stored binding to its rendered view, resolving the playlist name (with
+/// a `Playlist #id` fallback when the source playlist is gone).
+fn binding_view(
+    b: &crate::tonies::Binding,
+    names: &std::collections::HashMap<i64, String>,
+) -> BindingView {
+    let source_id = b.source_id.unwrap_or(0);
+    let source_name = names
+        .get(&source_id)
+        .cloned()
+        .unwrap_or_else(|| format!("Playlist #{source_id}"));
+    BindingView {
+        source_id,
+        source_name,
+        format: b.format.clone(),
+        mode: b.mode.clone(),
+    }
+}
+
+/// htmx fragment: the current binding (or picker) of one Tonie. DB-only, no
+/// Tonies-API call.
+#[derive(Template)]
+#[template(path = "_partials/tonie_binding.html")]
+struct TonieBindingFragment {
+    c: ToniesCard,
+    playlists: Vec<PlaylistOption>,
+}
+
+/// Render `#binding-{tonie_id}` for the given user (used by save/delete).
+async fn tonies_binding_fragment(
+    st: &AppState,
+    uid: i64,
+    tonie_id: &str,
+    tonie_name: String,
+) -> Response {
+    let playlists = tonies_playlists(&st.pool, uid).await;
+    let names: std::collections::HashMap<i64, String> =
+        playlists.iter().map(|p| (p.id, p.name.clone())).collect();
+    let binding = crate::tonies::get_binding(&st.pool, uid, tonie_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|b| binding_view(&b, &names));
+    render(&TonieBindingFragment {
+        c: ToniesCard {
+            id: tonie_id.to_string(),
+            title: tonie_name,
+            minutes_present: 0,
+            minutes_total: 0,
+            percent: 0,
+            binding,
+        },
+        playlists,
+    })
+}
+
+#[derive(Deserialize)]
+struct TonieBindingForm {
+    #[serde(default)]
+    tonie_name: Option<String>,
+    #[serde(default)]
+    source_id: Option<i64>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+/// Save (create/update) the source binding of one Kreativ-Tonie. The playlist
+/// must belong to the session user; a toast carries the outcome and the
+/// fragment is swapped in place.
+async fn tonies_binding_save(
+    State(st): State<AppState>,
+    Path(tonie_id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<TonieBindingForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let uid = nav.id;
+    let tonie_name = form.tonie_name.unwrap_or_default();
+    let format = form
+        .format
+        .unwrap_or_else(|| crate::tonies::bindings::FORMAT_MP3_128.to_string());
+    let mode = form
+        .mode
+        .unwrap_or_else(|| crate::tonies::bindings::MODE_MANUAL.to_string());
+
+    let (msg, kind) = if !crate::tonies::valid_format(&format) {
+        ("Unbekanntes Format.".to_string(), "err")
+    } else if !crate::tonies::valid_mode(&mode) {
+        ("Unbekannter Modus.".to_string(), "err")
+    } else {
+        match form.source_id {
+            None => ("Keine Playlist gewählt.".to_string(), "err"),
+            Some(sid) => {
+                // Ownership: the source playlist must belong to this user.
+                let owned: Option<String> = sqlx::query_scalar(
+                    "SELECT name FROM hub_playlists
+                      WHERE id = ?1 AND user_id = ?2 AND service = 'spotify'",
+                )
+                .bind(sid)
+                .bind(uid)
+                .fetch_optional(&st.pool)
+                .await
+                .unwrap_or(None);
+                match owned {
+                    None => (
+                        "Playlist nicht gefunden oder nicht dein Eigentum.".to_string(),
+                        "err",
+                    ),
+                    Some(name) => {
+                        let tn = tonie_name.trim();
+                        let tn = if tn.is_empty() { None } else { Some(tn) };
+                        match crate::tonies::upsert_binding(
+                            &st.pool,
+                            uid,
+                            &tonie_id,
+                            tn,
+                            "playlist",
+                            Some(sid),
+                            &format,
+                            &mode,
+                        )
+                        .await
+                        {
+                            Ok(()) => (format!("Quelle „{name}“ gespeichert"), "ok"),
+                            Err(e) => (format!("Fehler: {e}"), "err"),
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    let resp = tonies_binding_fragment(&st, uid, &tonie_id, tonie_name).await;
+    crate::toast::apply(resp, &msg, kind)
+}
+
+/// Remove the source binding of one Kreativ-Tonie (user-scoped).
+async fn tonies_binding_delete(
+    State(st): State<AppState>,
+    Path(tonie_id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<TonieBindingForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let uid = nav.id;
+    let (msg, kind) = match crate::tonies::delete_binding(&st.pool, uid, &tonie_id).await {
+        Ok(()) => ("Quelle entfernt".to_string(), "ok"),
+        Err(e) => (format!("Fehler: {e}"), "err"),
+    };
+    let resp =
+        tonies_binding_fragment(&st, uid, &tonie_id, form.tonie_name.unwrap_or_default()).await;
+    crate::toast::apply(resp, &msg, kind)
 }

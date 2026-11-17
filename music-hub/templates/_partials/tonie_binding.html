@@ -45,6 +45,7 @@
             hx-target="#binding-{{ c.id }}"
             hx-swap="outerHTML"
         >
+            <input type="hidden" name="tonie_name" value="{{ c.title }}" />
             <button type="submit" class="hub-ta-cancel">Entfernen</button>
         </form>
     </details>
