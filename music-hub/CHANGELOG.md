@@ -10,47 +10,6 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
-- feat: **Periodischer Playlist-Listing-Poll hält `snapshot_id` frisch** (#506) —
-  Spotify schickt keinen Playlist-Change-Webhook, deshalb blieb
-  `hub_playlists.snapshot_id` bisher stale, bis ein Mensch „Fetch" drückte (der Worker
-  holt Items nur bei geänderter `snapshot_id`). Ein neuer Worker-Loop `playlists` ruft
-  pro verbundenem Spotify-User periodisch `get_all_items("/me/playlists?limit=50")` →
-  `fetch_playlists()` auf (Listing-only, **kein** Item-Fetch im selben Tick), mit
-  konfigurierbarer Cadence (`playlist_poll_enabled` Default `true`,
-  `playlist_poll_interval_secs` Default `900`, Clamp `.max(60)`), 429-/Quota-Backoff
-  über die vorhandenen Helfer und einem kumulativen Request-Zähler, der als `requests`
-  im `/api/hub/status`-JSON und als Spalte „Requests" im Admin-Panel sichtbar ist.
-  **Kein Version-Bump.**
-- feat: **Tonies-Quelle — Backpack/Tag als Quelle, Resolver-Dispatch** (#504) —
-  ein Tonie-Binding kann jetzt neben einer Playlist auch einen **Backpack** oder
-  einen **Tag** als Quelle nutzen. Der Resolver `tonies::sync::desired_for_source`
-  dispatcht auf `source_kind` und liefert dieselbe `desired`-Liste (Playlist nach
-  `position`, Tag nach Hub-Track-id, Backpack in Resolver-Reihenfolge); der
-  Tonie-Picker der Web-UI bietet die wählbaren Backpacks/Tags mit an, und ein
-  leerer oder entfernter Quell-Verweis führt in den klaren Fehlerzustand
-  („Quelle ist leer oder nicht mehr vorhanden") statt in einen stillen Leersync.
-  Beim Auflösen wird das **Eigentum** der Quelle geprüft (nach Migration `060`
-  ohne FK): eine fremde oder nicht mehr eigene Quelle ergibt eine leere Liste,
-  nie einen Fremd-Read. **Kein Version-Bump.**
-- feat: **Tonies Auto-Sync — Worker-Hook auf `snapshot_id` + Debounce** (#503) —
-  `mode='auto'`-Tonie-Bindings werden automatisch synchronisiert, sobald sich die
-  `snapshot_id` der Quell-Playlist ändert. Der Worker markiert die betroffenen
-  Auto-Bindings direkt im bestehenden Playlist-Refresh (`dirty_since`, **kein**
-  zusätzlicher Spotify-Request) und ein neuer Hintergrund-Loop (`"tonies"`) führt
-  fällige Bindings nach einer konfigurierbaren Ruhephase + Mindestabstand aus.
-  Die Ausführung ist aus `web.rs` in `tonies::run::execute_binding` extrahiert
-  (Tonies + music-api, nie Spotify) und wird von `/tonies/{id}/sync` und dem
-  Worker geteilt; Debounce-Werte kommen aus der Settings-Registry
-  (`tonie_autosync_enabled` / `tonie_autosync_quiet_secs` /
-  `tonie_autosync_min_interval_secs`, Defaults `1`/`300`/`600`).
-  **Kein Version-Bump.**
-- feat: **Tonies-Anbindung — Account-Verbindung + read-only `/tonies`-Seite** (#499) —
-  neues Modul `tonies` mit Keycloak-Password-Grant, automatischem Refresh-on-401 und
-  typisierten Tonies-Read-Primitiven; per-User-Account-Store mit AES-256-GCM
-  verschlüsseltem Refresh-Token at rest (`hub_tonies_accounts`, additive Migration
-  `056_hub_tonies.sql`); neue Seite `/tonies` mit Verbinden-/Neu-verbinden-Formular und
-  Kapazitäts-Karten der Kreativ-Tonies plus Navigationseintrag unter „Bibliothek“.
-  **Kein Version-Bump.**
 - feat: **Tag hygiene — rename, merge similar tags, suggestions** (#456) — a tag
   detail page (`/tag/{id}`) now surfaces owner-only **suggestions** for similar
   own tags (`tags::similar_tags`; ranked by normalised-equal > small edit
@@ -112,6 +71,65 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   `hub_track_audio`-Read-Model, der hinterherhinkt (gedeckter Backfill, `ORDER BY id`, 7-Tage-TTL
   für „no data"), und zeigte deshalb „—", während die Track-Page den Vault-Wert hatte. Beide
   lesen jetzt denselben `resolved`-Block über `music_api::resolved_audio`.
+
+## [0.31.0] — 2026-11-17
+
+**hub-tonies** — Aus dem Hub heraus einen Kreativ-Tonie bespielen: eine Spotify-Playlist
+(später auch Backpack/Tag) wird an den Tonie gebunden, die Tracks werden greedy von oben
+bis 90 min als Kapitel geschrieben (Rest fällt raus), mit Kapitel-Diff und Auto-Sync.
+
+### Added
+
+- feat: **Tonies-Anbindung — Account-Verbindung + read-only `/tonies`-Seite** (#499) —
+  neues Modul `tonies` mit Keycloak-Password-Grant, automatischem Refresh-on-401 und
+  typisierten Tonies-Read-Primitiven; per-User-Account-Store mit AES-256-GCM
+  verschlüsseltem Refresh-Token at rest (`hub_tonies_accounts`, additive Migration
+  `056_hub_tonies.sql`); neue Seite `/tonies` mit Verbinden-/Neu-verbinden-Formular und
+  Kapazitäts-Karten der Kreativ-Tonies plus Navigationseintrag unter „Bibliothek“.
+- feat: **`/tonies` — Quelle wählen (Playlist/Format/Modus) + Toasts** (#500) —
+  Binding-Tabelle `hub_tonie_bindings` (additive Migration `057`) und user-scoped Store
+  `tonies::bindings`; je Kreativ-Tonie eine Playlist-Quelle, Format (`mp3-128` Default /
+  `mp3-320`) und Modus (`manual`/`auto`) anlegen/bearbeiten/entfernen, mit
+  Ownership-Prüfung (nur eigene Bindings/Playlists), sauberen Empty-States und
+  Aktions-Feedback über `crate::toast` (`HX-Trigger`) statt Redirect.
+- feat: **Greedy-Fit + Kapitel-Diff** (#501) — reine Sync-Kern-Funktionen in
+  `tonies::sync`: `desired`-Liste aus `hub_playlist_tracks`, Greedy-Fit bis `cap_seconds`
+  (Default 5400) mit Skip-Gründen (`NoIsrc`/`NoVault`/`DuplicateIsrc`/`CapReached`) und
+  Kapitel-Diff (`Unchanged`/`Append`/`Replace`) mit Wiederverwendung bestehender Kapitel
+  (kein Re-Upload); kein Netz, kein DB-Write (Vault-Readiness als injiziertes Prädikat).
+- feat: **Tonies Sync-Run — Upload, Transcoding-Poll, Run-Log** (#502) — Ausführung des
+  Sync-Plans: pro neuem Kapitel Multipart-Upload (`fileId` in den `chapters`-Body), danach
+  bounded Transcoding-Poll; Ergebnis im Run-Log `hub_tonie_syncs` (Migration `058`, Index
+  `(binding_id, started_at DESC)`). Migration `059` erzwingt per partiellem UNIQUE-Index
+  genau einen laufenden Sync pro Binding (`claim_run` → `Started`/`Busy`/`RateLimited`,
+  INSERT vor jedem API-Write). Route `POST /tonies/{id}/sync` (Session-Owner,
+  rate-limited) plus Sync-Button und Sync-Verlauf in der UI.
+- feat: **Tonies Auto-Sync — Worker-Hook auf `snapshot_id` + Debounce** (#503) —
+  `mode='auto'`-Bindings werden automatisch synchronisiert, sobald sich die `snapshot_id`
+  der Quell-Playlist ändert. Der Worker markiert die betroffenen Auto-Bindings direkt im
+  bestehenden Playlist-Refresh (`dirty_since`, **kein** zusätzlicher Spotify-Request) und
+  ein neuer Hintergrund-Loop (`"tonies"`) führt fällige Bindings nach einer
+  konfigurierbaren Ruhephase + Mindestabstand aus (Settings
+  `tonie_autosync_enabled` / `tonie_autosync_quiet_secs` /
+  `tonie_autosync_min_interval_secs`, Defaults `1`/`300`/`600`); die Ausführung ist aus
+  `web.rs` in `tonies::run::execute_binding` extrahiert (Tonies + music-api, nie Spotify).
+- feat: **Tonies-Quelle — Backpack/Tag als Quelle, Resolver-Dispatch** (#504) — ein
+  Tonie-Binding kann neben einer Playlist auch einen **Backpack** oder einen **Tag** als
+  Quelle nutzen. Der Resolver `tonies::sync::desired_for_source` dispatcht auf
+  `source_kind` und liefert dieselbe `desired`-Liste (Playlist nach `position`, Tag nach
+  Hub-Track-id, Backpack in Resolver-Reihenfolge); beim Auflösen wird das **Eigentum** der
+  Quelle geprüft (nach Migration `060` ohne FK): eine fremde oder nicht mehr eigene Quelle
+  ergibt eine leere Liste, nie einen Fremd-Read; ein leerer/entfernter Quell-Verweis führt
+  in den klaren Fehlerzustand statt in einen stillen Leersync.
+- feat: **Periodischer Playlist-Listing-Poll hält `snapshot_id` frisch** (#506) — Spotify
+  schickt keinen Playlist-Change-Webhook, deshalb blieb `hub_playlists.snapshot_id` stale,
+  bis ein Mensch „Fetch" drückte (der Worker holt Items nur bei geänderter `snapshot_id`).
+  Ein neuer Worker-Loop `playlists` ruft pro verbundenem Spotify-User periodisch das
+  Playlist-Listing ab (Listing-only, **kein** Item-Fetch im selben Tick), mit
+  konfigurierbarer Cadence (`playlist_poll_enabled` Default `true`,
+  `playlist_poll_interval_secs` Default `900`, Clamp `.max(60)`), 429-/Quota-Backoff über
+  die vorhandenen Helfer und einem kumulativen Request-Zähler, der als `requests` im
+  `/api/hub/status`-JSON und als Spalte „Requests" im Admin-Panel sichtbar ist.
 
 ## [0.30.0] — 2026-10-17
 
