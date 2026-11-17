@@ -1,0 +1,167 @@
+//! Migration test for the Tonie binding schema (#500).
+//!
+//! Boots a fresh temp SQLite with only the real migrations applied and checks
+//! the persistence invariants of `hub_tonie_bindings`: table/index presence, the
+//! column defaults, `UNIQUE(user_id, tonie_id)`, and the `ON DELETE CASCADE`
+//! behaviour on both the owning user and the source playlist.
+
+use std::str::FromStr;
+use std::time::Duration;
+
+use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+
+const TS: &str = "2026-01-01T00:00:00+00:00";
+
+/// Fresh temp DB, FKs on, all migrations applied.
+async fn setup() -> (tempfile::TempDir, SqlitePool) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = format!("sqlite:{}/hub.db", dir.path().display());
+    let opts = SqliteConnectOptions::from_str(&url)
+        .expect("parse url")
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_secs(15))
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .expect("connect");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migrate");
+    (dir, pool)
+}
+
+async fn insert_user(pool: &SqlitePool, slug: &str) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO hub_users (slug, display_name, created_at) VALUES (?1, ?1, ?2) RETURNING id",
+    )
+    .bind(slug)
+    .bind(TS)
+    .fetch_one(pool)
+    .await
+    .expect("insert user")
+}
+
+async fn insert_playlist(pool: &SqlitePool, user_id: i64, ext: &str) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO hub_playlists (user_id, service, playlist_id) VALUES (?1, 'spotify', ?2) RETURNING id",
+    )
+    .bind(user_id)
+    .bind(ext)
+    .fetch_one(pool)
+    .await
+    .expect("insert playlist")
+}
+
+async fn insert_binding(
+    pool: &SqlitePool,
+    user_id: i64,
+    tonie_id: &str,
+    playlist_id: i64,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "INSERT INTO hub_tonie_bindings (user_id, tonie_id, source_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4) RETURNING id",
+    )
+    .bind(user_id)
+    .bind(tonie_id)
+    .bind(playlist_id)
+    .bind(TS)
+    .fetch_one(pool)
+    .await
+}
+
+async fn count(pool: &SqlitePool, sql: &str) -> i64 {
+    sqlx::query_scalar(sql).fetch_one(pool).await.expect("count")
+}
+
+#[tokio::test]
+async fn table_and_index_exist() {
+    let (_dir, pool) = setup().await;
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'hub_tonie_bindings'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1, "hub_tonie_bindings should exist");
+
+    let idx: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_hub_tonie_bindings_user'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(idx, 1, "user index should exist");
+}
+
+#[tokio::test]
+async fn column_defaults() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let pl = insert_playlist(&pool, user, "pl-1").await;
+    insert_binding(&pool, user, "ct1", pl).await.expect("insert");
+
+    let (kind, format, mode, cap): (String, String, String, i64) = sqlx::query_as(
+        "SELECT source_kind, format, mode, cap_seconds FROM hub_tonie_bindings WHERE tonie_id = 'ct1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("row");
+    assert_eq!(kind, "playlist");
+    assert_eq!(format, "mp3-128");
+    assert_eq!(mode, "manual");
+    assert_eq!(cap, 5400);
+}
+
+#[tokio::test]
+async fn unique_per_user_and_tonie() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let pl = insert_playlist(&pool, user, "pl-1").await;
+    insert_binding(&pool, user, "ct1", pl).await.expect("first");
+
+    // Same (user, tonie) again → rejected.
+    let dup = insert_binding(&pool, user, "ct1", pl).await;
+    assert!(dup.is_err(), "duplicate (user_id, tonie_id) must be rejected");
+
+    // A different user may bind the same Tonie id.
+    let bob = insert_user(&pool, "bob").await;
+    let pl_b = insert_playlist(&pool, bob, "pl-b").await;
+    insert_binding(&pool, bob, "ct1", pl_b).await.expect("other user ok");
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM hub_tonie_bindings").await, 2);
+}
+
+#[tokio::test]
+async fn user_delete_cascades() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let pl = insert_playlist(&pool, user, "pl-1").await;
+    insert_binding(&pool, user, "ct1", pl).await.expect("insert");
+
+    sqlx::query("DELETE FROM hub_users WHERE id = ?1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("delete user");
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM hub_tonie_bindings").await, 0);
+}
+
+#[tokio::test]
+async fn playlist_delete_cascades() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let pl = insert_playlist(&pool, user, "pl-1").await;
+    insert_binding(&pool, user, "ct1", pl).await.expect("insert");
+
+    sqlx::query("DELETE FROM hub_playlists WHERE id = ?1")
+        .bind(pl)
+        .execute(&pool)
+        .await
+        .expect("delete playlist");
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM hub_tonie_bindings").await, 0);
+}
