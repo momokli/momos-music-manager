@@ -13,7 +13,8 @@ pub mod sync;
 
 pub use autosync::{Debounce, due_bindings, is_due, run_due};
 pub use bindings::{
-    Binding, delete_binding, get_binding, list_bindings, upsert_binding, valid_format, valid_mode,
+    Binding, SOURCE_BACKPACK, SOURCE_PLAYLIST, SOURCE_TAG, delete_binding, get_binding,
+    list_bindings, source_kind_label, upsert_binding, valid_format, valid_mode, valid_source_kind,
 };
 pub use run::{
     Claim, RunOutcome, SyncOptions, SyncRow, Transcoding, claim_run, execute_binding, finish_run,
@@ -21,7 +22,8 @@ pub use run::{
 };
 pub use sync::{
     DesiredTrack, DiffKind, DiffPlan, FitPlan, SkipReason, SkippedTrack, dedupe_by_isrc,
-    desired_from_playlist, greedy_fit, ms_to_seconds, plan_diff,
+    desired_for_source, desired_from_backpack, desired_from_playlist, desired_from_tag, greedy_fit,
+    ms_to_seconds, plan_diff,
 };
 
 use anyhow::{Context, Result, bail};

@@ -1,9 +1,10 @@
-//! Migration test for the Tonie binding schema (#500).
+//! Migration test for the Tonie binding schema (#500, #504).
 //!
 //! Boots a fresh temp SQLite with only the real migrations applied and checks
 //! the persistence invariants of `hub_tonie_bindings`: table/index presence, the
-//! column defaults, `UNIQUE(user_id, tonie_id)`, and the `ON DELETE CASCADE`
-//! behaviour on both the owning user and the source playlist.
+//! column defaults, `UNIQUE(user_id, tonie_id)`, the `ON DELETE CASCADE` on the
+//! owning user, and (#504) that `source_id` has **no** foreign key — deleting the
+//! bound source leaves the binding in place (acceptance #2).
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -152,7 +153,10 @@ async fn user_delete_cascades() {
 }
 
 #[tokio::test]
-async fn playlist_delete_cascades() {
+async fn playlist_delete_keeps_binding() {
+    // #504 acceptance #2: the source is a plain reference — deleting the bound
+    // playlist must NOT cascade the binding away. `source_kind` may now be a
+    // backpack or tag too, so a playlist FK would be wrong anyway.
     let (_dir, pool) = setup().await;
     let user = insert_user(&pool, "alice").await;
     let pl = insert_playlist(&pool, user, "pl-1").await;
@@ -163,5 +167,30 @@ async fn playlist_delete_cascades() {
         .execute(&pool)
         .await
         .expect("delete playlist");
-    assert_eq!(count(&pool, "SELECT COUNT(*) FROM hub_tonie_bindings").await, 0);
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM hub_tonie_bindings").await,
+        1,
+        "the binding must survive its deleted source"
+    );
+}
+
+#[tokio::test]
+async fn source_id_has_no_foreign_key() {
+    // The rebuild in 060 drops the `source_id` FK; `foreign_key_list` must show
+    // no `source_id` row (the `user_id` FK stays).
+    let (_dir, pool) = setup().await;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT \"from\", \"table\" FROM pragma_foreign_key_list('hub_tonie_bindings')",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("foreign_key_list");
+    assert!(
+        !rows.iter().any(|(from, _)| from == "source_id"),
+        "source_id must not have a foreign key: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|(from, _)| from == "user_id"),
+        "user_id must keep its foreign key: {rows:?}"
+    );
 }

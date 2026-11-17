@@ -30,6 +30,29 @@ pub fn valid_mode(m: &str) -> bool {
     matches!(m, MODE_MANUAL | MODE_AUTO)
 }
 
+/// The source kinds a Tonie binding may use (#504). `playlist` is the default.
+pub const SOURCE_PLAYLIST: &str = "playlist";
+/// A whole backpack (all of its resolved tracks) feeds the Tonie.
+pub const SOURCE_BACKPACK: &str = "backpack";
+/// A tag (its resolved tracks) feeds the Tonie.
+pub const SOURCE_TAG: &str = "tag";
+
+/// Whether `k` is a supported source kind (`playlist` | `backpack` | `tag`).
+pub fn valid_source_kind(k: &str) -> bool {
+    matches!(k, SOURCE_PLAYLIST | SOURCE_BACKPACK | SOURCE_TAG)
+}
+
+/// German display label for a source kind; unknown kinds fall back to the raw
+/// token so a stray DB value never renders as an empty label.
+pub fn source_kind_label(kind: &str) -> &str {
+    match kind {
+        SOURCE_PLAYLIST => "Playlist",
+        SOURCE_BACKPACK => "Backpack",
+        SOURCE_TAG => "Tag",
+        other => other,
+    }
+}
+
 /// One `hub_tonie_bindings` row (user-scoped; never carries another user's id).
 #[derive(Debug, Clone, Default)]
 pub struct Binding {
@@ -169,5 +192,23 @@ mod tests {
         assert!(!valid_mode("always"));
         assert!(!valid_mode(""));
         assert!(!valid_mode("Auto"));
+    }
+
+    #[test]
+    fn source_kind_validation() {
+        assert!(valid_source_kind("playlist"));
+        assert!(valid_source_kind("backpack"));
+        assert!(valid_source_kind("tag"));
+        assert!(!valid_source_kind("lens"));
+        assert!(!valid_source_kind(""));
+        assert!(!valid_source_kind("Playlist"));
+    }
+
+    #[test]
+    fn source_kind_labels() {
+        assert_eq!(source_kind_label(SOURCE_PLAYLIST), "Playlist");
+        assert_eq!(source_kind_label(SOURCE_BACKPACK), "Backpack");
+        assert_eq!(source_kind_label(SOURCE_TAG), "Tag");
+        assert_eq!(source_kind_label("weird"), "weird");
     }
 }

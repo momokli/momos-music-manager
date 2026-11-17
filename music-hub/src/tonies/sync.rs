@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use sqlx::{Row, SqlitePool};
 
 use super::Chapter;
+use super::bindings::{SOURCE_BACKPACK, SOURCE_PLAYLIST, SOURCE_TAG};
 
 /// One track the caller wants on the Tonie, in playlist order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +227,92 @@ pub async fn desired_from_playlist(
             duration_ms: row.get::<Option<i64>, _>("duration_ms").unwrap_or(0),
         })
         .collect())
+}
+
+/// Resolve the desired track list for a binding source (#504).
+///
+/// Dispatches on `source_kind`:
+/// * `playlist` → [`desired_from_playlist`] (playlist `position` order),
+/// * `tag` → [`desired_from_tag`] (hub track id order),
+/// * `backpack` → [`desired_from_backpack`] (resolver order).
+///
+/// A missing `source_id` ("no source linked") and an unknown kind are hard
+/// errors — an *existing but empty* source yields an empty `Vec` instead; the
+/// caller turns that emptiness into a clear error state (no silent empty sync).
+pub async fn desired_for_source(
+    pool: &SqlitePool,
+    source_kind: &str,
+    source_id: Option<i64>,
+) -> Result<Vec<DesiredTrack>> {
+    let Some(source_id) = source_id else {
+        anyhow::bail!("Keine Quelle verknüpft");
+    };
+    match source_kind {
+        SOURCE_PLAYLIST => desired_from_playlist(pool, source_id).await,
+        SOURCE_TAG => desired_from_tag(pool, source_id).await,
+        SOURCE_BACKPACK => desired_from_backpack(pool, source_id).await,
+        other => anyhow::bail!("Unbekannte Quellenart: {other}"),
+    }
+}
+
+/// Desired tracks of a tag: its resolved hub tracks (`hub_track_resolved_tags`),
+/// id-ordered, mapped through [`tracks_to_desired`].
+pub async fn desired_from_tag(pool: &SqlitePool, tag_id: i64) -> Result<Vec<DesiredTrack>> {
+    let ids = crate::backpacks::tracks_for_tag(pool, tag_id).await?;
+    tracks_to_desired(pool, &ids).await
+}
+
+/// Desired tracks of a backpack: every resolved track (unbounded — the
+/// 1..=500 clamp of [`crate::backpacks::resolve`] must not truncate the source),
+/// in resolver order, mapped through [`tracks_to_desired`].
+pub async fn desired_from_backpack(
+    pool: &SqlitePool,
+    backpack_id: i64,
+) -> Result<Vec<DesiredTrack>> {
+    let resolved = crate::backpacks::resolve_unbounded(pool, backpack_id).await?;
+    let ids: Vec<i64> = resolved.into_iter().map(|r| r.track_id).collect();
+    tracks_to_desired(pool, &ids).await
+}
+
+/// Map hub track ids to [`DesiredTrack`]s, preserving the given order and
+/// degrading NULL title/duration exactly like [`desired_from_playlist`] (empty
+/// title, zero duration). Ids without a `hub_tracks` row are skipped, matching
+/// the inner JOIN of [`desired_from_playlist`].
+async fn tracks_to_desired(pool: &SqlitePool, ids: &[i64]) -> Result<Vec<DesiredTrack>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut by_id: std::collections::HashMap<i64, DesiredTrack> = std::collections::HashMap::new();
+    // Chunk so the `IN (...)` placeholder list stays well below SQLite's
+    // parameter limit even for a large backpack.
+    for chunk in ids.chunks(500) {
+        let placeholders = (1..=chunk.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, isrc, title, duration_ms FROM hub_tracks WHERE id IN ({placeholders})"
+        );
+        let mut q = sqlx::query(&sql);
+        for id in chunk {
+            q = q.bind(id);
+        }
+        let rows = q
+            .fetch_all(pool)
+            .await
+            .context("Quell-Tracks konnten nicht gelesen werden")?;
+        for row in rows {
+            by_id.insert(
+                row.get::<i64, _>("id"),
+                DesiredTrack {
+                    isrc: row.get::<Option<String>, _>("isrc"),
+                    title: row.get::<Option<String>, _>("title").unwrap_or_default(),
+                    duration_ms: row.get::<Option<i64>, _>("duration_ms").unwrap_or(0),
+                },
+            );
+        }
+    }
+    Ok(ids.iter().filter_map(|id| by_id.get(id).cloned()).collect())
 }
 
 #[cfg(test)]

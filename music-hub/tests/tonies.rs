@@ -735,8 +735,8 @@ async fn tonies_page_without_playlists_shows_hint() {
         .await
         .unwrap();
     assert!(
-        html.contains("Noch keine Spotify-Playlists"),
-        "empty-state hint expected when the user has no playlists"
+        html.contains("Noch keine Quelle"),
+        "empty-state hint expected when the user has no sources"
     );
     assert!(html.contains("binding-ct1"), "binding area expected per card");
 }
@@ -788,8 +788,9 @@ async fn tonies_page_lists_playlists_as_options_with_capacity() {
         .await
         .unwrap();
 
-    // The user's own playlist is offered as an <option> of the picker.
-    let opt = format!("<option value=\"{pl}\">Chill Mix</option>");
+    // The user's own playlist is offered as an <option> of the picker; the
+    // value carries the kind so ids never collide across kinds (#504).
+    let opt = format!("<option value=\"playlist:{pl}\">Chill Mix</option>");
     assert!(html.contains(&opt), "playlist option missing: {opt}");
     // Capacity bar mirrors the mock (3780 s present, 5400 s total).
     assert!(html.contains("63 min / 90 min"), "capacity text missing");

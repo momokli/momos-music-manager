@@ -611,8 +611,9 @@ where
 }
 
 /// Execute one binding end-to-end: build the Tonies client, resolve the
-/// household, read the desired tracks from the bound playlist, check vault
-/// readiness, then run the sync (Tonies + music-api; **never** Spotify).
+/// household, read the desired tracks from the bound source (playlist, tag or
+/// backpack, #504), check vault readiness, then run the sync (Tonies +
+/// music-api; **never** Spotify).
 ///
 /// Never fails: any error becomes a `status='error'` outcome (credential-free)
 /// that the caller writes to the run log. Shared by the web handler
@@ -648,13 +649,22 @@ pub async fn execute_binding(
         },
     };
 
-    let Some(source_id) = binding.source_id else {
-        return fail("Keine Quelle verknüpft".to_string());
-    };
-    let desired = match super::sync::desired_from_playlist(pool, source_id).await {
+    let desired = match super::sync::desired_for_source(
+        pool,
+        &binding.source_kind,
+        binding.source_id,
+    )
+    .await
+    {
         Ok(d) => d,
-        Err(e) => return fail(format!("Playlist konnte nicht gelesen werden: {e}")),
+        Err(e) => return fail(format!("Quelle konnte nicht aufgelöst werden: {e}")),
     };
+    if desired.is_empty() {
+        return fail(format!(
+            "Quelle ist leer oder nicht mehr vorhanden ({})",
+            binding.source_kind
+        ));
+    }
 
     // Readiness: one music-api status call per distinct ISRC.
     let isrcs: Vec<String> = desired.iter().filter_map(|t| t.isrc.clone()).collect();
