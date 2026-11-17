@@ -5,7 +5,12 @@
 //! [`client`]. No secret ever touches `tracing`, an `anyhow` message, or a
 //! template — only typed, status-level errors.
 
+pub mod bindings;
 pub mod client;
+
+pub use bindings::{
+    Binding, delete_binding, get_binding, list_bindings, upsert_binding, valid_format, valid_mode,
+};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
