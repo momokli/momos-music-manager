@@ -17,6 +17,7 @@ use sqlx::SqlitePool;
 
 use crate::config::Config;
 use crate::ingest;
+use crate::settings;
 use crate::spotify;
 
 const IDLE_WAIT: Duration = Duration::from_secs(10);
@@ -26,19 +27,25 @@ pub const EVENT_CAPACITY: usize = 200;
 const MAX_PLAYLISTS_PER_PASS: usize = 12;
 const MAX_LIKES_ACCOUNTS_PER_PASS: usize = 2;
 const PAGE_DELAY: Duration = Duration::from_millis(150);
+/// Default cadence of the playlist listing poll (#506): 15 min.
+const PLAYLIST_POLL_DEFAULT_SECS: u64 = 900;
+/// Lower bound for the configurable cadence (#506).
+const PLAYLIST_POLL_MIN_SECS: u64 = 60;
 
-/// The six Hub-Owned loop names, in report order (issues #353, #503).
+/// The seven Hub-Owned loop names, in report order (issues #353, #503, #506).
 ///
 /// The crawl domain is served by two tasks (vault/order refresh + Spotify
 /// touch-cascade); both report under `"crawl"` so the domain is one visible
-/// loop, matching the plan.
-pub const LOOP_NAMES: [&str; 6] = [
+/// loop, matching the plan. `"playlists"` is the listing poll that keeps
+/// `hub_playlists.snapshot_id` fresh without a user clicking "Fetch".
+pub const LOOP_NAMES: [&str; 7] = [
     "enrichment",
     "freqblog",
     "spotify",
     "crawl",
     "curation",
     "tonies",
+    "playlists",
 ];
 
 /// In-memory health registry for the Hub's background loops (issue #353).
@@ -63,6 +70,8 @@ struct LoopState {
     last_run_at: Option<String>,
     last_worked: bool,
     iterations: u64,
+    /// Cumulative external requests attributed to this loop (#506).
+    requests: u64,
     last_error: Option<String>,
     /// In-memory pause flag (issue #350): a paused loop skips its work and
     /// records nothing until resumed. Lost on restart (accepted).
@@ -85,6 +94,8 @@ pub struct LoopSnapshot {
     pub last_run_at: Option<String>,
     pub last_worked: bool,
     pub iterations: u64,
+    /// Cumulative external requests attributed to this loop (#506).
+    pub requests: u64,
     pub last_error: Option<String>,
     pub paused: bool,
 }
@@ -104,7 +115,7 @@ impl Default for WorkerHealth {
 }
 
 impl WorkerHealth {
-    /// Fresh registry with all five loops registered and `started_at = now`.
+    /// Fresh registry with all seven loops registered and `started_at = now`.
     pub fn new() -> Self {
         let mut inner = WorkerHealthInner {
             started_at: Some(chrono::Utc::now()),
@@ -134,6 +145,20 @@ impl WorkerHealth {
 
     /// Record one loop iteration. `err = None` clears a previous error.
     pub fn record(&self, name: &'static str, worked: bool, err: Option<String>) {
+        self.record_with_requests(name, worked, err, 0);
+    }
+
+    /// Record one loop iteration plus external requests made during it.
+    ///
+    /// `requests` is added to the loop's cumulative counter so the status
+    /// surface can show the request budget (#506).
+    pub fn record_with_requests(
+        &self,
+        name: &'static str,
+        worked: bool,
+        err: Option<String>,
+        requests: u64,
+    ) {
         let mut inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if inner.started_at.is_none() {
             inner.started_at = Some(chrono::Utc::now());
@@ -143,6 +168,7 @@ impl WorkerHealth {
         st.last_run_at = Some(at.clone());
         st.last_worked = worked;
         st.iterations += 1;
+        st.requests += requests;
         st.last_error = err.clone();
         // One event per iteration; drop the oldest when at capacity.
         if inner.events.len() >= EVENT_CAPACITY {
@@ -173,6 +199,7 @@ impl WorkerHealth {
                 last_run_at: st.last_run_at.clone(),
                 last_worked: st.last_worked,
                 iterations: st.iterations,
+                requests: st.requests,
                 last_error: st.last_error.clone(),
                 paused: st.paused,
             })
@@ -202,6 +229,9 @@ impl WorkerHealth {
 /// so the HTTP surface can report their state (issue #353).
 pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) -> WorkerHealth {
     let health = WorkerHealth::new();
+    // Both Spotify-touching loops (item sync + listing poll) serialize their
+    // passes so one tick never fetches playlists twice (#506).
+    let spotify_tick: Arc<tokio::sync::Mutex<()>> = Arc::new(tokio::sync::Mutex::new(()));
 
     // Enrichment loop: audio features + genres. Local/external APIs that don't
     // touch Spotify — kept separate so Spotify quota backoffs can't starve them.
@@ -255,13 +285,16 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) -> WorkerHealth {
         let pool = pool.clone();
         let cfg = cfg.clone();
         let health = health.clone();
+        let spotify_tick = spotify_tick.clone();
         tokio::spawn(async move {
             loop {
                 if health.is_paused("spotify") {
                     tokio::time::sleep(IDLE_WAIT).await;
                     continue;
                 }
+                let guard = spotify_tick.lock().await;
                 let r = run_once(&pool, &cfg).await;
+                drop(guard);
                 if let Err(e) = &r {
                     tracing::warn!("worker pass failed: {e}");
                 }
@@ -393,6 +426,79 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) -> WorkerHealth {
         });
     }
 
+    // Playlist listing loop (#506): Spotify has no playlist-change webhook, so
+    // this poll refreshes `hub_playlists.snapshot_id` (metadata only). The
+    // next `spotify` pass then fetches items for changed playlists.
+    {
+        let pool = pool.clone();
+        let cfg = cfg.clone();
+        let health = health.clone();
+        let spotify_tick = spotify_tick.clone();
+        tokio::spawn(async move {
+            loop {
+                if health.is_paused("playlists") {
+                    tokio::time::sleep(IDLE_WAIT).await;
+                    continue;
+                }
+                let interval = playlist_poll_interval(&pool).await;
+                if !playlist_poll_enabled(&pool).await {
+                    tokio::time::sleep(interval).await;
+                    continue;
+                }
+                let guard = spotify_tick.lock().await;
+                let r = playlist_listing_pass(&pool, &cfg).await;
+                drop(guard);
+                match &r {
+                    Ok(PlaylistPollOutcome::Ok(stats)) => {
+                        tracing::info!(
+                            "playlists poll: {} users, {} requests, {} playlists updated",
+                            stats.users,
+                            stats.requests,
+                            stats.updated
+                        );
+                        health.record_with_requests(
+                            "playlists",
+                            stats.updated > 0,
+                            None,
+                            stats.requests,
+                        );
+                    }
+                    Ok(PlaylistPollOutcome::RateLimited { retry_after, stats }) => {
+                        tracing::warn!(
+                            "playlists poll: rate limited after {} requests",
+                            stats.requests
+                        );
+                        health.record_with_requests(
+                            "playlists",
+                            stats.updated > 0,
+                            Some("Spotify rate limit (429)".to_string()),
+                            stats.requests,
+                        );
+                        backoff(*retry_after).await;
+                    }
+                    Ok(PlaylistPollOutcome::Quota { stats }) => {
+                        tracing::warn!(
+                            "playlists poll: dev-mode quota exceeded after {} requests",
+                            stats.requests
+                        );
+                        health.record_with_requests(
+                            "playlists",
+                            stats.updated > 0,
+                            Some("Spotify dev-mode quota exceeded".to_string()),
+                            stats.requests,
+                        );
+                        quota_backoff().await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("playlists poll failed: {e}");
+                        health.record("playlists", false, Some(e.to_string()));
+                    }
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
     health
 }
 
@@ -401,6 +507,144 @@ async fn run_once(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
     let likes = sync_likes_jobs(pool, cfg).await?;
     let playlists = playlist_jobs(pool, cfg).await?;
     Ok(likes || playlists)
+}
+
+// ── playlist listing poll (#506) ────────────────────────────────────────────
+
+/// Counters for one listing poll pass, surfaced in the log and health.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PlaylistPollStats {
+    /// Users that had a usable token and were polled.
+    pub users: usize,
+    /// Spotify API requests made (profile + listing pages).
+    pub requests: u64,
+    /// Playlists whose metadata was upserted.
+    pub updated: usize,
+}
+
+/// Result of one listing poll pass.
+#[derive(Debug)]
+pub enum PlaylistPollOutcome {
+    Ok(PlaylistPollStats),
+    RateLimited {
+        retry_after: Option<u64>,
+        stats: PlaylistPollStats,
+    },
+    Quota {
+        stats: PlaylistPollStats,
+    },
+}
+
+/// One metadata-only `/me/playlists` listing poll over every user with a
+/// Spotify account (#506).
+///
+/// User without a usable token are skipped with a log line and produce no
+/// request. A 429 or dev-mode quota aborts the pass with the matching outcome
+/// so the caller can back off instead of retrying in a storm.
+pub async fn playlist_listing_pass(
+    pool: &SqlitePool,
+    cfg: &Config,
+) -> Result<PlaylistPollOutcome> {
+    let accounts = sqlx::query_as::<_, (i64, String, Option<String>)>(
+        "SELECT u.id, u.slug, a.access_token
+           FROM hub_users u
+           JOIN hub_service_accounts a
+             ON a.user_id = u.id AND a.service = 'spotify'
+          ORDER BY u.id",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut stats = PlaylistPollStats::default();
+    for (user_id, slug, stored_token) in accounts {
+        // No token at all: log only, never touch the network (#506).
+        if stored_token.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            tracing::info!("playlists poll: skipping {slug} (no Spotify token)");
+            continue;
+        }
+        // Refresh the token if it is expired/expiring.
+        let token = match ingest::access_token(pool, cfg, user_id).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::info!("playlists poll: skipping {slug} (unusable token: {e})");
+                continue;
+            }
+        };
+        stats.users += 1;
+
+        // 1 request: `/me` (also persists remote id + display name).
+        stats.requests += 1;
+        let remote_id = match ingest::remote_profile(
+            pool,
+            &cfg.spotify_api_base,
+            &token,
+            user_id,
+        )
+        .await
+        {
+            Ok((id, _)) => id,
+            Err(e) => {
+                tracing::warn!("playlists poll: profile fetch for {slug} failed: {e}");
+                continue;
+            }
+        };
+
+        let url = spotify::api_url(&cfg.spotify_api_base, "/me/playlists?limit=50");
+        let (outcome, pages) = match paged_counted(&token, &url).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("playlists poll: listing for {slug} failed: {e}");
+                continue;
+            }
+        };
+        stats.requests += pages as u64;
+        match outcome {
+            Outcome::Ok(items) => {
+                for pl in &items {
+                    let owned = ingest::is_owned(pl, &remote_id);
+                    if ingest::upsert_playlist_meta(pool, user_id, pl, owned)
+                        .await?
+                        .is_some()
+                    {
+                        stats.updated += 1;
+                    }
+                }
+            }
+            Outcome::RateLimited { retry_after } => {
+                return Ok(PlaylistPollOutcome::RateLimited {
+                    retry_after,
+                    stats,
+                });
+            }
+            Outcome::Quota => return Ok(PlaylistPollOutcome::Quota { stats }),
+            Outcome::Forbidden => {
+                tracing::warn!("playlists poll: {slug} not in Spotify app allowlist (403)");
+            }
+            Outcome::Error(m) => {
+                tracing::warn!("playlists poll: listing for {slug} returned {m}");
+            }
+        }
+    }
+    Ok(PlaylistPollOutcome::Ok(stats))
+}
+
+async fn playlist_poll_enabled(pool: &SqlitePool) -> bool {
+    match settings::get(pool, settings::PLAYLIST_POLL_ENABLED)
+        .await
+        .map(|v| v.trim().to_lowercase())
+    {
+        Some(v) => matches!(v.as_str(), "1" | "true" | "on" | "yes"),
+        None => true,
+    }
+}
+
+async fn playlist_poll_interval(pool: &SqlitePool) -> Duration {
+    let secs = settings::get(pool, settings::PLAYLIST_POLL_INTERVAL_SECS)
+        .await
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(PLAYLIST_POLL_DEFAULT_SECS)
+        .max(PLAYLIST_POLL_MIN_SECS);
+    Duration::from_secs(secs)
 }
 
 // ── liked tracks ────────────────────────────────────────────────────────────
@@ -602,20 +846,30 @@ enum Outcome {
 
 /// Follow `next` links, mapping 429/403 to outcomes instead of erroring.
 async fn paged(token: &str, first_url: &str) -> Result<Outcome> {
+    Ok(paged_counted(token, first_url).await?.0)
+}
+
+/// Like [`paged`], but also reports how many HTTP requests were made.
+async fn paged_counted(token: &str, first_url: &str) -> Result<(Outcome, usize)> {
     let mut url = first_url.to_string();
     let mut items = Vec::new();
+    let mut requests = 0usize;
     loop {
+        requests += 1;
         let page = spotify::get_page(token, &url).await?;
         match page.status {
             200 => {}
-            429 if page.quota_exceeded => return Ok(Outcome::Quota),
+            429 if page.quota_exceeded => return Ok((Outcome::Quota, requests)),
             429 => {
-                return Ok(Outcome::RateLimited {
-                    retry_after: page.retry_after,
-                });
+                return Ok((
+                    Outcome::RateLimited {
+                        retry_after: page.retry_after,
+                    },
+                    requests,
+                ));
             }
-            403 => return Ok(Outcome::Forbidden),
-            s => return Ok(Outcome::Error(format!("HTTP {s}"))),
+            403 => return Ok((Outcome::Forbidden, requests)),
+            s => return Ok((Outcome::Error(format!("HTTP {s}")), requests)),
         }
         if let Some(arr) = page.body["items"].as_array() {
             items.extend(arr.iter().cloned());
@@ -626,7 +880,7 @@ async fn paged(token: &str, first_url: &str) -> Result<Outcome> {
         }
         tokio::time::sleep(PAGE_DELAY).await;
     }
-    Ok(Outcome::Ok(items))
+    Ok((Outcome::Ok(items), requests))
 }
 
 async fn backoff(retry_after: Option<u64>) {
@@ -689,6 +943,36 @@ mod health_tests {
         sorted.sort_unstable();
         assert_eq!(names, sorted);
         assert_eq!(snap.loops[0].iterations, 0);
+    }
+
+    #[test]
+    fn loop_registry_has_seven_including_playlists() {
+        assert_eq!(LOOP_NAMES.len(), 7);
+        assert!(LOOP_NAMES.contains(&"playlists"));
+        let h = WorkerHealth::new();
+        let snap = h.snapshot();
+        assert_eq!(snap.loops.len(), 7);
+        assert!(snap.loops.iter().any(|l| l.name == "playlists"));
+        // Pausable like every other registered loop (#350).
+        assert!(!h.is_paused("playlists"));
+        h.set_paused("playlists", true);
+        assert!(h.is_paused("playlists"));
+    }
+
+    #[test]
+    fn record_accumulates_request_budget() {
+        let h = WorkerHealth::new();
+        h.record_with_requests("playlists", true, None, 6);
+        h.record_with_requests("playlists", false, None, 4);
+        let snap = h.snapshot();
+        let p = snap.loops.iter().find(|l| l.name == "playlists").unwrap();
+        assert_eq!(p.requests, 10, "request counter is cumulative");
+        assert_eq!(p.iterations, 2);
+        // Plain record leaves the counter untouched.
+        h.record("playlists", true, None);
+        let snap = h.snapshot();
+        let p = snap.loops.iter().find(|l| l.name == "playlists").unwrap();
+        assert_eq!(p.requests, 10);
     }
 
     #[test]

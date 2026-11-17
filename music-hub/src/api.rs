@@ -201,6 +201,7 @@ pub async fn status_data(st: &AppState) -> Value {
                 "lastRunAt": l.last_run_at,
                 "lastWorked": l.last_worked,
                 "iterations": l.iterations,
+                "requests": l.requests,
                 "lastError": l.last_error,
             })
         })

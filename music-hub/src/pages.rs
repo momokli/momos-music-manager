@@ -4037,6 +4037,7 @@ struct WorkerRow {
     last_run: String,
     last_worked: bool,
     iterations: u64,
+    requests: u64,
     last_error: String,
     paused: bool,
 }
@@ -4064,6 +4065,7 @@ async fn status_panel(State(st): State<AppState>, headers: HeaderMap) -> Respons
             last_run: l.last_run_at.clone().unwrap_or_else(|| "—".to_string()),
             last_worked: l.last_worked,
             iterations: l.iterations,
+            requests: l.requests,
             last_error: l.last_error.clone().unwrap_or_default(),
             paused: l.paused,
         })
