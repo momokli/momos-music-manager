@@ -14,6 +14,9 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 const TS: &str = "2026-01-01T00:00:00+00:00";
 
+/// The 060 rebuild body, run verbatim by [`migration_060_rebuild_keeps_binding_and_sync_rows`].
+const MIGRATION_060: &str = include_str!("../migrations/060_hub_tonie_bindings_source_kind.sql");
+
 /// Fresh temp DB, FKs on, all migrations applied.
 async fn setup() -> (tempfile::TempDir, SqlitePool) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -74,6 +77,18 @@ async fn insert_binding(
     .bind(TS)
     .fetch_one(pool)
     .await
+}
+
+async fn insert_sync(pool: &SqlitePool, binding_id: i64) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO hub_tonie_syncs (binding_id, started_at, status)
+         VALUES (?1, ?2, 'ok') RETURNING id",
+    )
+    .bind(binding_id)
+    .bind(TS)
+    .fetch_one(pool)
+    .await
+    .expect("insert sync")
 }
 
 async fn count(pool: &SqlitePool, sql: &str) -> i64 {
@@ -193,4 +208,128 @@ async fn source_id_has_no_foreign_key() {
         rows.iter().any(|(from, _)| from == "user_id"),
         "user_id must keep its foreign key: {rows:?}"
     );
+}
+
+#[tokio::test]
+async fn fk_enforcement_is_active() {
+    // Control for the rebuild test below: prove the test connection really
+    // enforces foreign keys, so "the sync row survives the rebuild" is a
+    // meaningful assertion rather than an artefact of FKs being off.
+    let (_dir, pool) = setup().await;
+    let fk_on: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(fk_on, 1, "test connection must enforce foreign keys");
+
+    let user = insert_user(&pool, "alice").await;
+    let pl = insert_playlist(&pool, user, "pl-1").await;
+    let binding = insert_binding(&pool, user, "ct1", pl).await.expect("insert");
+    insert_sync(&pool, binding).await;
+
+    // Deleting the binding must cascade its run log — the FK is live.
+    sqlx::query("DELETE FROM hub_tonie_bindings WHERE id = ?1")
+        .bind(binding)
+        .execute(&pool)
+        .await
+        .expect("delete binding");
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM hub_tonie_syncs").await,
+        0,
+        "hub_tonie_syncs must cascade with its binding when FKs are on"
+    );
+}
+
+#[tokio::test]
+async fn migration_060_rebuild_keeps_binding_and_sync_rows() {
+    // Closes the verifier gap: the 060 table rebuild runs with
+    // `PRAGMA foreign_keys=OFF` so that `hub_tonie_syncs.binding_id`
+    // (ON DELETE CASCADE) does not fire while the old table is dropped. That
+    // guarantee is only indirectly covered when no run row exists yet — this
+    // test populates both a binding and a run-log row *before* the rebuild and
+    // asserts both survive verbatim.
+    let (_dir, pool) = setup().await;
+
+    let user = insert_user(&pool, "alice").await;
+    let pl = insert_playlist(&pool, user, "pl-1").await;
+    let binding = insert_binding(&pool, user, "ct1", pl).await.expect("binding");
+    let sync = insert_sync(&pool, binding).await;
+
+    let fk_before: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(fk_before, 1, "FKs must be on going into the rebuild");
+
+    // Run the real 060 SQL body verbatim on the populated DB. Without the
+    // migration's `foreign_keys=OFF` guard, DROP TABLE would implicitly delete
+    // the rows and cascade the sync row away.
+    sqlx::raw_sql(MIGRATION_060)
+        .execute(&pool)
+        .await
+        .expect("run migration 060 rebuild");
+
+    // The binding row survives with its id and source reference intact.
+    let bindings: Vec<(i64, String, i64)> =
+        sqlx::query_as("SELECT id, tonie_id, source_id FROM hub_tonie_bindings")
+            .fetch_all(&pool)
+            .await
+            .expect("binding rows");
+    assert_eq!(
+        bindings,
+        vec![(binding, "ct1".to_string(), pl)],
+        "existing binding must survive the rebuild unchanged"
+    );
+
+    // The pre-existing run-log row survives — it must NOT be cascaded away.
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM hub_tonie_syncs").await,
+        1,
+        "existing hub_tonie_syncs row must survive the rebuild"
+    );
+    let kept: i64 = sqlx::query_scalar("SELECT binding_id FROM hub_tonie_syncs WHERE id = ?1")
+        .bind(sync)
+        .fetch_one(&pool)
+        .await
+        .expect("sync row still present");
+    assert_eq!(kept, binding, "run log must still point at the same binding");
+
+    // `source_id` lost its FK; the `user_id` FK stays.
+    let fk_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT \"from\", \"table\" FROM pragma_foreign_key_list('hub_tonie_bindings')",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("foreign_key_list");
+    assert!(
+        !fk_rows.iter().any(|(from, _)| from == "source_id"),
+        "source_id must have no FK after the rebuild: {fk_rows:?}"
+    );
+    assert!(
+        fk_rows.iter().any(|(from, _)| from == "user_id"),
+        "user_id must keep its FK after the rebuild: {fk_rows:?}"
+    );
+
+    // `UNIQUE(user_id, tonie_id)` is preserved (duplicate insert is rejected).
+    let dup = insert_binding(&pool, user, "ct1", pl).await;
+    assert!(
+        dup.is_err(),
+        "UNIQUE(user_id, tonie_id) must survive the rebuild"
+    );
+
+    // The user index is recreated by the rebuild.
+    let idx: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_hub_tonie_bindings_user'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(idx, 1, "idx_hub_tonie_bindings_user must survive the rebuild");
+
+    // The migration re-enables FK enforcement on the connection.
+    let fk_after: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(fk_after, 1, "FKs must be re-enabled after the rebuild");
 }
