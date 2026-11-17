@@ -27,12 +27,19 @@ const MAX_PLAYLISTS_PER_PASS: usize = 12;
 const MAX_LIKES_ACCOUNTS_PER_PASS: usize = 2;
 const PAGE_DELAY: Duration = Duration::from_millis(150);
 
-/// The five Hub-Owned loop names, in report order (issue #353).
+/// The six Hub-Owned loop names, in report order (issues #353, #503).
 ///
 /// The crawl domain is served by two tasks (vault/order refresh + Spotify
 /// touch-cascade); both report under `"crawl"` so the domain is one visible
 /// loop, matching the plan.
-pub const LOOP_NAMES: [&str; 5] = ["enrichment", "freqblog", "spotify", "crawl", "curation"];
+pub const LOOP_NAMES: [&str; 6] = [
+    "enrichment",
+    "freqblog",
+    "spotify",
+    "crawl",
+    "curation",
+    "tonies",
+];
 
 /// In-memory health registry for the Hub's background loops (issue #353).
 ///
@@ -312,6 +319,8 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) -> WorkerHealth {
     // Curation loop: push daily curated playlists to Spotify (#316). Checks
     // every 30 min; `daily_due` gates each playlist to at most once per 20 h.
     {
+        let pool = pool.clone();
+        let cfg = cfg.clone();
         let health = health.clone();
         tokio::spawn(async move {
             loop {
@@ -356,6 +365,30 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) -> WorkerHealth {
                 }
                 health.record("curation", worked, err);
                 tokio::time::sleep(Duration::from_secs(1800)).await;
+            }
+        });
+    }
+
+    // Tonies auto-sync loop (#503): run due `mode='auto'` bindings after their
+    // debounce window. The debounce lives in the query, not the sleep; this loop
+    // never touches Spotify.
+    {
+        let pool = pool.clone();
+        let cfg = cfg.clone();
+        let health = health.clone();
+        tokio::spawn(async move {
+            loop {
+                if health.is_paused("tonies") {
+                    tokio::time::sleep(IDLE_WAIT).await;
+                    continue;
+                }
+                let r = crate::tonies::autosync::run_due(&pool, &cfg, 10).await;
+                if let Err(e) = &r {
+                    tracing::warn!("tonies autosync pass failed: {e}");
+                }
+                let worked = matches!(r, Ok(n) if n > 0);
+                health.record("tonies", worked, r.err().map(|e| e.to_string()));
+                tokio::time::sleep(if worked { BUSY_WAIT } else { IDLE_WAIT }).await;
             }
         });
     }
@@ -454,7 +487,7 @@ async fn set_likes_error(pool: &SqlitePool, user_id: i64, msg: &str) -> Result<(
 
 // ── playlist items ──────────────────────────────────────────────────────────
 
-async fn playlist_jobs(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
+pub async fn playlist_jobs(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
     // Fetch never-fetched playlists, plus those whose remote snapshot changed
     // since the last item fetch (incremental update — minimizes API calls).
     let jobs = sqlx::query_as::<_, (i64, i64, String, String)>(
@@ -500,6 +533,7 @@ async fn playlist_jobs(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
         match paged(&token, &url).await? {
             Outcome::Ok(items) => {
                 let n = ingest::store_playlist_items(pool, cfg, local_id, &items).await?;
+                let now = now_iso();
                 sqlx::query(
                     "UPDATE hub_playlists
                         SET items_available = 1, fetched_at = ?2,
@@ -508,7 +542,19 @@ async fn playlist_jobs(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
                       WHERE id = ?1",
                 )
                 .bind(local_id)
-                .bind(now_iso())
+                .bind(&now)
+                .execute(pool)
+                .await?;
+                // Auto-Sync hook (#503): a changed snapshot marks every
+                // `mode='auto'` binding fed by this playlist dirty. No extra
+                // Spotify call — the change is already known here.
+                sqlx::query(
+                    "UPDATE hub_tonie_bindings
+                        SET dirty_since = ?2, updated_at = ?2
+                      WHERE mode = 'auto' AND source_kind = 'playlist' AND source_id = ?1",
+                )
+                .bind(local_id)
+                .bind(&now)
                 .execute(pool)
                 .await?;
                 tracing::info!("fetched {n} tracks for playlist {local_id} ({slug})");

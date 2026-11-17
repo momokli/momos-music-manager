@@ -10,6 +10,18 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Tonies Auto-Sync — Worker-Hook auf `snapshot_id` + Debounce** (#503) —
+  `mode='auto'`-Tonie-Bindings werden automatisch synchronisiert, sobald sich die
+  `snapshot_id` der Quell-Playlist ändert. Der Worker markiert die betroffenen
+  Auto-Bindings direkt im bestehenden Playlist-Refresh (`dirty_since`, **kein**
+  zusätzlicher Spotify-Request) und ein neuer Hintergrund-Loop (`"tonies"`) führt
+  fällige Bindings nach einer konfigurierbaren Ruhephase + Mindestabstand aus.
+  Die Ausführung ist aus `web.rs` in `tonies::run::execute_binding` extrahiert
+  (Tonies + music-api, nie Spotify) und wird von `/tonies/{id}/sync` und dem
+  Worker geteilt; Debounce-Werte kommen aus der Settings-Registry
+  (`tonie_autosync_enabled` / `tonie_autosync_quiet_secs` /
+  `tonie_autosync_min_interval_secs`, Defaults `1`/`300`/`600`).
+  **Kein Version-Bump.**
 - feat: **Tonies-Anbindung — Account-Verbindung + read-only `/tonies`-Seite** (#499) —
   neues Modul `tonies` mit Keycloak-Password-Grant, automatischem Refresh-on-401 und
   typisierten Tonies-Read-Primitiven; per-User-Account-Store mit AES-256-GCM

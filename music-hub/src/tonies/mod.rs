@@ -5,17 +5,19 @@
 //! [`client`]. No secret ever touches `tracing`, an `anyhow` message, or a
 //! template — only typed, status-level errors.
 
+pub mod autosync;
 pub mod bindings;
 pub mod client;
 pub mod run;
 pub mod sync;
 
+pub use autosync::{Debounce, due_bindings, is_due, run_due};
 pub use bindings::{
     Binding, delete_binding, get_binding, list_bindings, upsert_binding, valid_format, valid_mode,
 };
 pub use run::{
-    Claim, RunOutcome, SyncOptions, SyncRow, Transcoding, claim_run, finish_run, list_syncs,
-    poll_transcoding, readiness, run_sync, summary,
+    Claim, RunOutcome, SyncOptions, SyncRow, Transcoding, claim_run, execute_binding, finish_run,
+    list_syncs, poll_transcoding, readiness, run_sync, summary,
 };
 pub use sync::{
     DesiredTrack, DiffKind, DiffPlan, FitPlan, SkipReason, SkippedTrack, dedupe_by_isrc,
@@ -218,6 +220,67 @@ pub struct Account {
 
 fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+// ── client construction (pool/cfg-based, for web + worker) ──────────────────
+
+/// Why building a Tonies client for a user failed (credential-free).
+#[derive(Debug, Clone)]
+pub struct ClientError {
+    /// Categorised, credential-free message.
+    pub message: String,
+    /// The stored token could not be read → offer "reconnect".
+    pub needs_reconnect: bool,
+}
+
+/// Build a Tonies client for `uid` from the stored, still-encrypted refresh
+/// token. The token is decrypted in memory only — it is never logged, rendered,
+/// or put into an error message. Pool/cfg-based so both the web handler and the
+/// worker auto-sync can share it.
+pub async fn client_for(
+    pool: &SqlitePool,
+    cfg: &crate::config::Config,
+    uid: i64,
+) -> Result<client::ToniesClient, ClientError> {
+    let key = cfg.tonies_key().map_err(|e| ClientError {
+        message: format!("{e}"),
+        needs_reconnect: false,
+    })?;
+    let secret_enc = load_secret_enc(pool, uid)
+        .await
+        .map_err(|e| {
+            tracing::warn!("tonies secret load failed for user {uid}: {e:#}");
+            ClientError {
+                message: "Tonies-Verbindung konnte nicht geladen werden".to_string(),
+                needs_reconnect: false,
+            }
+        })?
+        .unwrap_or_default();
+    let refresh_token = decrypt_secret(key, &secret_enc).map_err(|_| ClientError {
+        message: "Tonies-Sitzung konnte nicht gelesen werden — bitte neu verbinden.".to_string(),
+        needs_reconnect: true,
+    })?;
+    let tokens = Tokens {
+        access_token: String::new(),
+        refresh_token: Some(refresh_token),
+        expires_at: 0,
+    };
+    Ok(client::ToniesClient::with_tokens(
+        &cfg.tonies_auth_base,
+        &cfg.tonies_api_base,
+        tokens,
+    ))
+}
+
+/// Resolve the household id: prefer the configured/first household, else the id
+/// carried by `/v2/me`.
+pub async fn resolve_household(client: &mut client::ToniesClient) -> Option<String> {
+    if let Ok(hs) = client.get_households().await {
+        if let Some(id) = hs.into_iter().find_map(|h| h.id) {
+            return Some(id);
+        }
+    }
+    client.get_me().await.ok().and_then(|m| m.household_id)
 }
 
 /// Upsert the account, encrypting `refresh_token` at rest and clearing any
