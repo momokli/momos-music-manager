@@ -14,8 +14,16 @@ name: kellner release
 # GTK/appindicator on Linux, so Linux artefacts stay headless. See the plan.
 
 on:
+  # * Tag `kellner-v*` = echtes Release.
+  # * `main` = rolling build: jeder Merge nach kellner/** stellt sofort ein
+  #   herunterladbares Binary bereit (Pre-Release `kellner-latest`), damit man
+  #   ohne lokale Toolchain testen kann.
   push:
     tags: ["kellner-v*"]
+    branches: [main]
+    paths:
+      - "kellner/**"
+      - ".github/workflows/kellner-release.yml"
   pull_request:
     paths:
       - "kellner/**"
@@ -32,6 +40,11 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # macOS-Runner sind fuer dieses Repo nicht durchgaengig verfuegbar
+    # ("The configuration 'macos-14-arm64-us-default' is not supported"). Ein
+    # fehlendes macOS-Binary darf das rolling Release fuer die anderen Plattformen
+    # nicht verhindern — deshalb nicht blockierend.
+    continue-on-error: ${{ startsWith(matrix.os, 'macos') }}
     # Every `run` step is relative to the crate, like the other kellner jobs do
     # per step (`ci-pr.yml`). `uses` steps are NOT affected, so the artefact path
     # below is spelled from the repo root on purpose.
@@ -43,13 +56,13 @@ jobs:
       matrix:
         include:
           - name: macos-arm64-tray
-            os: macos-14
+            os: macos-latest
             target: aarch64-apple-darwin
             features: tray
             archive: tar.gz
             smoke: run
           - name: macos-x86_64-tray
-            os: macos-14
+            os: macos-latest
             target: x86_64-apple-darwin
             features: tray
             archive: tar.gz
@@ -195,7 +208,7 @@ jobs:
   # Attaches everything to the release — tag builds only.
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/kellner-v')
+    if: always() && (startsWith(github.ref, 'refs/tags/kellner-v') || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -214,9 +227,18 @@ jobs:
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          # Tag-Build -> eigenes Release. main-Build -> rollierendes Pre-Release.
+          TAG: ${{ startsWith(github.ref, 'refs/tags/kellner-v') && github.ref_name || 'kellner-latest' }}
+          ROLLING: ${{ startsWith(github.ref, 'refs/tags/kellner-v') && '0' || '1' }}
         run: |
           set -euo pipefail
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
-            --title "$TAG" --notes "kellner $TAG (see kellner/CHANGELOG.md)"
+          ls dist >/dev/null 2>&1 || { echo "::error::keine Artefakte — kein Release"; exit 1; }
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            if [ "$ROLLING" = "1" ]; then
+              gh release create "$TAG" --prerelease --title "kellner rolling (main)" \
+                --notes "Rolling build from main — not a tagged release. See kellner/CHANGELOG.md."
+            else
+              gh release create "$TAG" --title "$TAG" --notes "kellner $TAG (see kellner/CHANGELOG.md)"
+            fi
+          fi
           gh release upload "$TAG" dist/* --clobber

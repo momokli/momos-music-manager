@@ -1,0 +1,15 @@
+[Unit]
+Description=music-api: main -> prod (fetch, build, install, restart, health gate)
+Documentation=https://github.com/momokli/momos-music-manager/blob/main/music-api/deploy/continuous-deploy.sh
+After=network-online.target music-api.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=momo
+Group=momo
+Environment=HOME=/home/momo
+ExecStart=/home/momo/music-api-build/deploy/continuous-deploy.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=900
