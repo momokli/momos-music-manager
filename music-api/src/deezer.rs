@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Timeout for the gw-light `deezer.getUserData` probe. Kept short: the tier
 /// check must never stall the boot path (it runs in a spawned task).
@@ -199,6 +199,389 @@ pub async fn lookup_isrc(http: &reqwest::Client, base: &str, isrc: &str) -> anyh
     })
 }
 
+// ── Metadata surface for the hub (artist albums, album detail, artist search) ──
+
+/// Upper bound for one metadata page. Deezer documents 100 as the maximum
+/// `limit`; a larger request is clamped instead of rejected.
+pub const METADATA_MAX_LIMIT: usize = 100;
+
+/// Why a Deezer metadata call produced no usable answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetaError {
+    /// Deezer knows no such id/query: an `error` object with code 800, or an
+    /// HTTP 404.
+    NotFound,
+    /// Transport failure, a non-404 HTTP status, a quota/busy error code, or a
+    /// payload that does not match the documented shape.
+    Upstream(String),
+}
+
+impl std::fmt::Display for MetaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetaError::NotFound => f.write_str("deezer: not found"),
+            MetaError::Upstream(detail) => write!(f, "deezer: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for MetaError {}
+
+/// One release in an artist's album list.
+///
+/// `nb_tracks` is always `null`: Deezer's `/artist/{id}/albums` does not carry a
+/// track count, and the field stays in the contract so clients keep a stable
+/// shape.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumSummary {
+    pub album_id: String,
+    pub title: String,
+    pub release_date: Option<String>,
+    pub record_type: Option<String>,
+    #[serde(default)]
+    pub cover_url: Option<String>,
+    pub nb_tracks: Option<i64>,
+}
+
+/// `GET /deezer/artist/{id}/albums` response.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistAlbumPage {
+    pub albums: Vec<AlbumSummary>,
+    pub total: i64,
+    /// Deezer's own paging link, passed through verbatim (may be absent).
+    #[serde(default)]
+    pub next: Option<String>,
+}
+
+/// One track of an album detail. Tracks without an ISRC are kept (with
+/// `isrc: null`) so the caller decides what to do with them.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumTrack {
+    #[serde(default)]
+    pub isrc: Option<String>,
+    pub title: String,
+    pub duration_ms: i64,
+    /// Deezer's 1-based `track_position` (`null` when Deezer omits it).
+    pub position: Option<i64>,
+}
+
+/// `GET /deezer/album/{id}` response.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumDetail {
+    pub album_id: String,
+    pub title: String,
+    pub release_date: Option<String>,
+    pub record_type: Option<String>,
+    #[serde(default)]
+    pub cover_url: Option<String>,
+    /// Sum of every track's `duration` (seconds), rounded nowhere.
+    pub seconds: i64,
+    pub tracks: Vec<AlbumTrack>,
+}
+
+/// One hit of an artist search.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistHit {
+    pub artist_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub cover_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAlbumList {
+    #[serde(default)]
+    data: Vec<RawAlbum>,
+    #[serde(default)]
+    total: i64,
+    #[serde(default)]
+    next: Option<String>,
+}
+
+/// Shared shape of a list entry and an `/album/{id}` object. Only the detail
+/// response carries `tracks`; the list entry leaves the popular fields aside.
+#[derive(Debug, Deserialize)]
+struct RawAlbum {
+    #[serde(default)]
+    id: Option<i64>,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    release_date: Option<String>,
+    #[serde(default)]
+    record_type: Option<String>,
+    #[serde(default)]
+    cover_big: Option<String>,
+    #[serde(default)]
+    cover_medium: Option<String>,
+    #[serde(default)]
+    cover_xl: Option<String>,
+    #[serde(default)]
+    tracks: Option<RawAlbumTracks>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAlbumTracks {
+    #[serde(default)]
+    data: Vec<RawAlbumTrack>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAlbumTrack {
+    #[serde(default)]
+    isrc: Option<String>,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    duration: i64,
+    #[serde(default)]
+    track_position: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawArtistSearch {
+    #[serde(default)]
+    data: Vec<RawArtistHit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawArtistHit {
+    #[serde(default)]
+    id: Option<i64>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    picture_medium: Option<String>,
+}
+
+/// Deezer reports "no data" as an `error` object on an HTTP 200 response. Only
+/// code 800 means "unknown id"; quota (`4`) and busy (`700`) are upstream
+/// failures and must not masquerade as 404.
+fn deezer_error(body: &serde_json::Value) -> Option<MetaError> {
+    let err = body.get("error")?;
+    if err.is_null() {
+        return None;
+    }
+    let code = err.get("code").and_then(serde_json::Value::as_i64);
+    Some(match code {
+        Some(800) => MetaError::NotFound,
+        Some(code) => MetaError::Upstream(format!("deezer error code {code}")),
+        None => MetaError::Upstream("deezer error without a code".to_string()),
+    })
+}
+
+fn malformed(what: &str) -> MetaError {
+    MetaError::Upstream(format!("unexpected deezer {what} payload"))
+}
+
+/// Trimmed string, `None` when blank.
+fn non_blank(raw: Option<String>) -> Option<String> {
+    raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Cover URL by the contract's preference: `cover_big`, then `cover_medium`,
+/// then `cover_xl`.
+fn cover_url(album: &RawAlbum) -> Option<String> {
+    [
+        album.cover_big.as_deref(),
+        album.cover_medium.as_deref(),
+        album.cover_xl.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|s| !s.is_empty())
+    .map(str::to_string)
+}
+
+/// Map an `/artist/{id}/albums` payload into the hub response. Pure.
+pub fn map_artist_albums(body: &serde_json::Value) -> Result<ArtistAlbumPage, MetaError> {
+    if let Some(err) = deezer_error(body) {
+        return Err(err);
+    }
+    let raw: RawAlbumList =
+        serde_json::from_value(body.clone()).map_err(|_| malformed("artist albums"))?;
+
+    let albums = raw
+        .data
+        .iter()
+        .map(|album| {
+            let album_id = album
+                .id
+                .filter(|id| *id > 0)
+                .map(|id| id.to_string())
+                .ok_or_else(|| malformed("album id"))?;
+            Ok(AlbumSummary {
+                album_id,
+                title: album.title.clone(),
+                release_date: non_blank(album.release_date.clone()),
+                record_type: non_blank(album.record_type.clone()),
+                cover_url: cover_url(album),
+                nb_tracks: None,
+            })
+        })
+        .collect::<Result<Vec<_>, MetaError>>()?;
+
+    Ok(ArtistAlbumPage {
+        albums,
+        total: raw.total,
+        next: non_blank(raw.next),
+    })
+}
+
+/// Map an `/album/{id}` payload into the hub response. Pure. Tracks are sorted
+/// by `track_position`; a missing position sorts last.
+pub fn map_album_detail(body: &serde_json::Value) -> Result<AlbumDetail, MetaError> {
+    if let Some(err) = deezer_error(body) {
+        return Err(err);
+    }
+    let raw: RawAlbum = serde_json::from_value(body.clone()).map_err(|_| malformed("album"))?;
+    let album_id = raw
+        .id
+        .filter(|id| *id > 0)
+        .map(|id| id.to_string())
+        .ok_or(MetaError::NotFound)?;
+
+    let raw_tracks = raw
+        .tracks
+        .as_ref()
+        .map(|t| t.data.as_slice())
+        .unwrap_or(&[]);
+
+    let mut tracks: Vec<AlbumTrack> = raw_tracks
+        .iter()
+        .map(|track| AlbumTrack {
+            isrc: non_blank(track.isrc.clone()),
+            title: track.title.clone(),
+            duration_ms: track.duration.max(0) * 1000,
+            position: track.track_position,
+        })
+        .collect();
+    tracks.sort_by_key(|t| t.position.unwrap_or(i64::MAX));
+
+    Ok(AlbumDetail {
+        album_id,
+        title: raw.title.clone(),
+        release_date: non_blank(raw.release_date.clone()),
+        record_type: non_blank(raw.record_type.clone()),
+        cover_url: cover_url(&raw),
+        seconds: raw_tracks.iter().map(|t| t.duration.max(0)).sum(),
+        tracks,
+    })
+}
+
+/// Map a `/search/artist` payload into the hub response. Pure.
+pub fn map_search_artists(body: &serde_json::Value) -> Result<Vec<ArtistHit>, MetaError> {
+    if let Some(err) = deezer_error(body) {
+        return Err(err);
+    }
+    let raw: RawArtistSearch =
+        serde_json::from_value(body.clone()).map_err(|_| malformed("artist search"))?;
+
+    raw.data
+        .iter()
+        .map(|hit| {
+            let artist_id = hit
+                .id
+                .filter(|id| *id > 0)
+                .map(|id| id.to_string())
+                .ok_or_else(|| malformed("artist id"))?;
+            Ok(ArtistHit {
+                artist_id,
+                name: hit.name.clone(),
+                cover_url: non_blank(hit.picture_medium.clone()),
+            })
+        })
+        .collect()
+}
+
+/// One GET against the public Deezer API, mapped onto [`MetaError`]. Nothing
+/// from the response is logged here, and error texts never carry the ARL.
+async fn get_json(
+    http: &reqwest::Client,
+    url: &str,
+    query: &[(&str, String)],
+) -> Result<serde_json::Value, MetaError> {
+    let resp = http
+        .get(url)
+        .query(query)
+        .send()
+        .await
+        .map_err(|e| MetaError::Upstream(format!("request failed: {}", e.without_url())))?;
+
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(MetaError::NotFound);
+    }
+    if !status.is_success() {
+        return Err(MetaError::Upstream(format!(
+            "deezer returned HTTP {status}"
+        )));
+    }
+
+    resp.json()
+        .await
+        .map_err(|_| MetaError::Upstream("deezer sent an unreadable body".to_string()))
+}
+
+/// `GET {base}/artist/{id}/albums?limit=&index=` — the artist's release list.
+/// One request; the list endpoint already carries every mapped field.
+pub async fn artist_albums(
+    http: &reqwest::Client,
+    base: &str,
+    artist_id: &str,
+    limit: usize,
+    index: usize,
+) -> Result<ArtistAlbumPage, MetaError> {
+    let url = format!("{base}/artist/{artist_id}/albums");
+    let body = get_json(
+        http,
+        &url,
+        &[
+            ("limit", limit.clamp(1, METADATA_MAX_LIMIT).to_string()),
+            ("index", index.to_string()),
+        ],
+    )
+    .await?;
+    map_artist_albums(&body)
+}
+
+/// `GET {base}/album/{id}` — album metadata plus its tracks. One request.
+pub async fn album_detail(
+    http: &reqwest::Client,
+    base: &str,
+    album_id: &str,
+) -> Result<AlbumDetail, MetaError> {
+    let url = format!("{base}/album/{album_id}");
+    let body = get_json(http, &url, &[]).await?;
+    map_album_detail(&body)
+}
+
+/// `GET {base}/search/artist?q=&limit=` — artists matching a free-text query.
+pub async fn search_artists(
+    http: &reqwest::Client,
+    base: &str,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<ArtistHit>, MetaError> {
+    let url = format!("{base}/search/artist");
+    let body = get_json(
+        http,
+        &url,
+        &[
+            ("q", query.to_string()),
+            ("limit", limit.clamp(1, METADATA_MAX_LIMIT).to_string()),
+        ],
+    )
+    .await?;
+    map_search_artists(&body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,4 +667,207 @@ mod tests {
         assert!(tier.is_none());
     }
 
+    // ── Hub metadata mapping (fixtures shaped like the contract) ─────────────
+
+    const ARTIST_ALBUMS_FIXTURE: &str = r#"{
+        "data": [{
+            "id": 1137915301,
+            "title": "Folge 459: Die Robo-Ente (Das Original-Hörspiel zur TV-Serie)",
+            "release_date": "2026-11-13",
+            "record_type": "album",
+            "cover": "https://cdn-images.dzcdn.net/images/cover/aaaa/250x250-000000-80-0-0.jpg",
+            "cover_medium": "https://cdn-images.dzcdn.net/images/cover/aaaa/250x250-000000-80-0-0.jpg",
+            "cover_big": "https://cdn-images.dzcdn.net/images/cover/bbbb/500x500-000000-80-0-0.jpg",
+            "cover_xl": "https://cdn-images.dzcdn.net/images/cover/cccc/1000x1000-000000-80-0-0.jpg",
+            "nb_tracks": 12
+        }],
+        "total": 417,
+        "next": "https://api.deezer.com/artist/15167501/albums?limit=50&index=50"
+    }"#;
+
+    const ALBUM_FIXTURE: &str = r#"{
+        "id": 1137915301,
+        "title": "Folge 459: Die Robo-Ente (Das Original-Hörspiel zur TV-Serie)",
+        "release_date": "2026-11-13",
+        "record_type": "album",
+        "cover_big": "https://cdn-images.dzcdn.net/images/cover/bbbb/500x500-000000-80-0-0.jpg",
+        "cover_medium": "https://cdn-images.dzcdn.net/images/cover/aaaa/250x250-000000-80-0-0.jpg",
+        "tracks": {
+            "data": [
+                {"id": 2, "title": "Kapitel 02: Die Ente fliegt", "duration": 60, "isrc": "CH7812690466", "track_position": 2},
+                {"id": 1, "title": "Kapitel 01: Die Robo-Ente (Folge 459)", "duration": 98, "isrc": "CH7812690465", "track_position": 1},
+                {"id": 3, "title": "Kapitel 03: Outro", "duration": 10, "track_position": 3}
+            ]
+        }
+    }"#;
+
+    const ARTIST_SEARCH_FIXTURE: &str = r#"{
+        "data": [
+            {"id": 15167501, "name": "Paw Patrol", "picture_medium": "https://api.deezer.com/artist/15167501/image"}
+        ],
+        "total": 1
+    }"#;
+
+    #[test]
+    fn maps_artist_albums_into_the_contract_shape() {
+        let body: serde_json::Value = serde_json::from_str(ARTIST_ALBUMS_FIXTURE).unwrap();
+        let page = map_artist_albums(&body).unwrap();
+
+        assert_eq!(page.total, 417);
+        assert_eq!(
+            page.next.as_deref(),
+            Some("https://api.deezer.com/artist/15167501/albums?limit=50&index=50")
+        );
+        assert_eq!(page.albums.len(), 1);
+
+        let album = &page.albums[0];
+        assert_eq!(album.album_id, "1137915301");
+        assert_eq!(
+            album.title,
+            "Folge 459: Die Robo-Ente (Das Original-Hörspiel zur TV-Serie)"
+        );
+        assert_eq!(album.release_date.as_deref(), Some("2026-11-13"));
+        assert_eq!(album.record_type.as_deref(), Some("album"));
+        // cover_big wins over cover_medium/cover_xl.
+        assert_eq!(
+            album.cover_url.as_deref(),
+            Some("https://cdn-images.dzcdn.net/images/cover/bbbb/500x500-000000-80-0-0.jpg")
+        );
+        // Never taken from Deezer's payload, even though this fixture has it.
+        assert_eq!(album.nb_tracks, None);
+
+        // The serialized wire form uses camelCase and keeps `nbTracks`.
+        let wire = serde_json::to_value(&page).unwrap();
+        let item = &wire["albums"][0];
+        assert_eq!(item["albumId"], "1137915301");
+        assert_eq!(item["releaseDate"], "2026-11-13");
+        assert_eq!(item["recordType"], "album");
+        assert!(item["coverUrl"].is_string());
+        assert!(item["nbTracks"].is_null());
+        assert!(wire["next"].is_string());
+    }
+
+    #[test]
+    fn artist_albums_cover_falls_back_medium_then_xl() {
+        let only_medium: serde_json::Value = serde_json::json!({
+            "data": [{
+                "id": 7,
+                "title": "Etazhi",
+                "cover_medium": "https://cdn/250.jpg",
+                "cover_xl": "https://cdn/1000.jpg"
+            }],
+            "total": 1
+        });
+        let page = map_artist_albums(&only_medium).unwrap();
+        assert_eq!(
+            page.albums[0].cover_url.as_deref(),
+            Some("https://cdn/250.jpg")
+        );
+        // No `next` in the payload → stays `None` (serialized as null).
+        assert!(page.next.is_none());
+
+        let only_xl: serde_json::Value = serde_json::json!({
+            "data": [{"id": 7, "title": "Etazhi", "cover_xl": "https://cdn/1000.jpg"}],
+            "total": 1
+        });
+        let page = map_artist_albums(&only_xl).unwrap();
+        assert_eq!(
+            page.albums[0].cover_url.as_deref(),
+            Some("https://cdn/1000.jpg")
+        );
+
+        let no_cover: serde_json::Value = serde_json::json!({
+            "data": [{"id": 7, "title": "Etazhi", "cover_big": ""}],
+            "total": 1
+        });
+        let page = map_artist_albums(&no_cover).unwrap();
+        assert_eq!(page.albums[0].cover_url, None);
+    }
+
+    #[test]
+    fn maps_album_detail_sums_seconds_and_sorts_by_position() {
+        let body: serde_json::Value = serde_json::from_str(ALBUM_FIXTURE).unwrap();
+        let album = map_album_detail(&body).unwrap();
+
+        assert_eq!(album.album_id, "1137915301");
+        assert_eq!(album.record_type.as_deref(), Some("album"));
+        assert_eq!(album.release_date.as_deref(), Some("2026-11-13"));
+        // 60 + 98 + 10 seconds.
+        assert_eq!(album.seconds, 168);
+
+        let positions: Vec<Option<i64>> = album.tracks.iter().map(|t| t.position).collect();
+        assert_eq!(positions, vec![Some(1), Some(2), Some(3)]);
+        assert_eq!(
+            album.tracks[0].title,
+            "Kapitel 01: Die Robo-Ente (Folge 459)"
+        );
+        assert_eq!(album.tracks[0].duration_ms, 98_000);
+        assert_eq!(album.tracks[0].isrc.as_deref(), Some("CH7812690465"));
+        // A track without an ISRC is kept, not filtered.
+        assert_eq!(album.tracks[2].isrc, None);
+
+        let wire = serde_json::to_value(&album).unwrap();
+        assert_eq!(wire["albumId"], "1137915301");
+        assert_eq!(wire["seconds"], 168);
+        assert_eq!(wire["tracks"][0]["durationMs"], 98_000);
+        assert_eq!(wire["tracks"][0]["position"], 1);
+        assert!(wire["tracks"][2]["isrc"].is_null());
+    }
+
+    #[test]
+    fn album_detail_without_tracks_is_empty_not_an_error() {
+        let body: serde_json::Value = serde_json::json!({"id": 5, "title": "Solo"});
+        let album = map_album_detail(&body).unwrap();
+        assert_eq!(album.seconds, 0);
+        assert!(album.tracks.is_empty());
+    }
+
+    #[test]
+    fn deezer_no_data_is_not_found() {
+        let body: serde_json::Value = serde_json::from_str(
+            r#"{"error":{"type":"DataException","message":"no data","code":800}}"#,
+        )
+        .unwrap();
+        assert_eq!(map_album_detail(&body), Err(MetaError::NotFound));
+        assert_eq!(map_artist_albums(&body), Err(MetaError::NotFound));
+        assert_eq!(map_search_artists(&body), Err(MetaError::NotFound));
+        // An album object without a usable id means the same thing.
+        assert_eq!(
+            map_album_detail(&serde_json::json!({"id": 0})),
+            Err(MetaError::NotFound)
+        );
+    }
+
+    #[test]
+    fn deezer_quota_error_is_upstream_not_not_found() {
+        let body: serde_json::Value = serde_json::from_str(
+            r#"{"error":{"type":"Exception","message":"Quota limit exceeded","code":4}}"#,
+        )
+        .unwrap();
+        match map_album_detail(&body) {
+            Err(MetaError::Upstream(msg)) => assert!(msg.contains("code 4"), "msg was {msg}"),
+            other => panic!("expected upstream error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_artist_search_into_the_contract_shape() {
+        let body: serde_json::Value = serde_json::from_str(ARTIST_SEARCH_FIXTURE).unwrap();
+        let artists = map_search_artists(&body).unwrap();
+        assert_eq!(artists.len(), 1);
+        assert_eq!(artists[0].artist_id, "15167501");
+        assert_eq!(artists[0].name, "Paw Patrol");
+        assert_eq!(
+            artists[0].cover_url.as_deref(),
+            Some("https://api.deezer.com/artist/15167501/image")
+        );
+
+        let wire = serde_json::to_value(&artists).unwrap();
+        assert_eq!(wire[0]["artistId"], "15167501");
+        assert!(wire[0]["coverUrl"].is_string());
+
+        // An empty result set is `{ "artists": [] }`, not an error.
+        let empty = map_search_artists(&serde_json::json!({"data": []})).unwrap();
+        assert!(empty.is_empty());
+    }
 }

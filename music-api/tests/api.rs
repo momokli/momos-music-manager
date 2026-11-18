@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
+use axum::extract::{Path as UrlPath, Query};
 use axum::http::{header, Request, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
@@ -3523,7 +3525,10 @@ async fn account_returns_bad_gateway_when_gw_light_unreachable() {
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(
-        v["error"].as_str().unwrap().contains("deezer tier lookup failed"),
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("deezer tier lookup failed"),
         "error was {:?}",
         v["error"]
     );
@@ -3559,7 +3564,11 @@ async fn spawn_deezer_mock() -> String {
 
 /// Fixture bytes that `lofty` can tag (real container).
 fn fixture_bytes(name: &str) -> Vec<u8> {
-    std::fs::read(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    std::fs::read(format!(
+        "{}/tests/fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
 }
 
 /// A harness with the native path wired to a loopback Deezer mock + fake bytes.
@@ -3684,7 +3693,8 @@ async fn native_download_no_lossless_tier_falls_back_to_320() {
     assert!(t.path_320.is_some(), "320 path missing");
     let logs = h.state.logs.recent(50);
     assert!(
-        logs.iter().any(|l| l.msg.contains("ready (native, mp3-320,")),
+        logs.iter()
+            .any(|l| l.msg.contains("ready (native, mp3-320,")),
         "fallback run-log line missing"
     );
 }
@@ -3836,9 +3846,14 @@ async fn native_inflight_row_is_not_double_dispatched() {
     .await
     .unwrap();
     // Re-offer the queue item as the reconcile would on a later tick.
-    music_api::work::finish_ref(&h.state.pool, music_api::work::kind::DOWNLOAD, isrc, db::now())
-        .await
-        .unwrap();
+    music_api::work::finish_ref(
+        &h.state.pool,
+        music_api::work::kind::DOWNLOAD,
+        isrc,
+        db::now(),
+    )
+    .await
+    .unwrap();
     music_api::work::enqueue(
         &h.state.pool,
         music_api::work::kind::DOWNLOAD,
@@ -3876,7 +3891,10 @@ async fn health_has_no_backend_fields() {
     let h = harness().await;
     let (status, body) = send(
         &h.app,
-        Request::builder().uri("/health").body(Body::empty()).unwrap(),
+        Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -3905,7 +3923,10 @@ async fn health_reports_cached_arl_tier_without_user_id() {
 
     let (status, body) = send(
         &h.app,
-        Request::builder().uri("/health").body(Body::empty()).unwrap(),
+        Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -3922,7 +3943,11 @@ async fn health_reports_cached_arl_tier_without_user_id() {
 #[tokio::test]
 async fn worker_has_no_backend_fields() {
     let h = harness().await;
-    let (status, body) = send(&h.app, authed("GET", "/worker").body(Body::empty()).unwrap()).await;
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/worker").body(Body::empty()).unwrap(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(v.get("backend").is_none(), "backend must be gone: {v}");
@@ -4038,9 +4063,284 @@ async fn migration_renames_deemix_uuid_to_download_ref() {
     .unwrap();
     assert_eq!(old_cols, 0, "the old column must be gone");
 
-    let val: Option<String> = sqlx::query_scalar("SELECT download_ref FROM tracks WHERE isrc = 'ABC'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(val.as_deref(), Some("native:ABC"), "values must be preserved");
+    let val: Option<String> =
+        sqlx::query_scalar("SELECT download_ref FROM tracks WHERE isrc = 'ABC'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        val.as_deref(),
+        Some("native:ABC"),
+        "values must be preserved"
+    );
+}
+
+// ── Deezer metadata for the hub (`/deezer/*`, loopback mock) ──────────────────
+//
+// Same seam as the native-download tests: `deezer_base` points at a loopback
+// axum mock, so nothing here touches the real Deezer API.
+
+/// Artist-albums mock. Echoes `limit`/`index` into `next` so the test can prove
+/// the paging params actually reached the upstream call.
+async fn deezer_artist_albums_mock(
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let limit: usize = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50);
+    let index: usize = q.get("index").and_then(|v| v.parse().ok()).unwrap_or(0);
+    Json(serde_json::json!({
+        "data": [{
+            "id": 1137915301,
+            "title": "Folge 459: Die Robo-Ente (Das Original-Hörspiel zur TV-Serie)",
+            "release_date": "2026-11-13",
+            "record_type": "album",
+            "cover_medium": "https://cdn-images.dzcdn.net/images/cover/aaaa/250x250-000000-80-0-0.jpg",
+            "cover_big": "https://cdn-images.dzcdn.net/images/cover/bbbb/500x500-000000-80-0-0.jpg"
+        }],
+        "total": 417,
+        "next": format!(
+            "https://api.deezer.com/artist/15167501/albums?limit={limit}&index={}",
+            index + limit
+        )
+    }))
+}
+
+/// Album mock. Id `800` answers Deezer's "no data" object on HTTP 200, `999`
+/// answers a plain HTTP 404, `500` an upstream server error.
+async fn deezer_album_meta_mock(UrlPath(id): UrlPath<String>) -> Response {
+    match id.as_str() {
+        "800" => Json(serde_json::json!({
+            "error": { "type": "DataException", "message": "no data", "code": 800 }
+        }))
+        .into_response(),
+        "999" => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": { "type": "DataException", "message": "no data", "code": 800 }
+            })),
+        )
+            .into_response(),
+        "500" => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        _ => Json(serde_json::json!({
+            "id": 1137915301,
+            "title": "Folge 459: Die Robo-Ente (Das Original-Hörspiel zur TV-Serie)",
+            "release_date": "2026-11-13",
+            "record_type": "album",
+            "cover_big": "https://cdn-images.dzcdn.net/images/cover/bbbb/500x500-000000-80-0-0.jpg",
+            "cover_medium": "https://cdn-images.dzcdn.net/images/cover/aaaa/250x250-000000-80-0-0.jpg",
+            "tracks": {
+                "data": [
+                    { "id": 2, "title": "Kapitel 02: Die Ente fliegt", "duration": 60,
+                      "isrc": "CH7812690466", "track_position": 2 },
+                    { "id": 1, "title": "Kapitel 01: Die Robo-Ente (Folge 459)", "duration": 98,
+                      "isrc": "CH7812690465", "track_position": 1 },
+                    { "id": 3, "title": "Kapitel 03: Outro", "duration": 10, "track_position": 3 }
+                ]
+            }
+        }))
+        .into_response(),
+    }
+}
+
+/// Artist-search mock. Echoes the received `q` as the hit's name, which proves
+/// the query string was forwarded.
+async fn deezer_search_mock(
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let term = q.get("q").cloned().unwrap_or_default();
+    Json(serde_json::json!({
+        "data": [{
+            "id": 15167501,
+            "name": term,
+            "picture_medium": "https://api.deezer.com/artist/15167501/image"
+        }],
+        "total": 1
+    }))
+}
+
+/// Spawn the mock Deezer API on an ephemeral port; returns its base URL.
+async fn spawn_deezer_meta_mock() -> String {
+    let app = Router::new()
+        .route("/artist/{id}/albums", get(deezer_artist_albums_mock))
+        .route("/album/{id}", get(deezer_album_meta_mock))
+        .route("/search/artist", get(deezer_search_mock));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+async fn harness_deezer_meta(deezer_base: String) -> Harness {
+    harness_opts(HarnessOpts {
+        analyzer_url: None,
+        deezer_arl: String::new(),
+        deezer_gw_base: "http://127.0.0.1:1".to_string(),
+        native_fake: None,
+        deezer_base: Some(deezer_base),
+    })
+    .await
+}
+
+async fn get_json_authed(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    let (status, body) = send(app, authed("GET", uri).body(Body::empty()).unwrap()).await;
+    let v = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    (status, v)
+}
+
+#[tokio::test]
+async fn deezer_meta_endpoints_require_a_token() {
+    let h = harness_deezer_meta(spawn_deezer_meta_mock().await).await;
+    for uri in [
+        "/deezer/artist/15167501/albums",
+        "/deezer/album/1137915301",
+        "/deezer/search/artist?q=paw",
+    ] {
+        let (status, _) = send(
+            &h.app,
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri} must be protected");
+    }
+}
+
+#[tokio::test]
+async fn deezer_artist_albums_maps_the_page_and_forwards_paging() {
+    let h = harness_deezer_meta(spawn_deezer_meta_mock().await).await;
+
+    // Explicit paging: the echo in `next` proves limit/index reached Deezer.
+    let (status, v) =
+        get_json_authed(&h.app, "/deezer/artist/15167501/albums?limit=50&index=0").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["total"], 417);
+    assert_eq!(v["albums"].as_array().unwrap().len(), 1);
+    let album = &v["albums"][0];
+    assert_eq!(album["albumId"], "1137915301");
+    assert_eq!(
+        album["title"],
+        "Folge 459: Die Robo-Ente (Das Original-Hörspiel zur TV-Serie)"
+    );
+    assert_eq!(album["releaseDate"], "2026-11-13");
+    assert_eq!(album["recordType"], "album");
+    // cover_big wins over cover_medium.
+    assert_eq!(
+        album["coverUrl"],
+        "https://cdn-images.dzcdn.net/images/cover/bbbb/500x500-000000-80-0-0.jpg"
+    );
+    // Deezer does not deliver a track count here → always null.
+    assert!(album["nbTracks"].is_null());
+    assert_eq!(
+        v["next"],
+        "https://api.deezer.com/artist/15167501/albums?limit=50&index=50"
+    );
+
+    // Defaults (limit 50, index 0) produce the same upstream call.
+    let (status, v) = get_json_authed(&h.app, "/deezer/artist/15167501/albums").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        v["next"],
+        "https://api.deezer.com/artist/15167501/albums?limit=50&index=50"
+    );
+}
+
+#[tokio::test]
+async fn deezer_artist_albums_rejects_non_numeric_ids() {
+    let h = harness_deezer_meta(spawn_deezer_meta_mock().await).await;
+    let (status, v) = get_json_authed(&h.app, "/deezer/artist/abc/albums").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(v["error"], "invalid artist id");
+
+    let (status, v) = get_json_authed(&h.app, "/deezer/album/abc").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(v["error"], "invalid album id");
+}
+
+#[tokio::test]
+async fn deezer_album_maps_metadata_and_sorts_tracks() {
+    let h = harness_deezer_meta(spawn_deezer_meta_mock().await).await;
+    let (status, v) = get_json_authed(&h.app, "/deezer/album/1137915301").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["albumId"], "1137915301");
+    assert_eq!(v["releaseDate"], "2026-11-13");
+    assert_eq!(v["recordType"], "album");
+    assert!(v["coverUrl"].is_string());
+    // 60 + 98 + 10 seconds.
+    assert_eq!(v["seconds"], 168);
+
+    let tracks = v["tracks"].as_array().unwrap();
+    assert_eq!(tracks.len(), 3);
+    let positions: Vec<i64> = tracks
+        .iter()
+        .map(|t| t["position"].as_i64().unwrap())
+        .collect();
+    assert_eq!(positions, vec![1, 2, 3]);
+    assert_eq!(tracks[0]["isrc"], "CH7812690465");
+    assert_eq!(tracks[0]["title"], "Kapitel 01: Die Robo-Ente (Folge 459)");
+    assert_eq!(tracks[0]["durationMs"], 98_000);
+    // A track without an ISRC is kept, with `isrc: null`.
+    assert!(tracks[2]["isrc"].is_null());
+}
+
+#[tokio::test]
+async fn deezer_album_not_found_is_404() {
+    let h = harness_deezer_meta(spawn_deezer_meta_mock().await).await;
+
+    // Deezer's "no data" on HTTP 200 …
+    let (status, v) = get_json_authed(&h.app, "/deezer/album/800").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(v["error"], "deezer album not found");
+
+    // … and an upstream HTTP 404 mean the same thing.
+    let (status, v) = get_json_authed(&h.app, "/deezer/album/999").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(v["error"], "deezer album not found");
+}
+
+#[tokio::test]
+async fn deezer_upstream_failures_are_502() {
+    let h = harness_deezer_meta(spawn_deezer_meta_mock().await).await;
+    let (status, v) = get_json_authed(&h.app, "/deezer/album/500").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(v["error"], "deezer request failed");
+
+    // Dead upstream: transport failure, still a short 502.
+    let dead = harness_deezer_meta("http://127.0.0.1:1".to_string()).await;
+    let (status, v) = get_json_authed(&dead.app, "/deezer/artist/15167501/albums").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(v["error"], "deezer request failed");
+}
+
+#[tokio::test]
+async fn deezer_search_artist_forwards_the_query() {
+    let h = harness_deezer_meta(spawn_deezer_meta_mock().await).await;
+    let (status, v) = get_json_authed(&h.app, "/deezer/search/artist?q=paw%20patrol&limit=10").await;
+    assert_eq!(status, StatusCode::OK);
+    let artists = v["artists"].as_array().unwrap();
+    assert_eq!(artists.len(), 1);
+    assert_eq!(artists[0]["artistId"], "15167501");
+    // The mock echoes `q` as the name → the query string was forwarded.
+    assert_eq!(artists[0]["name"], "paw patrol");
+    assert_eq!(
+        artists[0]["coverUrl"],
+        "https://api.deezer.com/artist/15167501/image"
+    );
+}
+
+#[tokio::test]
+async fn deezer_search_requires_a_query() {
+    let h = harness_deezer_meta(spawn_deezer_meta_mock().await).await;
+    for uri in [
+        "/deezer/search/artist",
+        "/deezer/search/artist?q=",
+        "/deezer/search/artist?q=%20%20",
+    ] {
+        let (status, v) = get_json_authed(&h.app, uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(v["error"], "q is required");
+    }
 }
