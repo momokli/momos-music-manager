@@ -30,3 +30,4 @@ legacy/mmm/scripts/keys/
 # Orchestrator-Scratch (Runner): Progress-/Handoff-Dateien gehören in den Checkout,
 # nicht in die Historie. Die Stage-Agenten lesen sie über `cwd`, nicht über git.
 /progress-*.md
+.env
