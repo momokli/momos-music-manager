@@ -125,6 +125,60 @@ Liste der gehörten Alben, „unlistened" pro Album, optional „alle zurückset
 - [ ] Kein Spotify-Request im Album-Pfad (Test analog `autosync_makes_no_spotify_requests`)
 - [ ] UI: Album-Grid rendert Cover-URLs und Dauern, Auswahl überlebt ein Speichern
 
+## UX/IA (beschlossen 2026-11-18)
+
+Drei Ebenen: **Entdecken → Sammeln → Zuweisen**. Der Tonie ist das *Ziel*, nicht
+der Startpunkt. User ohne verbundenes Tonie-Konto sehen weder Tonies noch Korb.
+
+### Korb: pro User **und** pro Figur
+
+- Neue Tabelle `hub_tonie_cart_items(id, user_id, tonie_id, position, kind, ref_id,
+  title, cover_url, seconds, added_at)` mit `kind` in `album` | `track`.
+- **Ein Korb pro (User, Figur)**, mehrere parallel, persistent (Handy anfangen,
+  Desktop weitermachen).
+- Ein Album ist im Korb ein **Paket**: als Ganzes verschiebbar, aufklappbar →
+  Tracks intern sortierbar. Ein einzelner Track ist ein eigener Posten.
+- Der Korb ist der Entwurf der Figur. `album_mode = basket` liest künftig den
+  Korb statt `hub_tonie_album_items` (061). Die alte Tabelle bleibt vorerst
+  bestehen (additive Regel); ihre Zeilen werden einmalig migriert.
+- Abo (`newest`/`oldest`, Artist) und Korb (`basket`) schließen sich pro Figur
+  aus — das ist bereits so modelliert.
+
+### Entdecken
+
+- `/artist/{id}` bekommt eine **Alben-Sektion** (Deezer-Alben, weil Tonies daraus
+  gefüllt werden): Cover, Release-Datum, Dauer, Badges `auf Tonie` / `gehört`.
+  Toggle „Alben / Statistik", damit die bestehende Meistgespielt-Ansicht bleibt.
+- `/search` bekommt neben Tracks die Gruppen **Künstler** und **Alben** (Deezer).
+- Beim Öffnen/Suchen eines Artists werden die Album-Metadaten in
+  `hub_deezer_albums` gecacht (existiert seit 062).
+- Aktionspaar pro Artist: „Neueste ungehörte auf Tonie …" (Abo) und
+  „In den Korb" pro Album.
+- Abgrenzung: die bestehende `/album/{name}`-Seite (abgeleitet aus
+  `hub_tracks.album`, Spotify) bleibt unverändert. Tonie-Alben sind Deezer-Alben;
+  beide werden nicht vermischt.
+
+### Zuweisen
+
+- Im Korb: „Auf Tonie …" ist die Figur schon gewählt (Korb hängt an ihr) →
+  Aktion „Als Quelle setzen" (`album_mode = basket`) + direkt „Sync".
+
+### Verlauf
+
+- Global pro User: gehörte Alben (`hub_tonie_albums_seen`), inkl. `unlistened`.
+- Pro Figur: was aktuell drauf liegt (letzter `ok`-Run) und was vorher lief
+  (`hub_tonie_syncs`).
+
+### Slices nach diesem Bild
+
+| Slice | Inhalt | Issue |
+| --- | --- | --- |
+| U1 | Artist-Seite: Alben-Sektion mit Covern, Badges, „In den Korb" | #601 |
+| U2 | Korb pro Figur (Migration 063, `/cart`, Drag & Drop, „als Quelle setzen") | #602 |
+| U3 | Nav/Visibility: Tonies + Korb nur mit Tonie-Konto; Binding-Editor aufräumen | #603 |
+| U4 | Verlauf pro Figur und global | #604 |
+| U5 | 128k-Ziel für Tonie-Orders in music-api | #605 |
+
 ## Offene Entscheidungen
 
 1. **Dauer pro Album**: die Artist-Album-Liste liefert kein `nb_tracks`/`duration`.
@@ -134,5 +188,9 @@ Liste der gehörten Alben, „unlistened" pro Album, optional „alle zurückset
    überspringen und im Run-Log melden — oder doch anschneiden? Vorschlag: überspringen.
 3. **Ledger-Granularität**: pro User (einmal gehört = überall gehört) oder pro Tonie?
    Vorschlag: pro User, weil „mein Kind hat das gehört" unabhängig vom Tonie gilt.
-4. **Wohin mit dem Deezer-Client**: eigener Client im Hub (2 Endpunkte, kein Token) oder
-   Proxy in music-api (ein Client mit Rate-Limit-Handling, wie hier angenommen)?
+4. **Wohin mit dem Deezer-Client**: entschieden — Proxy in music-api (#594, #595).
+5. **Korb-Scope**: entschieden — persistent pro (User, Figur).
+6. **Album-Identitaet**: entschieden — Tonie-Alben sind Deezer-Alben; die
+   Hub-Album-Seite bleibt davon unberuehrt.
+7. **128k fuer Tonie-Orders**: offen (U5). Heute laedt music-api weiter FLAC und
+   transkodiert; `binding.format` wirkt nur beim Download Vault → Tonie.
