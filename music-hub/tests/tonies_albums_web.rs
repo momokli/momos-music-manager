@@ -16,6 +16,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use music_hub::config::Config;
 use music_hub::tonies;
+use music_hub::tonies::AlbumItem;
 use serde_json::{Value, json};
 
 const REFRESH: &str = "refresh-token-xyz";
@@ -425,12 +426,7 @@ async fn add_writes_the_basket_row() {
     let body = resp.text().await.unwrap();
     assert!(body.contains("Folge 459"), "basket entry rendered");
 
-    let binding_id = tonies::get_binding(&app.pool, uid, "ct1")
-        .await
-        .unwrap()
-        .unwrap()
-        .id;
-    let items = tonies::list_album_items(&app.pool, binding_id)
+    let items = tonies::cart::list(&app.pool, uid, "ct1")
         .await
         .unwrap();
     assert_eq!(items.len(), 1);
@@ -448,7 +444,7 @@ async fn add_writes_the_basket_row() {
     .await;
     assert!(toast_kind(resp.headers()).contains("\"kind\":\"err\""));
     assert_eq!(
-        tonies::list_album_items(&app.pool, binding_id)
+        tonies::cart::list(&app.pool, uid, "ct1")
             .await
             .unwrap()
             .len(),
@@ -461,18 +457,14 @@ async fn move_and_remove_keep_the_order() {
     let app = boot(Some("tok")).await;
     let (uid, cookie) = user(&app, "alb-order").await;
     bind_albums(&app, uid, Some(15167501), "basket").await;
-    let binding_id = tonies::get_binding(&app.pool, uid, "ct1")
-        .await
-        .unwrap()
-        .unwrap()
-        .id;
-    tonies::set_album_items(
+    tonies::cart::replace_all(
         &app.pool,
-        binding_id,
+        uid,
+        "ct1",
         &[
-            ("459".to_string(), "Folge 459".to_string(), 200),
-            ("458".to_string(), "Folge 458".to_string(), 200),
-        ],
+        album_item("459", "Folge 459", 200),
+        album_item("458", "Folge 458", 200),
+    ],
     )
     .await
     .unwrap();
@@ -485,7 +477,7 @@ async fn move_and_remove_keep_the_order() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let ids: Vec<String> = tonies::list_album_items(&app.pool, binding_id)
+    let ids: Vec<String> = tonies::cart::list(&app.pool, uid, "ct1")
         .await
         .unwrap()
         .into_iter()
@@ -511,7 +503,7 @@ async fn move_and_remove_keep_the_order() {
     )
     .await;
     assert!(toast_kind(resp.headers()).contains("\"kind\":\"ok\""));
-    let ids: Vec<String> = tonies::list_album_items(&app.pool, binding_id)
+    let ids: Vec<String> = tonies::cart::list(&app.pool, uid, "ct1")
         .await
         .unwrap()
         .into_iter()
@@ -611,16 +603,14 @@ async fn unresolved_basket_entry_stays_visible() {
     let app = boot(Some("tok")).await;
     let (uid, cookie) = user(&app, "alb-unresolved").await;
     bind_albums(&app, uid, Some(15167501), "basket").await;
-    let binding_id = tonies::get_binding(&app.pool, uid, "ct1")
-        .await
-        .unwrap()
-        .unwrap()
-        .id;
     // Not in the artist catalogue, not in the album cache.
-    tonies::set_album_items(
+    tonies::cart::replace_all(
         &app.pool,
-        binding_id,
-        &[("gone-42".to_string(), "Verschwundene Folge".to_string(), 0)],
+        uid,
+        "ct1",
+        &[
+        album_item("gone-42", "Verschwundene Folge", 0),
+    ],
     )
     .await
     .unwrap();
@@ -635,17 +625,15 @@ async fn catalogue_album_is_not_flagged_unresolved() {
     let app = boot(Some("tok")).await;
     let (uid, cookie) = user(&app, "alb-cached").await;
     bind_albums(&app, uid, Some(15167501), "basket").await;
-    let binding_id = tonies::get_binding(&app.pool, uid, "ct1")
-        .await
-        .unwrap()
-        .unwrap()
-        .id;
     // Not in the artist page, but music-api resolves it (the catalogue owns the
     // cache now, the hub keeps none).
-    tonies::set_album_items(
+    tonies::cart::replace_all(
         &app.pool,
-        binding_id,
-        &[("777".to_string(), "Alte Folge".to_string(), 200)],
+        uid,
+        "ct1",
+        &[
+        album_item("777", "Alte Folge", 200),
+    ],
     )
     .await
     .unwrap();
@@ -691,3 +679,13 @@ async fn posts_require_session_and_a_binding() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+/// One cart entry (title, seconds) for seeding the cart in tests.
+#[allow(dead_code)]
+fn album_item(album_id: &str, title: &str, seconds: i64) -> AlbumItem {
+    AlbumItem {
+        album_id: album_id.to_string(),
+        album_title: title.to_string(),
+        seconds,
+        position: 0,
+    }
+}

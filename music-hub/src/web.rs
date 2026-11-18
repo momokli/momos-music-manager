@@ -4548,7 +4548,7 @@ async fn tonie_albums_render(
     }
 
     let items = match binding.as_ref() {
-        Some(b) => crate::tonies::list_album_items(&st.pool, b.id)
+        Some(_) => crate::tonies::cart::list(&st.pool, uid, &tonie_id)
             .await
             .unwrap_or_default(),
         None => Vec::new(),
@@ -4821,17 +4821,14 @@ async fn tonie_albums_set_mode(
     tonie_albums_toast(&st, nav, &tonie_id, &msg, kind).await
 }
 
-/// Write `items` back to the basket of `binding_id` in the given order.
+/// Write `items` back to the cart of `(uid, tonie_id)` in the given order.
 async fn album_basket_write(
     pool: &SqlitePool,
-    binding_id: i64,
+    uid: i64,
+    tonie_id: &str,
     items: &[crate::tonies::AlbumItem],
 ) -> anyhow::Result<()> {
-    let rows: Vec<(String, String, i64)> = items
-        .iter()
-        .map(|i| (i.album_id.clone(), i.album_title.clone(), i.seconds))
-        .collect();
-    crate::tonies::set_album_items(pool, binding_id, &rows).await
+    crate::tonies::cart::replace_all(pool, uid, tonie_id, items).await
 }
 
 /// `POST /tonies/{id}/albums/add` — append an album to the basket.
@@ -4845,15 +4842,16 @@ async fn tonie_albums_add(
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let uid = nav.id;
-    let binding = match tonie_albums_binding(&st, uid, &tonie_id).await {
-        Ok(b) => b,
-        Err(r) => return r,
-    };
+    // Ownership gate: the cart belongs to (user, tonie), so this only validates
+    // that the tonie is the caller's.
+    if let Err(r) = tonie_albums_binding(&st, uid, &tonie_id).await {
+        return r;
+    }
     let album_id = form.album_id.trim().to_string();
     let (msg, kind) = if album_id.is_empty() {
         ("Kein Album gewählt.".to_string(), "err")
     } else {
-        let mut items = crate::tonies::list_album_items(&st.pool, binding.id)
+        let mut items = crate::tonies::cart::list(&st.pool, uid, &tonie_id)
             .await
             .unwrap_or_default();
         if items.iter().any(|i| i.album_id == album_id) {
@@ -4881,7 +4879,7 @@ async fn tonie_albums_add(
                 seconds,
                 position: items.len() as i64,
             });
-            match album_basket_write(&st.pool, binding.id, &items).await {
+            match album_basket_write(&st.pool, uid, &tonie_id, &items).await {
                 Ok(()) => (format!("„{label}“ in den Korb"), "ok"),
                 Err(e) => (format!("Fehler: {e}"), "err"),
             }
@@ -4901,12 +4899,13 @@ async fn tonie_albums_remove(
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let uid = nav.id;
-    let binding = match tonie_albums_binding(&st, uid, &tonie_id).await {
-        Ok(b) => b,
-        Err(r) => return r,
-    };
+    // Ownership gate: the cart belongs to (user, tonie), so this only validates
+    // that the tonie is the caller's.
+    if let Err(r) = tonie_albums_binding(&st, uid, &tonie_id).await {
+        return r;
+    }
     let album_id = form.album_id.trim().to_string();
-    let items = crate::tonies::list_album_items(&st.pool, binding.id)
+    let items = crate::tonies::cart::list(&st.pool, uid, &tonie_id)
         .await
         .unwrap_or_default();
     let before = items.len();
@@ -4917,7 +4916,7 @@ async fn tonie_albums_remove(
     let (msg, kind) = if kept.len() == before {
         ("Album ist nicht im Korb.".to_string(), "err")
     } else {
-        match album_basket_write(&st.pool, binding.id, &kept).await {
+        match album_basket_write(&st.pool, uid, &tonie_id, &kept).await {
             Ok(()) => ("Album aus dem Korb entfernt".to_string(), "ok"),
             Err(e) => (format!("Fehler: {e}"), "err"),
         }
@@ -4936,13 +4935,14 @@ async fn tonie_albums_move(
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let uid = nav.id;
-    let binding = match tonie_albums_binding(&st, uid, &tonie_id).await {
-        Ok(b) => b,
-        Err(r) => return r,
-    };
+    // Ownership gate: the cart belongs to (user, tonie), so this only validates
+    // that the tonie is the caller's.
+    if let Err(r) = tonie_albums_binding(&st, uid, &tonie_id).await {
+        return r;
+    }
     let album_id = form.album_id.trim().to_string();
     let dir = form.direction.unwrap_or_default();
-    let mut items = crate::tonies::list_album_items(&st.pool, binding.id)
+    let mut items = crate::tonies::cart::list(&st.pool, uid, &tonie_id)
         .await
         .unwrap_or_default();
     let (msg, kind) = if dir != "up" && dir != "down" {
@@ -4957,7 +4957,7 @@ async fn tonie_albums_move(
             Some(i) => {
                 let other = if dir == "up" { i - 1 } else { i + 1 };
                 items.swap(i, other);
-                match album_basket_write(&st.pool, binding.id, &items).await {
+                match album_basket_write(&st.pool, uid, &tonie_id, &items).await {
                     Ok(()) => ("Reihenfolge gespeichert".to_string(), "ok"),
                     Err(e) => (format!("Fehler: {e}"), "err"),
                 }

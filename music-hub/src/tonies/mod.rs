@@ -8,6 +8,7 @@
 pub mod albums;
 pub mod autosync;
 pub mod bindings;
+pub mod cart;
 pub mod client;
 pub mod run;
 pub mod sync;

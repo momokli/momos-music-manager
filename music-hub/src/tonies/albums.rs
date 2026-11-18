@@ -99,7 +99,7 @@ pub async fn resolve(
     binding: &Binding,
 ) -> Result<Vec<AlbumPlan>> {
     if binding.album_mode == bindings::ALBUM_MODE_BASKET {
-        basket(pool, cfg, binding).await
+        basket(pool, cfg, uid, binding).await
     } else {
         artist(pool, cfg, uid, binding).await
     }
@@ -107,8 +107,15 @@ pub async fn resolve(
 
 /// Explicit album list: order and content come from the user, `seen` is ignored
 /// (an explicit choice always wins over the listened ledger).
-async fn basket(pool: &SqlitePool, cfg: &Config, binding: &Binding) -> Result<Vec<AlbumPlan>> {
-    let items = bindings::list_album_items(pool, binding.id).await?;
+async fn basket(
+    pool: &SqlitePool,
+    cfg: &Config,
+    uid: i64,
+    binding: &Binding,
+) -> Result<Vec<AlbumPlan>> {
+    // The cart is the draft, not the binding: it exists before a source is
+    // configured and is what the user sees on the tonie page.
+    let items = super::cart::list(pool, uid, &binding.tonie_id).await?;
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         out.push(album_plan(cfg, &item.album_id).await?);
