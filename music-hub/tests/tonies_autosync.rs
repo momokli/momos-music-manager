@@ -88,10 +88,13 @@ async fn file_handler(State(m): State<TmMock>) -> Json<Value> {
         *s += 1;
         *s
     };
+    // Shape of the live API: the upload target is nested under `request`.
     Json(json!({
         "fileId": format!("file-{n}"),
-        "url": format!("{}/s3/upload", m.base),
-        "fields": {"key": format!("k{n}"), "policy": "p"}
+        "request": {
+            "url": format!("{}/s3/upload", m.base),
+            "fields": {"key": format!("k{n}"), "policy": "p"}
+        }
     }))
 }
 
@@ -131,7 +134,7 @@ async fn mock_tonies_music() -> (String, TmMock) {
     let app = Router::new()
         .route("/realms/tonies/protocol/openid-connect/token", post(token_handler))
         .route("/v2/file", post(file_handler))
-        .route("/s3/upload", put(put_handler))
+        .route("/s3/upload", post(put_handler))
         .route("/v2/households/{hid}/creativetonies/{ctid}/chapters", post(chapter_handler))
         .route("/v2/households/{hid}/creativetonies/{ctid}", get(get_tonie))
         .route("/isrc/{isrc}", get(isrc_status))
