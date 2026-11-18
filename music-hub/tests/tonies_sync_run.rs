@@ -9,7 +9,11 @@
 //! * the transcoding poll is bounded → `timeout`;
 //! * a failed upload leaves a log entry (`status='error'` + `error`);
 //! * the sync endpoint is owner-scoped (404 otherwise) and its toast names
-//!   chapters, minutes and skipped tracks — with no credential in the HTML.
+//!   chapters, minutes and skipped tracks — with no credential in the HTML;
+//! * album sources end-to-end: the cart order becomes the chapter order (and
+//!   reordering the cart reorders the chapters), a successful run records the
+//!   fitted albums in the listened ledger so the next run resolves past them,
+//!   and no album run issues a Spotify request.
 
 mod common;
 
@@ -54,6 +58,13 @@ struct Mock {
     /// PATCHed chapter lists.
     patched: Arc<Mutex<Vec<Value>>>,
     file_seq: Arc<Mutex<usize>>,
+    /// Deezer album detail bodies (`/deezer/album/{id}` + the artist list).
+    albums: Arc<Mutex<Vec<Value>>>,
+    /// Bodies POSTed to `/orders` (album runs must not order what is ready).
+    orders: Arc<Mutex<Vec<Value>>>,
+    /// When true a `POST …/chapters` also appends to `chapters`, so a second
+    /// run sees the state the first one produced (like the real API).
+    apply_posts: Arc<Mutex<bool>>,
 }
 
 fn mock_state(base: String) -> Mock {
@@ -68,6 +79,9 @@ fn mock_state(base: String) -> Mock {
         puts: Arc::new(Mutex::new(Vec::new())),
         patched: Arc::new(Mutex::new(Vec::new())),
         file_seq: Arc::new(Mutex::new(0)),
+        albums: Arc::new(Mutex::new(Vec::new())),
+        orders: Arc::new(Mutex::new(Vec::new())),
+        apply_posts: Arc::new(Mutex::new(false)),
     }
 }
 
@@ -139,9 +153,57 @@ async fn put_handler(State(m): State<Mock>, body: Bytes) -> StatusCode {
 
 async fn chapter_handler(State(m): State<Mock>, Json(body): Json<Value>) -> Json<Value> {
     let file = body["file"].as_str().unwrap_or_default().to_string();
+    let title = body["title"].as_str().unwrap_or_default().to_string();
     m.event(format!("chapter:{file}"));
     m.posted.lock().unwrap().push(body);
+    if *m.apply_posts.lock().unwrap() {
+        let mut chapters = m.chapters.lock().unwrap();
+        let n = chapters.len() + 1;
+        chapters.push(json!({"id": format!("ch{n}"), "title": title, "seconds": 100}));
+    }
     Json(json!({"ok": true}))
+}
+
+/// `POST /orders` — recorded so a test can prove nothing was ordered.
+async fn orders_handler(State(m): State<Mock>, Json(body): Json<Value>) -> Json<Value> {
+    m.orders.lock().unwrap().push(body);
+    Json(json!({"orderId": "order-1"}))
+}
+
+/// `GET /deezer/artist/{id}/albums` — the albums of the mock, newest first.
+async fn deezer_artist_albums(State(m): State<Mock>) -> Json<Value> {
+    let albums: Vec<Value> = m
+        .albums
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            json!({
+                "albumId": a["albumId"],
+                "title": a["title"],
+                "releaseDate": a["releaseDate"],
+                "recordType": a["recordType"],
+                "coverUrl": a["coverUrl"],
+            })
+        })
+        .collect();
+    let total = albums.len();
+    Json(json!({ "albums": albums, "total": total, "next": null }))
+}
+
+/// `GET /deezer/album/{id}` — the album detail carrying the tracklist ISRCs.
+async fn deezer_album(State(m): State<Mock>, Path(id): Path<String>) -> Response {
+    let found = m
+        .albums
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|a| a["albumId"].as_str() == Some(id.as_str()))
+        .cloned();
+    match found {
+        Some(v) => Json(v).into_response(),
+        None => (StatusCode::NOT_FOUND, "unknown album").into_response(),
+    }
 }
 
 async fn patch_handler(State(m): State<Mock>, Json(body): Json<Value>) -> Json<Value> {
@@ -190,6 +252,9 @@ async fn mock_all() -> (String, Mock) {
         )
         .route("/isrc/{isrc}", get(isrc_status))
         .route("/isrc/{isrc}/{fmt}", get(isrc_bytes))
+        .route("/orders", post(orders_handler))
+        .route("/deezer/artist/{id}/albums", get(deezer_artist_albums))
+        .route("/deezer/album/{id}", get(deezer_album))
         .with_state(st.clone());
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -1059,4 +1124,373 @@ async fn execute_binding_with_backpack_source_syncs() {
     let outcome = music_hub::tonies::execute_binding(&app.pool, &cfg, uid, &b).await;
     assert_eq!(outcome.status, run::STATUS_OK, "error: {:?}", outcome.error);
     assert_eq!(outcome.added, 1);
+}
+
+// ── tests: album sources end-to-end (cart → resolver → run → chapters) ──────
+//
+// `tonies_albums.rs` stops at the resolver and `tonies_albums_web.rs` at the
+// cart rows. These tests cover the actual write path: the album branch of
+// `execute_binding` (resolver → fit → diff → upload → ledger), i.e. what a
+// child ends up hearing on the tonie.
+
+/// One album detail body for the mock music-api (2–4 short chapters).
+fn album(id: &str, title: &str, released: &str, isrcs: &[&str]) -> Value {
+    let tracks: Vec<Value> = isrcs
+        .iter()
+        .enumerate()
+        .map(|(i, isrc)| {
+            json!({
+                "isrc": isrc,
+                "title": format!("{title} Kapitel {:02}", i + 1),
+                "durationMs": 100_000,
+                "position": i + 1,
+            })
+        })
+        .collect();
+    json!({
+        "albumId": id,
+        "title": title,
+        "releaseDate": released,
+        "recordType": "album",
+        "coverUrl": format!("https://cdn.example/{id}.jpg"),
+        "seconds": isrcs.len() as i64 * 100,
+        "tracks": tracks,
+    })
+}
+
+/// Titles of the chapter bodies the Tonies mock received, in POST order.
+fn posted_titles(m: &Mock) -> Vec<String> {
+    m.posted
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| b["title"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// Titles of the chapter list the Tonies mock was PATCHed with (the state the
+/// tonie plays afterwards).
+fn patched_titles(m: &Mock) -> Vec<String> {
+    m.patched
+        .lock()
+        .unwrap()
+        .last()
+        .map(|b| {
+            b["chapters"]
+                .as_array()
+                .map(|cs| {
+                    cs.iter()
+                        .map(|c| c["title"].as_str().unwrap_or_default().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
+}
+
+/// A binding on an album source.
+fn album_binding(album_mode: &str, artist: Option<i64>, cap_seconds: i64) -> Binding {
+    Binding {
+        id: 1,
+        tonie_id: "ct1".into(),
+        tonie_name: Some("Story".into()),
+        source_kind: "albums".into(),
+        source_id: artist,
+        format: "mp3-128".into(),
+        cap_seconds,
+        mode: "manual".into(),
+        order_by: "playlist".into(),
+        album_mode: album_mode.into(),
+        dirty_since: None,
+        last_sync_at: None,
+        last_sync_status: None,
+    }
+}
+
+fn cart_item(album_id: &str, title: &str) -> music_hub::tonies::AlbumItem {
+    music_hub::tonies::AlbumItem {
+        album_id: album_id.to_string(),
+        album_title: title.to_string(),
+        seconds: 200,
+        position: 0,
+    }
+}
+
+/// A counting Spotify mock that answers 404 to everything: the album path must
+/// never be seen here (and a hit is a hard test failure, not a network call).
+#[derive(Clone, Default)]
+struct SpotifyHits {
+    hits: Arc<Mutex<Vec<String>>>,
+}
+
+async fn spotify_anything(State(s): State<SpotifyHits>, uri: axum::http::Uri) -> StatusCode {
+    s.hits.lock().unwrap().push(uri.path().to_string());
+    StatusCode::NOT_FOUND
+}
+
+async fn mock_spotify_never_called() -> (String, SpotifyHits) {
+    let st = SpotifyHits::default();
+    let app = Router::new()
+        .fallback(spotify_anything)
+        .with_state(st.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), st)
+}
+
+/// Config with the Tonies/music-api bases on `base` and Spotify pinned to the
+/// counting mock, so any accidental Spotify call is recorded instead of dialled.
+fn cfg_album_run(base: &str, spotify_base: &str) -> Config {
+    let mut cfg = cfg_for(base);
+    cfg.spotify_api_base = spotify_base.to_string();
+    cfg
+}
+
+/// A migrated temp DB with one connected user (token stored under [`KEY`]).
+async fn album_run_db() -> (tempfile::TempDir, sqlx::SqlitePool, i64) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = format!("sqlite:{}/hub.db", dir.path().display());
+    let pool = music_hub::db::connect(&url).await.expect("connect");
+    let uid: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_users (slug, display_name, created_at)
+         VALUES ('album-run', 'Album Run', '2026-01-01T00:00:00+00:00') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    music_hub::tonies::save_account(
+        &pool,
+        uid,
+        Some("hh1"),
+        Some("album@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
+    (dir, pool, uid)
+}
+
+/// Acceptance 1: the cart order *is* the chapter order — and reordering the
+/// cart reorders the chapters on the next run.
+#[tokio::test]
+async fn cart_order_becomes_chapter_order() {
+    let (base, m) = mock_all().await;
+    // Let the mock adopt uploaded chapters, so the second run diffs against a
+    // tonie that already carries A1, A2, B1, B2.
+    *m.apply_posts.lock().unwrap() = true;
+    *m.albums.lock().unwrap() = vec![
+        album("A", "Folge A", "2026-01-01", &["A1", "A2"]),
+        album("B", "Folge B", "2026-01-02", &["B1", "B2"]),
+    ];
+    *m.ready.lock().unwrap() = ["A1", "A2", "B1", "B2"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let (sp_base, sp) = mock_spotify_never_called().await;
+    let cfg = cfg_album_run(&base, &sp_base);
+    let (_dir, pool, uid) = album_run_db().await;
+
+    music_hub::tonies::cart::replace_all(
+        &pool,
+        uid,
+        "ct1",
+        &[cart_item("A", "Folge A"), cart_item("B", "Folge B")],
+    )
+    .await
+    .unwrap();
+
+    let b = album_binding("basket", None, 5400);
+    let outcome = music_hub::tonies::execute_binding(&pool, &cfg, uid, &b).await;
+    assert_eq!(outcome.status, run::STATUS_OK, "error: {:?}", outcome.error);
+    assert_eq!(outcome.added, 4);
+    assert_eq!(
+        posted_titles(&m),
+        vec![
+            "Folge A Kapitel 01",
+            "Folge A Kapitel 02",
+            "Folge B Kapitel 01",
+            "Folge B Kapitel 02",
+        ],
+        "cart order (A before B) must become chapter order A1, A2, B1, B2"
+    );
+    assert!(
+        m.orders.lock().unwrap().is_empty(),
+        "ready albums must not be ordered: {:?}",
+        m.orders.lock().unwrap()
+    );
+
+    // Reorder the cart: B first. The next run must turn the chapters around.
+    music_hub::tonies::cart::replace_all(
+        &pool,
+        uid,
+        "ct1",
+        &[cart_item("B", "Folge B"), cart_item("A", "Folge A")],
+    )
+    .await
+    .unwrap();
+    m.posted.lock().unwrap().clear();
+    m.patched.lock().unwrap().clear();
+
+    let outcome = music_hub::tonies::execute_binding(&pool, &cfg, uid, &b).await;
+    assert_eq!(outcome.status, run::STATUS_OK, "error: {:?}", outcome.error);
+    assert_eq!(
+        posted_titles(&m),
+        vec![
+            "Folge B Kapitel 01",
+            "Folge B Kapitel 02",
+            "Folge A Kapitel 01",
+            "Folge A Kapitel 02",
+        ],
+        "after moving B to the top the chapters must be B1, B2, A1, A2"
+    );
+    // The PATCH list is what the tonie plays — it must be in the new order too.
+    assert_eq!(
+        patched_titles(&m),
+        vec![
+            "Folge B Kapitel 01",
+            "Folge B Kapitel 02",
+            "Folge A Kapitel 01",
+            "Folge A Kapitel 02",
+        ],
+        "the reordered tonie must hold B1, B2, A1, A2"
+    );
+    assert!(
+        sp.hits.lock().unwrap().is_empty(),
+        "the album path must never touch Spotify: {:?}",
+        sp.hits.lock().unwrap()
+    );
+}
+
+/// Acceptance 2: a successful album run records what it put on the tonie in
+/// `hub_tonie_albums_seen` — and only that — so the next run resolves past it.
+#[tokio::test]
+async fn listened_albums_are_marked_and_resolved_past() {
+    let (base, m) = mock_all().await;
+    *m.albums.lock().unwrap() = vec![
+        album("459", "Folge 459", "2026-11-13", &["A1", "A2"]),
+        album("458", "Folge 458", "2026-11-06", &["B1", "B2"]),
+        album("457", "Folge 457", "2026-10-30", &["C1", "C2"]),
+    ];
+    *m.ready.lock().unwrap() = ["A1", "A2", "B1", "B2", "C1", "C2"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let (sp_base, _sp) = mock_spotify_never_called().await;
+    let cfg = cfg_album_run(&base, &sp_base);
+    let (_dir, pool, uid) = album_run_db().await;
+
+    // 500 s fit exactly two of the three 200 s albums.
+    let b = album_binding("newest", Some(15167501), 500);
+    let outcome = music_hub::tonies::execute_binding(&pool, &cfg, uid, &b).await;
+    assert_eq!(outcome.status, run::STATUS_OK, "error: {:?}", outcome.error);
+    assert_eq!(
+        posted_titles(&m),
+        vec![
+            "Folge 459 Kapitel 01",
+            "Folge 459 Kapitel 02",
+            "Folge 458 Kapitel 01",
+            "Folge 458 Kapitel 02",
+        ]
+    );
+
+    // Exactly the albums that fit are recorded as listened (the ledger is per
+    // user, not per tonie — migration 062).
+    let mut seen: Vec<String> = music_hub::tonies::seen_ids(&pool, uid)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    seen.sort();
+    assert_eq!(seen, vec!["458", "459"], "only the fitted albums are seen");
+
+    // The next run resolves past them: only the unheard album is sent.
+    m.posted.lock().unwrap().clear();
+    let outcome = music_hub::tonies::execute_binding(&pool, &cfg, uid, &b).await;
+    assert_eq!(outcome.status, run::STATUS_OK, "error: {:?}", outcome.error);
+    assert_eq!(
+        posted_titles(&m),
+        vec!["Folge 457 Kapitel 01", "Folge 457 Kapitel 02"],
+        "already-heard albums must not be re-sent"
+    );
+    let mut seen: Vec<String> = music_hub::tonies::seen_ids(&pool, uid)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    seen.sort();
+    assert_eq!(seen, vec!["457", "458", "459"]);
+}
+
+/// Acceptance 3: the whole album run — driven through the auto-sync driver like
+/// the worker does it — issues zero Spotify requests.
+#[tokio::test]
+async fn album_run_makes_no_spotify_requests() {
+    let (sp_base, sp) = mock_spotify_never_called().await;
+    let (base, m) = mock_all().await;
+    *m.albums.lock().unwrap() = vec![
+        album("A", "Folge A", "2026-01-01", &["A1", "A2"]),
+        album("B", "Folge B", "2026-01-02", &["B1", "B2"]),
+    ];
+    *m.ready.lock().unwrap() = ["A1", "A2", "B1", "B2"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let (_dir, pool, uid) = album_run_db().await;
+    music_hub::tonies::cart::replace_all(
+        &pool,
+        uid,
+        "ct1",
+        &[cart_item("A", "Folge A"), cart_item("B", "Folge B")],
+    )
+    .await
+    .unwrap();
+
+    let due_since = (chrono::Utc::now() - chrono::Duration::seconds(1000)).to_rfc3339();
+    let bid: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_tonie_bindings
+             (user_id, tonie_id, tonie_name, source_kind, source_id, format, cap_seconds,
+              mode, order_by, album_mode, dirty_since, created_at, updated_at)
+         VALUES (?1, 'ct1', 'Story', 'albums', NULL, 'mp3-128', 5400,
+                 'auto', 'playlist', 'basket', ?2, ?3, ?3)
+         RETURNING id",
+    )
+    .bind(uid)
+    .bind(&due_since)
+    .bind("2026-01-01T00:00:00+00:00")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let cfg = cfg_album_run(&base, &sp_base);
+    let ran = music_hub::tonies::run_due(&pool, &cfg, 10).await.unwrap();
+    assert_eq!(ran, 1, "exactly one due binding ran");
+
+    let rows = run::list_syncs(&pool, bid, 5).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, run::STATUS_OK);
+    assert_eq!(rows[0].added, Some(4), "the run wrote four chapters");
+
+    // The run genuinely filled the tonie from the cart…
+    assert_eq!(
+        posted_titles(&m),
+        vec![
+            "Folge A Kapitel 01",
+            "Folge A Kapitel 02",
+            "Folge B Kapitel 01",
+            "Folge B Kapitel 02",
+        ]
+    );
+    // …and never asked Spotify for anything.
+    assert!(
+        sp.hits.lock().unwrap().is_empty(),
+        "an album run must never touch Spotify: {:?}",
+        sp.hits.lock().unwrap()
+    );
 }
