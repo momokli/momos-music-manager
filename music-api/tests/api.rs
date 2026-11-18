@@ -186,6 +186,31 @@ async fn create_order(app: &Router, isrcs: &[&str]) -> String {
     v["orderId"].as_str().unwrap().to_string()
 }
 
+/// `POST /orders` with an explicit intent/target (U0b).
+async fn create_order_typed(
+    app: &Router,
+    isrcs: &[&str],
+    intent: &str,
+    target: &str,
+) -> (StatusCode, serde_json::Value) {
+    let items: Vec<serde_json::Value> = isrcs
+        .iter()
+        .map(|i| serde_json::json!({ "isrc": i }))
+        .collect();
+    let (status, body) = send(
+        app,
+        authed("POST", "/orders")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": items, "intent": intent, "target": target
+            })))
+            .unwrap(),
+    )
+    .await;
+    let v = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    (status, v)
+}
+
 fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let p = dir.join(name);
     std::fs::write(&p, bytes).unwrap();
@@ -1417,7 +1442,7 @@ async fn spawn_analyzer() -> String {
 /// Seed one `ready` track with a FLAC path. No file must exist — the analyzer is
 /// mocked and never actually reads it.
 async fn seed_ready_flac(h: &Harness, isrc: &str, flac: &str) {
-    db::create_order(&h.state.pool, "o1", &[isrc.to_string()], 0)
+    db::create_order(&h.state.pool, "o1", &[isrc.to_string()], 0, "library", None)
         .await
         .unwrap();
     db::mark_ready(
@@ -1835,6 +1860,8 @@ async fn vault_backfill_is_idempotent_and_batched() {
         "o1",
         &["USQX91201487".to_string(), "DEQ022280682".to_string()],
         0,
+        "library",
+        None,
     )
     .await
     .unwrap();
@@ -2292,7 +2319,7 @@ async fn transcode_kind_derives_formats_from_flac() {
         return;
     }
 
-    db::create_order(&h.state.pool, "o1", &["TRANSCODE1".to_string()], 0)
+    db::create_order(&h.state.pool, "o1", &["TRANSCODE1".to_string()], 0, "library", None)
         .await
         .unwrap();
     db::mark_ready(
@@ -4237,6 +4264,82 @@ async fn get_json_authed(app: &Router, uri: &str) -> (StatusCode, serde_json::Va
     let (status, body) = send(app, authed("GET", uri).body(Body::empty()).unwrap()).await;
     let v = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
     (status, v)
+}
+
+#[tokio::test]
+async fn toys_order_stores_intent_and_low_tier() {
+    let h = harness().await;
+    let (status, _) = create_order_typed(&h.app, &["TOY1"], "toys", "mp3-128").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let track = db::get_track(&h.state.pool, "TOY1").await.unwrap().unwrap();
+    assert_eq!(track.intent, "toys");
+    assert_eq!(track.wanted_quality.as_deref(), Some("mp3-128"));
+}
+
+#[tokio::test]
+async fn library_order_upgrades_a_toys_track() {
+    let h = harness().await;
+
+    // Toys first: 128k, ready.
+    let _ = create_order_typed(&h.app, &["MIX1"], "toys", "mp3-128").await;
+    db::mark_ready(
+        &h.state.pool,
+        "MIX1",
+        "mp3-128",
+        None,
+        None,
+        Some("/tmp/mix1.mp3"),
+    )
+    .await
+    .unwrap();
+    let track = db::get_track(&h.state.pool, "MIX1").await.unwrap().unwrap();
+    assert_eq!(track.state, "ready");
+    assert_eq!(track.quality_tier.as_deref(), Some("mp3-128"));
+
+    // Now the library wants it in FLAC: same ISRC, same row, re-armed.
+    let _ = create_order_typed(&h.app, &["MIX1"], "library", "flac").await;
+    let track = db::get_track(&h.state.pool, "MIX1").await.unwrap().unwrap();
+    assert_eq!(track.state, "pending", "upgrade must re-download");
+    assert_eq!(track.intent, "library", "library wins over toys");
+    assert_eq!(track.wanted_quality.as_deref(), Some("flac"));
+}
+
+#[tokio::test]
+async fn toys_order_never_downgrades_a_library_track() {
+    let h = harness().await;
+
+    let _ = create_order_typed(&h.app, &["MIX2"], "library", "flac").await;
+    db::mark_ready(
+        &h.state.pool,
+        "MIX2",
+        "flac",
+        Some("/tmp/mix2.flac"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let _ = create_order_typed(&h.app, &["MIX2"], "toys", "mp3-128").await;
+    let track = db::get_track(&h.state.pool, "MIX2").await.unwrap().unwrap();
+    assert_eq!(track.state, "ready", "an existing FLAC stays ready");
+    assert_eq!(track.intent, "library", "toys must not demote intent");
+    assert_eq!(
+        track.wanted_quality.as_deref(),
+        Some("flac"),
+        "a lower target must not lower the wish"
+    );
+}
+
+#[tokio::test]
+async fn invalid_intent_or_target_is_rejected() {
+    let h = harness().await;
+    let (status, body) = create_order_typed(&h.app, &["BAD1"], "kids", "flac").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "unknown intent: {body}");
+
+    let (status, body) = create_order_typed(&h.app, &["BAD2"], "toys", "lossless?!").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "unknown target: {body}");
 }
 
 #[tokio::test]

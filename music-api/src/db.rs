@@ -241,6 +241,19 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    // Order intent + quality target (U0b). `wanted_quality` is the highest
+    // tier ever requested for an ISRC, `quality_tier` what is actually on
+    // disk; a higher wanted tier above the stored one re-arms the download.
+    for sql in [
+        "ALTER TABLE tracks ADD COLUMN wanted_quality TEXT",
+        "ALTER TABLE tracks ADD COLUMN quality_tier TEXT",
+        "ALTER TABLE tracks ADD COLUMN intent TEXT NOT NULL DEFAULT 'library'",
+        "ALTER TABLE orders ADD COLUMN intent TEXT NOT NULL DEFAULT 'library'",
+        "ALTER TABLE orders ADD COLUMN target TEXT",
+    ] {
+        let _ = sqlx::query(sql).execute(pool).await;
+    }
+
     // The unified priority work-queue (additive, idempotent). Every background
     // kind — download, transcode, analyze, crawl:<source> leads — lives here;
     // `next` (see `crate::work`) is the single place priority is applied.
@@ -284,38 +297,74 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
 /// Create an order for the given (already normalised, de-duplicated) ISRCs.
 /// Unknown ISRCs are inserted as `pending`; known ones keep their state, so
 /// re-ordering an already-downloaded track is a cheap no-op.
+/// Rank of a store tier, as SQL (`flac` > `mp3-320` > `mp3-128` > none).
+fn tier_rank(col: &str) -> String {
+    format!(
+        "CASE {col} WHEN 'flac' THEN 3 WHEN 'mp3-320' THEN 2 \
+         WHEN 'mp3-128' THEN 1 ELSE 0 END"
+    )
+}
+
 pub async fn create_order(
     pool: &Pool<Sqlite>,
     order_id: &str,
     isrcs: &[String],
     priority: i64,
+    intent: &str,
+    target: Option<&str>,
 ) -> anyhow::Result<()> {
     let ts = now();
     let mut tx = pool.begin().await?;
 
     sqlx::query(
-        "INSERT INTO orders (id, status, created_at, updated_at, priority)
-         VALUES (?, 'open', ?, ?, ?)",
+        "INSERT INTO orders (id, status, created_at, updated_at, priority, intent, target)
+         VALUES (?, 'open', ?, ?, ?, ?, ?)",
     )
     .bind(order_id)
     .bind(ts)
     .bind(ts)
     .bind(priority)
+    .bind(intent)
+    .bind(target)
     .execute(&mut *tx)
     .await?;
 
+    // One row per ISRC, merged across orders:
+    // * intent is max-merged (`library` wins over `toys`),
+    // * wanted_quality takes the highest tier ever requested,
+    // * a ready track whose stored tier is below that re-arms the download
+    //   (the upgrade path — never a second row).
+    let sql = format!(
+        "INSERT INTO tracks
+             (isrc, source, state, created_at, updated_at, wanted_quality, intent)
+         VALUES (?, ?, 'pending', ?, ?, ?, ?)
+         ON CONFLICT(isrc) DO UPDATE SET
+             intent = CASE WHEN excluded.intent = 'library'
+                           THEN 'library' ELSE tracks.intent END,
+             wanted_quality = CASE WHEN {ex_new} > {cur}
+                                   THEN excluded.wanted_quality
+                                   ELSE tracks.wanted_quality END,
+             state = CASE WHEN tracks.state = 'ready' AND {ex_new} > {tier}
+                          THEN 'pending' ELSE tracks.state END,
+             error = CASE WHEN tracks.state = 'ready' AND {ex_new} > {tier}
+                          THEN NULL ELSE tracks.error END,
+             updated_at = excluded.updated_at",
+        ex_new = tier_rank("excluded.wanted_quality"),
+        cur = tier_rank("tracks.wanted_quality"),
+        tier = tier_rank("tracks.quality_tier"),
+    );
+
     for isrc in isrcs {
         let source = crate::models::track_source(isrc);
-        sqlx::query(
-            "INSERT OR IGNORE INTO tracks (isrc, source, state, created_at, updated_at)
-             VALUES (?, ?, 'pending', ?, ?)",
-        )
-        .bind(isrc)
-        .bind(source)
-        .bind(ts)
-        .bind(ts)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query(&sql)
+            .bind(isrc)
+            .bind(source)
+            .bind(ts)
+            .bind(ts)
+            .bind(target)
+            .bind(intent)
+            .execute(&mut *tx)
+            .await?;
 
         sqlx::query("INSERT OR IGNORE INTO order_items (order_id, isrc) VALUES (?, ?)")
             .bind(order_id)
@@ -811,9 +860,20 @@ pub async fn mark_ready(
     path_320: Option<&str>,
     path_128: Option<&str>,
 ) -> anyhow::Result<()> {
+    // The stored tier is what is actually on disk, not what was requested.
+    let tier = if path_flac.is_some() {
+        Some("flac")
+    } else if path_320.is_some() {
+        Some("mp3-320")
+    } else if path_128.is_some() {
+        Some("mp3-128")
+    } else {
+        None
+    };
     sqlx::query(
         "UPDATE tracks
             SET state = 'ready', source_format = ?, path_flac = ?, path_320 = ?, path_128 = ?,
+                quality_tier = COALESCE(?, quality_tier),
                 error = NULL, lease_expires_at = NULL, next_attempt_at = NULL, updated_at = ?
           WHERE isrc = ?",
     )
@@ -821,6 +881,7 @@ pub async fn mark_ready(
     .bind(path_flac)
     .bind(path_320)
     .bind(path_128)
+    .bind(tier)
     .bind(now())
     .bind(isrc)
     .execute(pool)

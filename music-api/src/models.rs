@@ -41,6 +41,14 @@ pub struct Track {
     pub next_attempt_at: Option<i64>,
     /// Set while `downloading`, refreshed as a heartbeat; drives the reaper.
     pub lease_expires_at: Option<i64>,
+    /// Highest tier ever requested for this ISRC (`flac` | `mp3-320` | `mp3-128`).
+    /// `None` = whatever `download_quality` says.
+    pub wanted_quality: Option<String>,
+    /// What is actually on disk (`flac` | `mp3-320` | `mp3-128`).
+    pub quality_tier: Option<String>,
+    /// `library` (DJ: analysis wanted) or `toys` (tonie: 128k, no analysis).
+    /// Max-merged across orders — `library` wins.
+    pub intent: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -112,6 +120,14 @@ pub struct CreateOrderRequest {
     /// Higher = processed earlier (default 0).
     #[serde(default)]
     pub priority: i64,
+    /// Why the tracks are wanted: `library` (DJ, analyse) or `toys`
+    /// (tonie, 128k, no analysis). Default `library`.
+    #[serde(default)]
+    pub intent: Option<String>,
+    /// Requested store tier: `flac` | `mp3-320` | `mp3-128`. Omitted =
+    /// the configured default for the intent.
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

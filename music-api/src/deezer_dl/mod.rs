@@ -42,6 +42,26 @@ impl Quality {
         }
     }
 
+    /// Store tier name used in the DB (`flac` | `mp3-320` | `mp3-128`).
+    pub fn tier(&self) -> &'static str {
+        match self {
+            Quality::Flac => "flac",
+            Quality::Mp3_320 => "mp3-320",
+            Quality::Mp3_128 => "mp3-128",
+        }
+    }
+
+    /// Parse a store tier name. Unknown values are `None`, so a typo in an
+    /// order falls back to the configured default instead of failing hard.
+    pub fn from_tier(tier: &str) -> Option<Self> {
+        match tier.trim().to_lowercase().as_str() {
+            "flac" | "lossless" => Some(Quality::Flac),
+            "320" | "mp3-320" => Some(Quality::Mp3_320),
+            "128" | "mp3-128" => Some(Quality::Mp3_128),
+            _ => None,
+        }
+    }
+
     /// File extension: `".mp3"` | `".flac"`.
     pub fn extension(&self) -> &'static str {
         match self {
