@@ -20,6 +20,30 @@ pub const MODE_MANUAL: &str = "manual";
 /// Auto mode: the (future) sync run may refresh the Tonie on its own.
 pub const MODE_AUTO: &str = "auto";
 
+/// Track order used to fill the Tonie from a playlist: Spotify's own
+/// `position` order.
+pub const ORDER_PLAYLIST: &str = "playlist";
+/// The most recently added tracks fill the Tonie, played newest first.
+pub const ORDER_NEWEST: &str = "newest";
+/// Same selection as [`ORDER_NEWEST`], but played in the order the
+/// tracks were added (oldest first) - what serialised audio dramas want.
+pub const ORDER_NEWEST_CHRONO: &str = "newest_chrono";
+
+/// Whether `o` is a supported track order.
+pub fn valid_order_by(o: &str) -> bool {
+    matches!(o, ORDER_PLAYLIST | ORDER_NEWEST | ORDER_NEWEST_CHRONO)
+}
+
+/// German display label for a track order; unknown values fall back to
+/// the playlist order rather than rendering an empty label.
+pub fn order_by_label(order: &str) -> &'static str {
+    match order {
+        ORDER_NEWEST => "Neueste zuerst",
+        ORDER_NEWEST_CHRONO => "Neueste, chronologisch",
+        _ => "Playlist-Reihenfolge",
+    }
+}
+
 /// Whether `f` is a supported format (`mp3-128` | `mp3-320`).
 pub fn valid_format(f: &str) -> bool {
     matches!(f, FORMAT_MP3_128 | FORMAT_MP3_320)
@@ -64,6 +88,9 @@ pub struct Binding {
     pub format: String,
     pub cap_seconds: i64,
     pub mode: String,
+    /// Track order for playlist sources (`playlist` | `newest` |
+    /// `newest_chrono`). Ignored for tag/backpack sources.
+    pub order_by: String,
     pub dirty_since: Option<String>,
     pub last_sync_at: Option<String>,
     pub last_sync_status: Option<String>,
@@ -79,6 +106,7 @@ fn row_to_binding(r: sqlx::sqlite::SqliteRow) -> Binding {
         format: r.get("format"),
         cap_seconds: r.get("cap_seconds"),
         mode: r.get("mode"),
+        order_by: r.get("order_by"),
         dirty_since: r.get("dirty_since"),
         last_sync_at: r.get("last_sync_at"),
         last_sync_status: r.get("last_sync_status"),
@@ -86,7 +114,7 @@ fn row_to_binding(r: sqlx::sqlite::SqliteRow) -> Binding {
 }
 
 const SELECT_COLS: &str = "id, tonie_id, tonie_name, source_kind, source_id, format, \
-     cap_seconds, mode, dirty_since, last_sync_at, last_sync_status";
+     cap_seconds, mode, order_by, dirty_since, last_sync_at, last_sync_status";
 
 /// All bindings owned by `user_id`, ordered by Tonie id.
 pub async fn list_bindings(pool: &SqlitePool, user_id: i64) -> Result<Vec<Binding>> {
@@ -161,6 +189,31 @@ pub async fn upsert_binding(
     Ok(())
 }
 
+/// Store the track order of one binding.
+///
+/// Deliberately separate from [`upsert_binding`]: the order is a
+/// preference, not part of the source, and rows from before migration
+/// 061 default to `playlist`.
+pub async fn set_binding_order(
+    pool: &SqlitePool,
+    user_id: i64,
+    tonie_id: &str,
+    order_by: &str,
+) -> Result<bool> {
+    let res = sqlx::query(
+        "UPDATE hub_tonie_bindings SET order_by = ?3, updated_at = ?4
+          WHERE user_id = ?1 AND tonie_id = ?2",
+    )
+    .bind(user_id)
+    .bind(tonie_id)
+    .bind(order_by)
+    .bind(now_iso())
+    .execute(pool)
+    .await
+    .context("Tonies-Reihenfolge konnte nicht gespeichert werden")?;
+    Ok(res.rows_affected() > 0)
+}
+
 /// Remove `user_id`'s binding for `tonie_id`. No-op when it does not exist.
 pub async fn delete_binding(pool: &SqlitePool, user_id: i64, tonie_id: &str) -> Result<()> {
     sqlx::query("DELETE FROM hub_tonie_bindings WHERE user_id = ?1 AND tonie_id = ?2")
@@ -192,6 +245,17 @@ mod tests {
         assert!(!valid_mode("always"));
         assert!(!valid_mode(""));
         assert!(!valid_mode("Auto"));
+    }
+
+    #[test]
+    fn order_validation_and_labels() {
+        assert!(valid_order_by(ORDER_PLAYLIST));
+        assert!(valid_order_by(ORDER_NEWEST));
+        assert!(valid_order_by(ORDER_NEWEST_CHRONO));
+        assert!(!valid_order_by("random"));
+        assert!(!valid_order_by(""));
+        assert_eq!(order_by_label(ORDER_NEWEST), "Neueste zuerst");
+        assert_eq!(order_by_label("garbage"), "Playlist-Reihenfolge");
     }
 
     #[test]

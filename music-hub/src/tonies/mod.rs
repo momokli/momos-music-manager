@@ -14,7 +14,8 @@ pub mod sync;
 pub use autosync::{Debounce, due_bindings, is_due, run_due};
 pub use bindings::{
     Binding, SOURCE_BACKPACK, SOURCE_PLAYLIST, SOURCE_TAG, delete_binding, get_binding,
-    list_bindings, source_kind_label, upsert_binding, valid_format, valid_mode, valid_source_kind,
+    list_bindings, order_by_label, set_binding_order, source_kind_label, upsert_binding,
+    valid_format, valid_mode, valid_order_by, valid_source_kind,
 };
 pub use run::{
     Claim, RunOutcome, SyncOptions, SyncRow, Transcoding, claim_run, execute_binding, finish_run,

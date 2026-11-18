@@ -3619,6 +3619,8 @@ struct BindingView {
     source_name: String,
     format: String,
     mode: String,
+    /// Track order for playlist sources.
+    order_by: String,
     /// Last sync timestamp (RFC3339), when a run has finished.
     last_sync_at: String,
     /// Last sync status token (`ok`/`noop`/`timeout`/`error`).
@@ -3629,6 +3631,11 @@ impl BindingView {
     /// German label for the source kind (`Playlist` | `Backpack` | `Tag`).
     fn kind_label(&self) -> &str {
         crate::tonies::bindings::source_kind_label(&self.source_kind)
+    }
+
+    /// German label for the track order.
+    fn order_label(&self) -> &'static str {
+        crate::tonies::bindings::order_by_label(&self.order_by)
     }
 }
 
@@ -3981,6 +3988,7 @@ fn binding_view(b: &crate::tonies::Binding, sources: &SourceGroups) -> BindingVi
         source_name,
         format: b.format.clone(),
         mode: b.mode.clone(),
+        order_by: b.order_by.clone(),
         last_sync_at: b.last_sync_at.clone().unwrap_or_default(),
         last_sync_status: b.last_sync_status.clone().unwrap_or_default(),
     }
@@ -4070,6 +4078,9 @@ struct TonieBindingForm {
     format: Option<String>,
     #[serde(default)]
     mode: Option<String>,
+    /// Track order for playlist sources (`playlist` | `newest` | `newest_chrono`).
+    #[serde(default)]
+    order_by: Option<String>,
 }
 
 /// Parse the picker's `source_id` value into `(kind, id)`.
@@ -4176,7 +4187,18 @@ async fn tonies_binding_save(
                         )
                         .await
                         {
-                            Ok(()) => (format!("Quelle „{name}“ gespeichert"), "ok"),
+                            Ok(()) => {
+                                if let Some(order) = form.order_by.as_deref()
+                                    && crate::tonies::valid_order_by(order)
+                                    && let Err(e) = crate::tonies::set_binding_order(
+                                        &st.pool, uid, &tonie_id, order,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!("tonies order_by save failed for user {uid}: {e:#}");
+                                }
+                                (format!("Quelle „{name}“ gespeichert"), "ok")
+                            }
                             Err(e) => (format!("Fehler: {e}"), "err"),
                         }
                     }

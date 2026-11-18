@@ -7,7 +7,7 @@
 <div class="hub-tonie-binding" id="binding-{{ c.id }}">
     {% if let Some(b) = c.binding %}
     <p class="tonie-source">
-        <strong>{{ b.source_name }}</strong> &middot; {{ b.kind_label() }} &middot; {{ b.format }} &middot; {{ b.mode }}
+        <strong>{{ b.source_name }}</strong> &middot; {{ b.kind_label() }} &middot; {{ b.format }} &middot; {{ b.mode }}{% if b.source_kind == "playlist" %} &middot; {{ b.order_label() }}{% endif %}
     </p>
     <form hx-post="/tonies/{{ c.id }}/sync" hx-target="#tonie-{{ c.id }}" hx-swap="outerHTML">
         <input type="hidden" name="tonie_name" value="{{ c.title }}" />
@@ -36,6 +36,13 @@
                     {% for t in sources.tags %}
                     <option value="tag:{{ t.id }}" {% if b.source_kind == "tag" && t.id == b.source_id %}selected{% endif %}>{{ t.name }}</option>
                     {% endfor %}
+                </select>
+            </label>
+            <label>Reihenfolge
+                <select name="order_by">
+                    <option value="playlist" {% if b.order_by == "playlist" %}selected{% endif %}>Playlist</option>
+                    <option value="newest" {% if b.order_by == "newest" %}selected{% endif %}>Neueste zuerst</option>
+                    <option value="newest_chrono" {% if b.order_by == "newest_chrono" %}selected{% endif %}>Neueste, chronologisch</option>
                 </select>
             </label>
             <label>Format
@@ -111,6 +118,13 @@
                     {% for t in sources.tags %}
                     <option value="tag:{{ t.id }}">{{ t.name }}</option>
                     {% endfor %}
+                </select>
+            </label>
+            <label>Reihenfolge
+                <select name="order_by">
+                    <option value="playlist">Playlist</option>
+                    <option value="newest">Neueste zuerst</option>
+                    <option value="newest_chrono">Neueste, chronologisch</option>
                 </select>
             </label>
             <label>Format
