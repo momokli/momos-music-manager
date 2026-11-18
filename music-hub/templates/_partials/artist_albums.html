@@ -1,0 +1,38 @@
+{# One album tile of an artist's Deezer catalogue (#601). Included from
+   `artist.html` in a `for a in deezer_albums` loop; `self_href`,
+   `has_tonies_account`, `multi_tonie`, `cart_tonies` and `cart_single_tonie`
+   come from the page's scope so the form posts to the right Tonie. #}
+<article class="artist-album-card">
+    {% if let Some(cover) = a.cover_url %}
+    <img class="artist-album-cover" src="{{ cover }}" alt="" loading="lazy" referrerpolicy="no-referrer" />
+    {% else %}
+    {# No cover in the metadata: a placeholder tile, never a broken <img>. #}
+    <div class="artist-album-cover artist-album-cover-empty" aria-hidden="true">&#9834;</div>
+    {% endif %}
+    <p class="artist-album-title">{{ a.title }}</p>
+    {% if !a.release_date.is_empty() %}
+    <p class="artist-album-date">{{ a.release_date }}</p>
+    {% endif %}
+    {% if a.seen || a.in_cart %}
+    <p class="artist-album-badges">
+        {% if a.seen %}<span class="artist-album-badge artist-album-badge-seen">gehört</span>{% endif %}
+        {% if a.in_cart %}<span class="artist-album-badge">auf Tonie</span>{% endif %}
+    </p>
+    {% endif %}
+    {% if has_tonies_account %}
+    <form method="post" action="{{ self_href }}/cart">
+        <input type="hidden" name="album_id" value="{{ a.album_id }}" />
+        <input type="hidden" name="album_title" value="{{ a.title }}" />
+        {% if multi_tonie %}
+        <select name="tonie_id" aria-label="Figur">
+            {% for t in cart_tonies %}
+            <option value="{{ t.tonie_id }}">{{ t.label }}</option>
+            {% endfor %}
+        </select>
+        {% else %}
+        <input type="hidden" name="tonie_id" value="{{ cart_single_tonie }}" />
+        {% endif %}
+        <button type="submit">In den Korb</button>
+    </form>
+    {% endif %}
+</article>

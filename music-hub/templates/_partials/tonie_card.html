@@ -16,5 +16,8 @@
         </div>
     </div>
     <progress class="tonie-bar" value="{{ c.percent }}" max="100"></progress>
+    <p class="tonie-source">
+        <a href="/tonies/{{ c.id }}/albums">Alben wählen{% if c.cart_count > 0 %} · {{ c.cart_count }} im Korb{% endif %}</a>
+    </p>
     {% include "_partials/tonie_binding.html" %}
 </article>

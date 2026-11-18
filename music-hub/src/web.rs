@@ -81,6 +81,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/tonies/{tonie_id}/albums/move", post(tonie_albums_move))
         .route(
+            "/tonies/{tonie_id}/albums/move-to",
+            post(tonie_albums_move_to),
+        )
+        .route(
             "/tonies/{tonie_id}/albums/unlisten",
             post(tonie_albums_unlisten),
         )
@@ -3585,6 +3589,8 @@ struct ToniesCard {
     title: String,
     /// Cover image URL from the Tonies API, when it has one.
     image_url: Option<String>,
+    /// Albums waiting in this tonie's cart (the entry point to the picker).
+    cart_count: i64,
     minutes_present: i64,
     minutes_total: i64,
     percent: i64,
@@ -3775,6 +3781,9 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                     .unwrap_or_default(),
                     None => Vec::new(),
                 };
+                let cart_count = crate::tonies::cart::count(&st.pool, uid, &id)
+                    .await
+                    .unwrap_or(0);
                 cards.push(ToniesCard {
                     id,
                     title: t
@@ -3783,6 +3792,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| "Kreativ-Tonie".to_string()),
                     image_url: t.image_url.clone(),
+                    cart_count,
                     minutes_present: cap.minutes_present(),
                     minutes_total: cap.minutes_total(),
                     percent: cap.percent(),
@@ -4076,11 +4086,15 @@ async fn tonies_card_fragment(
         }
     }
 
+    let cart_count = crate::tonies::cart::count(&st.pool, uid, tonie_id)
+        .await
+        .unwrap_or(0);
     render(&TonieCardFragment {
         c: ToniesCard {
             id: tonie_id.to_string(),
             title,
             image_url,
+            cart_count,
             minutes_present,
             minutes_total,
             percent,
@@ -4548,7 +4562,7 @@ async fn tonie_albums_render(
     }
 
     let items = match binding.as_ref() {
-        Some(b) => crate::tonies::list_album_items(&st.pool, b.id)
+        Some(_) => crate::tonies::cart::list(&st.pool, uid, &tonie_id)
             .await
             .unwrap_or_default(),
         None => Vec::new(),
@@ -4821,17 +4835,14 @@ async fn tonie_albums_set_mode(
     tonie_albums_toast(&st, nav, &tonie_id, &msg, kind).await
 }
 
-/// Write `items` back to the basket of `binding_id` in the given order.
+/// Write `items` back to the cart of `(uid, tonie_id)` in the given order.
 async fn album_basket_write(
     pool: &SqlitePool,
-    binding_id: i64,
+    uid: i64,
+    tonie_id: &str,
     items: &[crate::tonies::AlbumItem],
 ) -> anyhow::Result<()> {
-    let rows: Vec<(String, String, i64)> = items
-        .iter()
-        .map(|i| (i.album_id.clone(), i.album_title.clone(), i.seconds))
-        .collect();
-    crate::tonies::set_album_items(pool, binding_id, &rows).await
+    crate::tonies::cart::replace_all(pool, uid, tonie_id, items).await
 }
 
 /// `POST /tonies/{id}/albums/add` — append an album to the basket.
@@ -4845,15 +4856,16 @@ async fn tonie_albums_add(
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let uid = nav.id;
-    let binding = match tonie_albums_binding(&st, uid, &tonie_id).await {
-        Ok(b) => b,
-        Err(r) => return r,
-    };
+    // Ownership gate: the cart belongs to (user, tonie), so this only validates
+    // that the tonie is the caller's.
+    if let Err(r) = tonie_albums_binding(&st, uid, &tonie_id).await {
+        return r;
+    }
     let album_id = form.album_id.trim().to_string();
     let (msg, kind) = if album_id.is_empty() {
         ("Kein Album gewählt.".to_string(), "err")
     } else {
-        let mut items = crate::tonies::list_album_items(&st.pool, binding.id)
+        let mut items = crate::tonies::cart::list(&st.pool, uid, &tonie_id)
             .await
             .unwrap_or_default();
         if items.iter().any(|i| i.album_id == album_id) {
@@ -4881,7 +4893,7 @@ async fn tonie_albums_add(
                 seconds,
                 position: items.len() as i64,
             });
-            match album_basket_write(&st.pool, binding.id, &items).await {
+            match album_basket_write(&st.pool, uid, &tonie_id, &items).await {
                 Ok(()) => (format!("„{label}“ in den Korb"), "ok"),
                 Err(e) => (format!("Fehler: {e}"), "err"),
             }
@@ -4901,12 +4913,13 @@ async fn tonie_albums_remove(
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let uid = nav.id;
-    let binding = match tonie_albums_binding(&st, uid, &tonie_id).await {
-        Ok(b) => b,
-        Err(r) => return r,
-    };
+    // Ownership gate: the cart belongs to (user, tonie), so this only validates
+    // that the tonie is the caller's.
+    if let Err(r) = tonie_albums_binding(&st, uid, &tonie_id).await {
+        return r;
+    }
     let album_id = form.album_id.trim().to_string();
-    let items = crate::tonies::list_album_items(&st.pool, binding.id)
+    let items = crate::tonies::cart::list(&st.pool, uid, &tonie_id)
         .await
         .unwrap_or_default();
     let before = items.len();
@@ -4917,7 +4930,7 @@ async fn tonie_albums_remove(
     let (msg, kind) = if kept.len() == before {
         ("Album ist nicht im Korb.".to_string(), "err")
     } else {
-        match album_basket_write(&st.pool, binding.id, &kept).await {
+        match album_basket_write(&st.pool, uid, &tonie_id, &kept).await {
             Ok(()) => ("Album aus dem Korb entfernt".to_string(), "ok"),
             Err(e) => (format!("Fehler: {e}"), "err"),
         }
@@ -4936,13 +4949,14 @@ async fn tonie_albums_move(
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let uid = nav.id;
-    let binding = match tonie_albums_binding(&st, uid, &tonie_id).await {
-        Ok(b) => b,
-        Err(r) => return r,
-    };
+    // Ownership gate: the cart belongs to (user, tonie), so this only validates
+    // that the tonie is the caller's.
+    if let Err(r) = tonie_albums_binding(&st, uid, &tonie_id).await {
+        return r;
+    }
     let album_id = form.album_id.trim().to_string();
     let dir = form.direction.unwrap_or_default();
-    let mut items = crate::tonies::list_album_items(&st.pool, binding.id)
+    let mut items = crate::tonies::cart::list(&st.pool, uid, &tonie_id)
         .await
         .unwrap_or_default();
     let (msg, kind) = if dir != "up" && dir != "down" {
@@ -4957,7 +4971,7 @@ async fn tonie_albums_move(
             Some(i) => {
                 let other = if dir == "up" { i - 1 } else { i + 1 };
                 items.swap(i, other);
-                match album_basket_write(&st.pool, binding.id, &items).await {
+                match album_basket_write(&st.pool, uid, &tonie_id, &items).await {
                     Ok(()) => ("Reihenfolge gespeichert".to_string(), "ok"),
                     Err(e) => (format!("Fehler: {e}"), "err"),
                 }
@@ -4965,6 +4979,47 @@ async fn tonie_albums_move(
         }
     };
     tonie_albums_toast(&st, nav, &tonie_id, &msg, kind).await
+}
+
+/// `POST /tonies/{id}/albums/move-to` — drop an album at an absolute position.
+///
+/// Used by the drag & drop in the cart; the up/down buttons keep working, so
+/// the feature never depends on JavaScript.
+#[derive(Debug, Deserialize)]
+struct TonieAlbumMoveToForm {
+    album_id: String,
+    position: i64,
+}
+
+async fn tonie_albums_move_to(
+    State(st): State<AppState>,
+    Path(tonie_id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<TonieAlbumMoveToForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let uid = nav.id;
+    if let Err(r) = tonie_albums_binding(&st, uid, &tonie_id).await {
+        return r;
+    }
+    let album_id = form.album_id.trim().to_string();
+    let mut items = crate::tonies::cart::list(&st.pool, uid, &tonie_id)
+        .await
+        .unwrap_or_default();
+
+    if let Some(from) = items.iter().position(|i| i.album_id == album_id) {
+        let item = items.remove(from);
+        let to = form.position.clamp(0, items.len() as i64) as usize;
+        items.insert(to, item);
+        if let Err(e) = album_basket_write(&st.pool, uid, &tonie_id, &items).await {
+            tracing::warn!("tonies cart reorder failed for user {uid}: {e:#}");
+        }
+    }
+
+    // Plain form/fetch POST: go back to the page, the new order is the answer.
+    Redirect::to(&format!("/tonies/{tonie_id}/albums")).into_response()
 }
 
 /// `POST /tonies/{id}/albums/unlisten` — put one album back on the queue.

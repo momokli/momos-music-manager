@@ -4,9 +4,13 @@
 //!
 //! * `GET /artists`      — list of every artist with server-side filters
 //!   (name search, "played by me", "tagged", "in playlists") and sorting.
-//! * `GET /artist/{id}` — profile: most played tracks per user, tag
-//!   distribution, playlist membership, collaborations / b2b / album
-//!   co-artists and reference scoring. `/artist/{name}` redirects to the id.
+//! * `GET /artist/{id}` — profile: Deezer albums (U1, #601) with covers,
+//!   `gehört` / `auf Tonie` badges and a cart action, plus — behind
+//!   `?view=stats` — most played tracks per user, tag distribution, playlist
+//!   membership, collaborations / b2b / album co-artists and reference
+//!   scoring. `/artist/{name}` redirects to the id.
+//! * `POST /artist/{id}/cart` — put one Deezer album into a Tonie's cart
+//!   ([`crate::tonies::cart`]), then redirect back (PRG).
 //!
 //! Artists are **first-class entities** (`hub_artists`, migration 047): tracks
 //! link to them via `hub_track_artists` (M:N, ordered). The free-text
@@ -28,10 +32,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use anyhow::Result;
 use askama::Template;
 use axum::Router;
-use axum::extract::{Path, Query, RawQuery, State};
+use axum::extract::{Form, Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::{Executor, QueryBuilder, Row, Sqlite, SqliteConnection, SqlitePool};
@@ -42,6 +46,10 @@ use crate::api::AppState;
 const CHUNK: usize = 400;
 /// Cap for the artist list (server-side; keeps the page dense and bounded).
 const LIST_LIMIT: usize = 2000;
+/// Deezer albums shown on the profile page (mirrors the tonie album grid).
+const ALBUM_LIMIT: u32 = 50;
+/// Deezer artist search hits considered when resolving the name to an id.
+const ARTIST_HITS: u32 = 10;
 /// Reference-scoring coefficients (AR6). Constants on purpose for now.
 const REF_TAG_W: f64 = 3.0;
 const REF_COLLAB_W: f64 = 2.0;
@@ -53,6 +61,8 @@ pub fn router(state: AppState) -> Router {
         // Canonical, id-based route. A name is resolved and redirected to the id
         // (see `artist_page`).
         .route("/artist/{key}", get(artist_page))
+        // U1 (#601): put one Deezer album into a Tonie cart, then back to the page.
+        .route("/artist/{key}/cart", post(artist_cart_add))
         .with_state(state)
 }
 
@@ -942,6 +952,8 @@ struct ArtistQuery {
     sort: Option<String>,
     /// `asc` | `desc`.
     dir: Option<String>,
+    /// `albums` (default) | `stats` — which half of the profile is shown.
+    view: Option<String>,
 }
 
 #[derive(Template)]
@@ -979,6 +991,22 @@ struct ArtistPage {
     ref_user: String,
     ref_user_options: Vec<RefUserOption>,
     references: Vec<RefRow>,
+
+    // U1 (#601): Deezer albums + cart
+    /// `true` while the album view is shown (default), `false` for `?view=stats`.
+    albums_on: bool,
+    /// `true` while the statistics view is shown.
+    stats_on: bool,
+    /// Hint instead of an error (no `MUSIC_API_TOKEN`, music-api unreachable, …).
+    albums_message: String,
+    deezer_albums: Vec<ArtistAlbumTile>,
+    /// The user has a Tonies account — only then are cart buttons rendered.
+    has_tonies_account: bool,
+    /// More than one bound Tonie: every tile offers a `<select name="tonie_id">`.
+    multi_tonie: bool,
+    /// The single bound Tonie (empty when there is none or more than one).
+    cart_single_tonie: String,
+    cart_tonies: Vec<CartTonie>,
 
     // sortable headers (AR2 tracks, AR4 playlists, AR5c albums)
     s_t_title: crate::table::SortHead,
@@ -1065,6 +1093,24 @@ struct RefUserOption {
     slug: String,
     selected: bool,
     count: i64,
+}
+
+/// One album of the artist's Deezer catalogue (#601).
+struct ArtistAlbumTile {
+    album_id: String,
+    title: String,
+    release_date: String,
+    cover_url: Option<String>,
+    /// This user already had the album on a Tonie.
+    seen: bool,
+    /// The album sits in the cart of one of this user's Tonies.
+    in_cart: bool,
+}
+
+/// One selectable target Tonie (`hub_tonie_bindings`), name first.
+struct CartTonie {
+    tonie_id: String,
+    label: String,
 }
 
 /// Sort a per-user play table in place (server-side, header-driven).
@@ -1204,6 +1250,103 @@ async fn artist_page(
             .ok()
             .flatten()
             .unwrap_or_else(|| key.clone());
+
+    // ── U1 (#601): Deezer albums + Tonie cart ────────────────────────────────
+    let stats_on = f
+        .view
+        .as_deref()
+        .map(|v| v.trim().eq_ignore_ascii_case("stats"))
+        .unwrap_or(false);
+    let has_tonies_account = crate::tonies::load_account(&st.pool, me)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    // The Tonies that may receive an album, plus what already sits in their
+    // carts (`auf Tonie` badge). A binding is unique per (user, tonie).
+    let mut cart_tonies: Vec<CartTonie> = Vec::new();
+    let mut in_cart: HashSet<String> = HashSet::new();
+    for b in crate::tonies::list_bindings(&st.pool, me)
+        .await
+        .unwrap_or_default()
+    {
+        if cart_tonies.iter().any(|t| t.tonie_id == b.tonie_id) {
+            continue;
+        }
+        let label = b
+            .tonie_name
+            .clone()
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| b.tonie_id.clone());
+        for item in crate::tonies::cart::list(&st.pool, me, &b.tonie_id)
+            .await
+            .unwrap_or_default()
+        {
+            in_cart.insert(item.album_id);
+        }
+        cart_tonies.push(CartTonie {
+            tonie_id: b.tonie_id,
+            label,
+        });
+    }
+    let multi_tonie = cart_tonies.len() > 1;
+    let cart_single_tonie = if multi_tonie {
+        String::new()
+    } else {
+        cart_tonies
+            .first()
+            .map(|t| t.tonie_id.clone())
+            .unwrap_or_default()
+    };
+
+    // Album metadata comes from music-api (it owns the Deezer client). Neither a
+    // missing token nor an unreachable API may break the page — both only add a
+    // hint.
+    let mut albums_message = String::new();
+    let mut deezer_albums: Vec<ArtistAlbumTile> = Vec::new();
+    let token_missing = st
+        .cfg
+        .music_api_token
+        .as_deref()
+        .map(|t| t.trim().is_empty())
+        .unwrap_or(true);
+    if token_missing {
+        albums_message =
+            "MUSIC_API_TOKEN ist nicht gesetzt — Deezer-Alben sind nicht verfügbar.".to_string();
+    } else {
+        match deezer_artist_id(&st, target_id, &display_name).await {
+            None => albums_message = format!("Kein Deezer-Künstler zu „{display_name}“ gefunden."),
+            Some(artist_id) => {
+                match crate::music_api::deezer_artist_albums(&st.cfg, &artist_id, ALBUM_LIMIT, 0)
+                    .await
+                {
+                    Ok(page) => {
+                        let seen = crate::tonies::seen_ids(&st.pool, me)
+                            .await
+                            .unwrap_or_default();
+                        deezer_albums = page
+                            .albums
+                            .into_iter()
+                            .map(|a| ArtistAlbumTile {
+                                seen: seen.contains(&a.album_id),
+                                in_cart: in_cart.contains(&a.album_id),
+                                album_id: a.album_id,
+                                title: a.title,
+                                release_date: a.release_date.unwrap_or_default(),
+                                cover_url: a.cover_url,
+                            })
+                            .collect();
+                        if deezer_albums.is_empty() {
+                            albums_message = "Keine Alben bei Deezer gefunden.".to_string();
+                        }
+                    }
+                    Err(e) => albums_message = format!("Alben nicht ladbar: {e}"),
+                }
+            }
+        }
+    }
+
     let artist_ids: Vec<i64> = artist_tracks.iter().map(|t| t.id).collect();
 
     // track -> artists (entity ids), for the collab/b2b/album/reference panels.
@@ -1798,6 +1941,14 @@ async fn artist_page(
         ref_user: selected_slug,
         ref_user_options,
         references,
+        albums_on: !stats_on,
+        stats_on,
+        albums_message,
+        deezer_albums,
+        has_tonies_account,
+        multi_tonie,
+        cart_single_tonie,
+        cart_tonies,
         s_t_title,
         s_t_album,
         s_t_plays,
@@ -1809,6 +1960,150 @@ async fn artist_page(
         s_pl_shared,
         s_pl_scope,
     })
+}
+
+// ── U1 (#601): Deezer catalogue + Tonie cart ────────────────────────────────
+
+/// Deezer artist id for a hub artist. A stored external id wins; otherwise the
+/// display name is resolved once through music-api (the hub owns no Deezer
+/// client of its own). An exact name match beats Deezer's relevance order.
+async fn deezer_artist_id(st: &AppState, hub_artist_id: i64, name: &str) -> Option<String> {
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT external_id FROM hub_artist_external_ids
+          WHERE artist_id = ?1 AND service = 'deezer' LIMIT 1",
+    )
+    .bind(hub_artist_id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten();
+    if let Some(id) = stored.filter(|id| !id.trim().is_empty()) {
+        return Some(id);
+    }
+
+    let hits = crate::music_api::deezer_search_artist(&st.cfg, name, ARTIST_HITS)
+        .await
+        .ok()?;
+    hits.iter()
+        .find(|h| h.name.trim().eq_ignore_ascii_case(name.trim()))
+        .or_else(|| hits.first())
+        .map(|h| h.artist_id.clone())
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ArtistCartForm {
+    album_id: Option<String>,
+    album_title: Option<String>,
+    /// Omitted when the user has exactly one bound Tonie.
+    tonie_id: Option<String>,
+}
+
+/// The Tonie that receives the album: the posted one when it belongs to the
+/// user, else the single binding. No binding is an error, not a 500.
+async fn cart_target(
+    st: &AppState,
+    uid: i64,
+    wanted: Option<&str>,
+) -> Result<String, (&'static str, &'static str)> {
+    if !matches!(
+        crate::tonies::load_account(&st.pool, uid).await,
+        Ok(Some(_))
+    ) {
+        return Err(("Erst eine Figur verbinden", "err"));
+    }
+    let bindings = crate::tonies::list_bindings(&st.pool, uid)
+        .await
+        .unwrap_or_default();
+    let wanted = wanted.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(w) = wanted {
+        return match bindings.iter().find(|b| b.tonie_id == w) {
+            Some(b) => Ok(b.tonie_id.clone()),
+            // Never write into a cart of a Tonie this user does not own.
+            None => Err(("Unbekannte Figur", "err")),
+        };
+    }
+    match bindings.len() {
+        0 => Err(("Erst eine Figur verbinden", "err")),
+        1 => Ok(bindings[0].tonie_id.clone()),
+        _ => Err(("Bitte eine Figur wählen", "err")),
+    }
+}
+
+/// `POST /artist/{id}/cart` — put one Deezer album into a Tonie's cart.
+///
+/// POST → redirect → GET, so a reload never adds the album twice. Title and
+/// duration come from music-api; when it cannot answer the album is still
+/// added (with the posted title and 0 seconds) instead of failing.
+async fn artist_cart_add(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<ArtistCartForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "artists").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let uid = nav.id;
+
+    let artist_id = match key.trim().parse::<i64>() {
+        Ok(id) => Some(id),
+        Err(_) => artist_id_by_name(&st.pool, &key).await,
+    };
+    let Some(artist_id) = artist_id else {
+        return not_found("Künstler nicht gefunden.");
+    };
+    let back = artist_href(artist_id);
+
+    let album_id = form.album_id.unwrap_or_default().trim().to_string();
+    if album_id.is_empty() {
+        let resp = Redirect::to(&back).into_response();
+        return crate::toast::apply(resp, "Kein Album gewählt.", "err");
+    }
+    let tonie_id = match cart_target(&st, uid, form.tonie_id.as_deref()).await {
+        Ok(id) => id,
+        Err((msg, kind)) => {
+            let resp = Redirect::to(&back).into_response();
+            return crate::toast::apply(resp, msg, kind);
+        }
+    };
+
+    let detail = crate::music_api::deezer_album(&st.cfg, &album_id)
+        .await
+        .ok();
+    let seconds = detail.as_ref().and_then(|a| a.seconds).unwrap_or(0);
+    let cover = detail.as_ref().and_then(|a| a.cover_url.clone());
+    let api_title = detail
+        .map(|a| a.title)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let sent = form.album_title.unwrap_or_default().trim().to_string();
+    let title = if !api_title.is_empty() {
+        api_title
+    } else if !sent.is_empty() {
+        sent
+    } else {
+        album_id.clone()
+    };
+
+    let (msg, kind) = match crate::tonies::cart::add(
+        &st.pool,
+        uid,
+        &tonie_id,
+        &album_id,
+        &title,
+        cover.as_deref(),
+        seconds,
+    )
+    .await
+    {
+        Ok(true) => (format!("„{title}“ in den Korb"), "ok"),
+        Ok(false) => ("Album ist schon im Korb.".to_string(), "err"),
+        Err(e) => (format!("Fehler: {e}"), "err"),
+    };
+    let resp = Redirect::to(&back).into_response();
+    crate::toast::apply(resp, &msg, kind)
 }
 
 #[cfg(test)]

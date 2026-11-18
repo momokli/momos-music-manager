@@ -16,6 +16,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use music_hub::config::Config;
 use music_hub::tonies;
+use music_hub::tonies::AlbumItem;
 use serde_json::{Value, json};
 
 const REFRESH: &str = "refresh-token-xyz";
@@ -135,14 +136,14 @@ async fn spawn_music_api() -> String {
         (
             axum::http::StatusCode::OK,
             Json(json!({
-            "albumId": id,
-            "title": format!("Folge {id}"),
-            "releaseDate": "2026-11-13",
-            "recordType": "album",
-            "coverUrl": "https://cdn.example/459.jpg",
-            "seconds": 200,
-            "tracks": [{"isrc": "A1", "title": "Kapitel 1", "durationMs": 200_000, "position": 1}]
-        })),
+                "albumId": id,
+                "title": format!("Folge {id}"),
+                "releaseDate": "2026-11-13",
+                "recordType": "album",
+                "coverUrl": "https://cdn.example/459.jpg",
+                "seconds": 200,
+                "tracks": [{"isrc": "A1", "title": "Kapitel 1", "durationMs": 200_000, "position": 1}]
+            })),
         )
     };
 
@@ -424,15 +425,12 @@ async fn add_writes_the_basket_row() {
     assert!(toast_kind(resp.headers()).contains("\"kind\":\"ok\""));
     let body = resp.text().await.unwrap();
     assert!(body.contains("Folge 459"), "basket entry rendered");
+    assert!(
+        body.contains("data-cart"),
+        "cart list needs its own hook, the page renders three lists"
+    );
 
-    let binding_id = tonies::get_binding(&app.pool, uid, "ct1")
-        .await
-        .unwrap()
-        .unwrap()
-        .id;
-    let items = tonies::list_album_items(&app.pool, binding_id)
-        .await
-        .unwrap();
+    let items = tonies::cart::list(&app.pool, uid, "ct1").await.unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].album_id, "459");
     assert_eq!(items[0].album_title, "Folge 459");
@@ -448,7 +446,7 @@ async fn add_writes_the_basket_row() {
     .await;
     assert!(toast_kind(resp.headers()).contains("\"kind\":\"err\""));
     assert_eq!(
-        tonies::list_album_items(&app.pool, binding_id)
+        tonies::cart::list(&app.pool, uid, "ct1")
             .await
             .unwrap()
             .len(),
@@ -461,17 +459,13 @@ async fn move_and_remove_keep_the_order() {
     let app = boot(Some("tok")).await;
     let (uid, cookie) = user(&app, "alb-order").await;
     bind_albums(&app, uid, Some(15167501), "basket").await;
-    let binding_id = tonies::get_binding(&app.pool, uid, "ct1")
-        .await
-        .unwrap()
-        .unwrap()
-        .id;
-    tonies::set_album_items(
+    tonies::cart::replace_all(
         &app.pool,
-        binding_id,
+        uid,
+        "ct1",
         &[
-            ("459".to_string(), "Folge 459".to_string(), 200),
-            ("458".to_string(), "Folge 458".to_string(), 200),
+            album_item("459", "Folge 459", 200),
+            album_item("458", "Folge 458", 200),
         ],
     )
     .await
@@ -485,7 +479,7 @@ async fn move_and_remove_keep_the_order() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let ids: Vec<String> = tonies::list_album_items(&app.pool, binding_id)
+    let ids: Vec<String> = tonies::cart::list(&app.pool, uid, "ct1")
         .await
         .unwrap()
         .into_iter()
@@ -511,7 +505,7 @@ async fn move_and_remove_keep_the_order() {
     )
     .await;
     assert!(toast_kind(resp.headers()).contains("\"kind\":\"ok\""));
-    let ids: Vec<String> = tonies::list_album_items(&app.pool, binding_id)
+    let ids: Vec<String> = tonies::cart::list(&app.pool, uid, "ct1")
         .await
         .unwrap()
         .into_iter()
@@ -611,16 +605,12 @@ async fn unresolved_basket_entry_stays_visible() {
     let app = boot(Some("tok")).await;
     let (uid, cookie) = user(&app, "alb-unresolved").await;
     bind_albums(&app, uid, Some(15167501), "basket").await;
-    let binding_id = tonies::get_binding(&app.pool, uid, "ct1")
-        .await
-        .unwrap()
-        .unwrap()
-        .id;
     // Not in the artist catalogue, not in the album cache.
-    tonies::set_album_items(
+    tonies::cart::replace_all(
         &app.pool,
-        binding_id,
-        &[("gone-42".to_string(), "Verschwundene Folge".to_string(), 0)],
+        uid,
+        "ct1",
+        &[album_item("gone-42", "Verschwundene Folge", 0)],
     )
     .await
     .unwrap();
@@ -635,17 +625,13 @@ async fn catalogue_album_is_not_flagged_unresolved() {
     let app = boot(Some("tok")).await;
     let (uid, cookie) = user(&app, "alb-cached").await;
     bind_albums(&app, uid, Some(15167501), "basket").await;
-    let binding_id = tonies::get_binding(&app.pool, uid, "ct1")
-        .await
-        .unwrap()
-        .unwrap()
-        .id;
     // Not in the artist page, but music-api resolves it (the catalogue owns the
     // cache now, the hub keeps none).
-    tonies::set_album_items(
+    tonies::cart::replace_all(
         &app.pool,
-        binding_id,
-        &[("777".to_string(), "Alte Folge".to_string(), 200)],
+        uid,
+        "ct1",
+        &[album_item("777", "Alte Folge", 200)],
     )
     .await
     .unwrap();
@@ -656,6 +642,53 @@ async fn catalogue_album_is_not_flagged_unresolved() {
         !html.contains("nicht auflösbar"),
         "an album music-api resolves must not be flagged"
     );
+}
+
+/// Drag & drop posts an absolute position; the cart order is the chapter order.
+#[tokio::test]
+async fn move_to_reorders_the_cart() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-move-to").await;
+    bind_albums(&app, uid, Some(15167501), "basket").await;
+    tonies::cart::replace_all(
+        &app.pool,
+        uid,
+        "ct1",
+        &[
+            album_item("459", "Folge 459", 200),
+            album_item("458", "Folge 458", 200),
+            album_item("457", "Folge 457", 200),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/move-to",
+        &[("album_id", "457"), ("position", "0")],
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+
+    let ids: Vec<String> = tonies::cart::list(&app.pool, uid, "ct1")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.album_id)
+        .collect();
+    assert_eq!(ids, vec!["457", "459", "458"], "drag & drop order wins");
+
+    // An unknown album is a no-op, never a panic or a 500.
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/move-to",
+        &[("album_id", "nope"), ("position", "1")],
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
 }
 
 #[tokio::test]
@@ -691,3 +724,13 @@ async fn posts_require_session_and_a_binding() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+/// One cart entry (title, seconds) for seeding the cart in tests.
+#[allow(dead_code)]
+fn album_item(album_id: &str, title: &str, seconds: i64) -> AlbumItem {
+    AlbumItem {
+        album_id: album_id.to_string(),
+        album_title: title.to_string(),
+        seconds,
+        position: 0,
+    }
+}

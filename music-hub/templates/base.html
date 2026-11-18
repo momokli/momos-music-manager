@@ -1319,7 +1319,9 @@
               <li><a href="/backpacks">Backpacks</a></li>
               <li><a href="/listening">Gehört</a></li>
               <li><a href="/revisit">Wiedervorlage</a></li>
+              {% if nav.has_tonies %}
               <li><a href="/tonies" {% if nav.active == "tonies" %}aria-current="page"{% endif %}>Tonies</a></li>
+              {% endif %}
               <li><a href="/collectives">Collectives</a></li>
             </ul>
           </details>

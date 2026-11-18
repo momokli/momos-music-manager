@@ -1,5 +1,77 @@
 {% extends "base.html" %} {% block title %}{{ name }} — Spelunke{% endblock %} {% block
 content %}
+<style>
+    /* U1 (#601): Deezer album grid — same terminal look as the tonie picker. */
+    .hub-view-switch {
+        display: flex;
+        gap: 0.35rem;
+        flex-wrap: wrap;
+        margin-bottom: 0.7rem;
+    }
+    .artist-album-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+        gap: 0.5rem;
+    }
+    .artist-album-card {
+        margin: 0;
+        padding: 0.4rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+    }
+    .artist-album-card form {
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+    .artist-album-card button {
+        margin: 0;
+        padding: 0.2rem 0.5rem;
+        font-size: 0.72rem;
+    }
+    .artist-album-cover {
+        width: 100%;
+        aspect-ratio: 1;
+        object-fit: cover;
+        border-radius: 0.35rem;
+        background: #161b22;
+        border: 1px solid #30363d;
+    }
+    .artist-album-cover-empty {
+        display: grid;
+        place-items: center;
+        font-size: 1.4rem;
+        color: var(--pico-primary);
+    }
+    .artist-album-title {
+        margin: 0;
+        font-size: 0.76rem;
+        line-height: 1.2;
+    }
+    .artist-album-date {
+        margin: 0;
+        font-size: 0.68rem;
+        opacity: 0.7;
+    }
+    .artist-album-badges {
+        margin: 0;
+        display: flex;
+        gap: 0.25rem;
+        flex-wrap: wrap;
+    }
+    .artist-album-badge {
+        font-size: 0.64rem;
+        padding: 0.02rem 0.3rem;
+        border: 1px solid #30363d;
+        border-radius: 0.2rem;
+    }
+    .artist-album-badge-seen {
+        color: var(--pico-primary);
+        border-color: var(--pico-primary);
+    }
+</style>
 <nav class="hub-crumbs" aria-label="Brotkrumen">
     <ol>
         <li><a href="/">Übersicht</a></li>
@@ -23,6 +95,39 @@ content %}
 <p class="hub-muted">
     {{ track_count }} Tracks · {{ total_plays }} Plays · {{ user_count }} Nutzer mit Plays
 </p>
+
+<nav class="hub-view-switch" aria-label="Ansicht">
+    <a href="{{ self_href }}" class="hub-chip {% if albums_on %}hub-chip-on{% endif %}">Alben</a>
+    <a href="{{ self_href }}?view=stats" class="hub-chip {% if stats_on %}hub-chip-on{% endif %}">Statistik</a>
+</nav>
+
+<!-- U1 (#601): Deezer albums with covers, badges and the cart action -->
+{% if albums_on %}
+<section aria-label="Alben" style="margin-bottom: 0.7rem">
+    <h2>Alben</h2>
+    {% if !albums_message.is_empty() %}
+    <p class="hub-muted">{{ albums_message }}</p>
+    {% endif %}
+    {% if !deezer_albums.is_empty() %}
+    <div class="artist-album-grid">
+        {% for a in deezer_albums %}
+        {% include "_partials/artist_albums.html" %}
+        {% endfor %}
+    </div>
+    {% else if albums_message.is_empty() %}
+    <p class="hub-empty">Keine Alben gefunden.</p>
+    {% endif %}
+</section>
+{% endif %}
+
+<!-- AR2–AR6: statistics. Expanded for `?view=stats`; otherwise they stay in
+     the DOM, collapsed behind the album view (the pre-#601 view, one click away). -->
+{% if stats_on %}
+<details open class="hub-stats">
+{% else %}
+<details class="hub-stats">
+{% endif %}
+<summary>Statistik</summary>
 
 <!-- AR2: most played tracks per user -->
 <section aria-label="Meistgespielt" style="margin-bottom: 0.7rem">
@@ -486,4 +591,9 @@ content %}
     </div>
     {% endif %}
 </section>
+{% if stats_on %}
+</details>
+{% else %}
+</details>
+{% endif %}
 {% endblock %}

@@ -251,9 +251,10 @@ the toast header still fires. #}
         {% if basket.is_empty() %}
         <p class="tonies-hint">Noch keine Alben im Korb.</p>
         {% else %}
-        <ul class="tonies-list">
+        <ul class="tonies-list" data-cart>
             {% for b in basket %}
-            <li>
+            <li class="tonies-drop" draggable="true" data-album="{{ b.album_id }}">
+                <span class="tonies-drag" aria-hidden="true">&#8942;&#8942;</span>
                 <span>{{ b.title }}</span>
                 {% if b.unresolved %}
                 <span class="tonies-badge tonies-badge-err">nicht auflösbar</span>
@@ -324,4 +325,53 @@ the toast header still fires. #}
         {% endif %}
     </section>
 </div>
+<script>
+    // Drag & drop in the cart; the up/down buttons stay the primary path
+    // (keyboard, touch, no-JS), this only adds "grab and drop".
+    (function () {
+        var list = document.querySelector(".tonies-list[data-cart]");
+        if (!list) return;
+        var dragged = null;
+        list.addEventListener("dragstart", function (e) {
+            var li = e.target.closest("li[data-album]");
+            if (!li) return;
+            dragged = li;
+            li.classList.add("tonies-dragging");
+            e.dataTransfer.effectAllowed = "move";
+        });
+        list.addEventListener("dragend", function () {
+            if (dragged) dragged.classList.remove("tonies-dragging");
+            dragged = null;
+        });
+        list.addEventListener("dragover", function (e) {
+            e.preventDefault();
+            var li = e.target.closest("li[data-album]");
+            if (!li || !dragged || li === dragged) return;
+            var rect = li.getBoundingClientRect();
+            var after = e.clientY > rect.top + rect.height / 2;
+            list.insertBefore(dragged, after ? li.nextSibling : li);
+        });
+        list.addEventListener("drop", function (e) {
+            e.preventDefault();
+            if (!dragged) return;
+            var position = Array.prototype.indexOf.call(
+                list.querySelectorAll("li[data-album]"),
+                dragged
+            );
+            var body = new URLSearchParams();
+            body.set("album_id", dragged.getAttribute("data-album"));
+            body.set("position", String(position));
+            fetch(location.pathname.replace(/\/albums$/, "/albums/move-to"), {
+                method: "POST",
+                headers: { "content-type": "application/x-www-form-urlencoded" },
+                body: body.toString(),
+                credentials: "same-origin"
+            }).then(function () { location.reload(); });
+        });
+    })();
+</script>
+<style>
+    .tonies-dragging { opacity: 0.45; }
+    .tonies-drag { cursor: grab; opacity: 0.6; margin-right: 0.3rem; }
+</style>
 {% endblock %}
