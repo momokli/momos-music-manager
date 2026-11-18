@@ -729,6 +729,57 @@ async fn set_likes_error(pool: &SqlitePool, user_id: i64, msg: &str) -> Result<(
     Ok(())
 }
 
+// ── on-demand playlist refresh ─────────────────────────────────────────────
+
+/// Refresh one playlist's items right now (the `SYNC` button on `/tonies`).
+///
+/// Same fetch+store path as [`playlist_jobs`], but for exactly one playlist
+/// and without the backoff dance: the user is waiting, so a 429/403 is
+/// reported as an error instead of being retried silently.
+pub async fn refresh_playlist_items(
+    pool: &SqlitePool,
+    cfg: &Config,
+    user_id: i64,
+    local_playlist_id: i64,
+) -> Result<usize> {
+    let remote: Option<String> = sqlx::query_scalar(
+        "SELECT playlist_id FROM hub_playlists
+          WHERE id = ?1 AND user_id = ?2 AND service = 'spotify'",
+    )
+    .bind(local_playlist_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    let remote = remote.ok_or_else(|| anyhow::anyhow!("Playlist nicht gefunden"))?;
+
+    let token = ingest::access_token(pool, cfg, user_id).await?;
+    let url = spotify::api_url(
+        &cfg.spotify_api_base,
+        &format!("/playlists/{remote}/items?limit=50"),
+    );
+    let items = match paged(&token, &url).await? {
+        Outcome::Ok(items) => items,
+        Outcome::Forbidden => anyhow::bail!("Spotify 403 — kein Zugriff auf diese Playlist"),
+        Outcome::RateLimited { .. } => anyhow::bail!("Spotify 429 — gleich nochmal versuchen"),
+        Outcome::Quota => anyhow::bail!("Spotify-Tagesquote erreicht"),
+        Outcome::Error(m) => anyhow::bail!("Spotify-Fehler: {m}"),
+    };
+    let n = ingest::store_playlist_items(pool, cfg, local_playlist_id, &items).await?;
+    let now = now_iso();
+    sqlx::query(
+        "UPDATE hub_playlists
+            SET items_available = 1, fetched_at = ?2,
+                last_synced_snapshot = snapshot_id, fetch_status = 'done',
+                fetch_error = NULL
+          WHERE id = ?1",
+    )
+    .bind(local_playlist_id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(n)
+}
+
 // ── playlist items ──────────────────────────────────────────────────────────
 
 pub async fn playlist_jobs(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
