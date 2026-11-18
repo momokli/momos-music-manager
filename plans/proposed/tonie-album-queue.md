@@ -179,6 +179,78 @@ der Startpunkt. User ohne verbundenes Tonie-Konto sehen weder Tonies noch Korb.
 | U4 | Verlauf pro Figur und global | #604 |
 | U5 | 128k-Ziel für Tonie-Orders in music-api | #605 |
 
+## Katalog und Qualitaetsstufen (beschlossen 2026-11-18)
+
+Der Konflikt: heute gibt es **eine** Erwerbsstrasse — `POST /orders` laedt in
+voller Qualitaet (`formats: flac,320,128`) und analysiert alles auf BPM/Key.
+Fuer einen Tonie ist das ~10x zu viel Speicher und komplett unnoetige Analyse,
+aber dieselbe ISRC kann morgen in der DJ-Bibliothek landen.
+
+### Zwei Achsen, getrennt halten
+
+| Achse | Bedeutung |
+| --- | --- |
+| **Katalog** | „was gibt es?" — Deezer-Artists/Alben/Tracks, gecacht, TTL |
+| **Vault** | „was habe ich?" — ISRC → Datei(en) + Analyse |
+| **Zweck** | `library` (DJ, Spotify-getrieben, BPM/Key) vs. `toys` (Tonies, Deezer-getrieben) |
+| **Qualitaet** | Folge des Zwecks: `library → flac + Analyse`, `toys → mp3-128, keine Analyse` |
+
+### Katalog gehoert music-api
+
+```sql
+catalogue_artists(id, name, cover_url, fetched_at)
+catalogue_albums(id, artist_id, title, release_date, record_type, cover_url,
+                 seconds, tracks_fetched_at, fetched_at)
+catalogue_tracks(album_id, position, isrc, title, duration_ms)
+```
+
+- TTL: Artist 24 h, Album-Tracks 7 Tage.
+- **Nur** music-api schreibt (einziger Deezer-Client mit Rate-Limit-Handling).
+- Hub liest ueber die `/deezer/*`-Endpunkte; `hub_deezer_albums` (062) wird
+  stillgelegt (Tabelle bleibt liegen, additive Regel).
+- Kein Vorcrawl der Diskografie: Metadaten fuer das, was angeschaut wird;
+  Tracklisten nur fuer Alben, die in Korb oder Binding landen.
+
+### Vault: Qualitaetsstufe + Zweck
+
+```sql
+vault_tracks: ... , quality_tier TEXT,   -- 'mp3-128' | 'mp3-320' | 'flac'
+                analyzed_at TEXT
+```
+
+`POST /orders` bekommt zwei optionale Felder:
+
+```json
+{ "items": [{"isrc": "CH7812690465"}], "priority": 5,
+  "intent": "toys", "target": "mp3-128" }
+```
+
+- `intent: toys` → nur den 128k-Stream holen, keine Analyse. 20-min-Folge: ~19 MB
+  statt ~120 MB FLAC.
+- `intent: library` → wie heute.
+- Default ohne Felder = heutiges Verhalten (kein Breaking Change).
+
+### Upgrade statt Duplikat
+
+Wird eine ISRC spaeter fuer die Bibliothek gebraucht, ordert der Hub sie mit
+`target: flac, intent: library`; music-api sieht „nur 128k vorhanden", laedt
+hoeher, ergaenzt 320/flac und analysiert **dann**. Umgekehrt gilt: was einmal
+FLAC ist, bleibt FLAC — ein Tonie-Order darauf laedt nichts nach.
+
+### Konsequenz fuer die Reihenfolge
+
+U5 ist damit **Voraussetzung** fuer U1/U2, nicht Nacharbeit: ohne
+`intent`/`target` gibt es keinen sauberen Begriff davon, welche ISRC „nur Kind"
+ist. Neue Slices:
+
+| Slice | Inhalt | Issue |
+| --- | --- | --- |
+| U0a | Katalog-Store in music-api (Tabellen, TTL, Write-through, Lese-Endpunkte) | #608 |
+| U0b | `intent`/`target` in `/orders`, `quality_tier`, Upgrade-Pfad, Analyse-Skip fuer toys | #609 |
+| U0c | Hub liest Katalog ueber music-api, `hub_deezer_albums` stilllegen | #610 |
+
+Danach U1–U4 wie gehabt.
+
 ## Offene Entscheidungen
 
 1. **Dauer pro Album**: die Artist-Album-Liste liefert kein `nb_tracks`/`duration`.
@@ -192,5 +264,9 @@ der Startpunkt. User ohne verbundenes Tonie-Konto sehen weder Tonies noch Korb.
 5. **Korb-Scope**: entschieden — persistent pro (User, Figur).
 6. **Album-Identitaet**: entschieden — Tonie-Alben sind Deezer-Alben; die
    Hub-Album-Seite bleibt davon unberuehrt.
-7. **128k fuer Tonie-Orders**: offen (U5). Heute laedt music-api weiter FLAC und
-   transkodiert; `binding.format` wirkt nur beim Download Vault → Tonie.
+7. **128k fuer Tonie-Orders**: entschieden — `intent`/`target` in `/orders` (U0b).
+   Heute laedt music-api weiter FLAC und transkodiert; `binding.format` wirkt nur
+   beim Download Vault → Tonie.
+8. **Katalog-Ort**: entschieden — music-api (U0a), der Hub liest nur noch.
+9. **Upgrade-Regel**: entschieden — ein hoeherer `target` loest ein Upgrade aus,
+   nie ein Duplikat; Analyse laeuft erst beim Upgrade auf `library`.
