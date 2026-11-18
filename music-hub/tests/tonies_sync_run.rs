@@ -118,8 +118,10 @@ async fn file_handler(State(m): State<Mock>) -> Json<Value> {
     m.event("file");
     Json(json!({
         "fileId": format!("file-{n}"),
-        "url": format!("{}/s3/upload", m.base),
-        "fields": {"key": format!("k{n}"), "policy": "p"}
+        "request": {
+            "url": format!("{}/s3/upload", m.base),
+            "fields": {"key": format!("k{n}"), "policy": "p"}
+        }
     }))
 }
 
@@ -177,7 +179,7 @@ async fn mock_all() -> (String, Mock) {
             post(token_handler),
         )
         .route("/v2/file", post(file_handler))
-        .route("/s3/upload", put(put_handler))
+        .route("/s3/upload", post(put_handler))
         .route(
             "/v2/households/{hid}/creativetonies/{ctid}/chapters",
             post(chapter_handler),
