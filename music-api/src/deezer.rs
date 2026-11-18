@@ -205,6 +205,9 @@ pub async fn lookup_isrc(http: &reqwest::Client, base: &str, isrc: &str) -> anyh
 /// `limit`; a larger request is clamped instead of rejected.
 pub const METADATA_MAX_LIMIT: usize = 100;
 
+/// Bound on tracklist pages fetched to backfill a missing ISRC.
+const ALBUM_TRACKLIST_MAX_PAGES: usize = 5;
+
 /// Why a Deezer metadata call produced no usable answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetaError {
@@ -331,8 +334,11 @@ struct RawAlbumTracks {
     data: Vec<RawAlbumTrack>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct RawAlbumTrack {
+    /// Deezer track id — used to backfill the ISRC (see `merge_isrcs`).
+    #[serde(default)]
+    id: Option<i64>,
     #[serde(default)]
     isrc: Option<String>,
     #[serde(default)]
@@ -437,21 +443,34 @@ pub fn map_artist_albums(body: &serde_json::Value) -> Result<ArtistAlbumPage, Me
 /// Map an `/album/{id}` payload into the hub response. Pure. Tracks are sorted
 /// by `track_position`; a missing position sorts last.
 pub fn map_album_detail(body: &serde_json::Value) -> Result<AlbumDetail, MetaError> {
+    let raw = parse_raw_album(body)?;
+    let raw_tracks = raw.tracks.as_ref().map(|t| t.data.clone()).unwrap_or_default();
+    album_detail_from_raw(&raw, &raw_tracks)
+}
+
+/// Parse a `/album/{id}` payload, mapping Deezer's error object / id-less
+/// response to [`MetaError::NotFound`].
+fn parse_raw_album(body: &serde_json::Value) -> Result<RawAlbum, MetaError> {
     if let Some(err) = deezer_error(body) {
         return Err(err);
     }
     let raw: RawAlbum = serde_json::from_value(body.clone()).map_err(|_| malformed("album"))?;
+    if raw.id.filter(|id| *id > 0).is_none() {
+        return Err(MetaError::NotFound);
+    }
+    Ok(raw)
+}
+
+/// Build the hub-facing album from already-parsed pieces.
+fn album_detail_from_raw(
+    raw: &RawAlbum,
+    raw_tracks: &[RawAlbumTrack],
+) -> Result<AlbumDetail, MetaError> {
     let album_id = raw
         .id
         .filter(|id| *id > 0)
         .map(|id| id.to_string())
         .ok_or(MetaError::NotFound)?;
-
-    let raw_tracks = raw
-        .tracks
-        .as_ref()
-        .map(|t| t.data.as_slice())
-        .unwrap_or(&[]);
 
     let mut tracks: Vec<AlbumTrack> = raw_tracks
         .iter()
@@ -559,7 +578,60 @@ pub async fn album_detail(
 ) -> Result<AlbumDetail, MetaError> {
     let url = format!("{base}/album/{album_id}");
     let body = get_json(http, &url, &[]).await?;
-    map_album_detail(&body)
+    let raw = parse_raw_album(&body)?;
+    let mut raw_tracks = raw.tracks.as_ref().map(|t| t.data.clone()).unwrap_or_default();
+
+    // `/album/{id}` omits the ISRCs of its tracks; only `/album/{id}/tracks`
+    // carries them. Without this backfill every track would look like it has no
+    // ISRC and the hub would skip the whole album.
+    if raw_tracks.iter().any(|t| t.isrc.is_none()) {
+        let mut next = format!("{base}/album/{album_id}/tracks");
+        for _ in 0..ALBUM_TRACKLIST_MAX_PAGES {
+            // Best effort: a failing tracklist must not break the album — the
+            // hub handles tracks without ISRC by skipping that album.
+            let page = match get_json(http, &next, &[]).await {
+                Ok(page) => page,
+                Err(_) => break,
+            };
+            if let Ok(list) = serde_json::from_value::<RawAlbumTracks>(page.clone()) {
+                merge_isrcs(&mut raw_tracks, &list.data);
+            }
+            match page
+                .get("next")
+                .and_then(|n| n.as_str())
+                .filter(|n| !n.is_empty())
+            {
+                Some(u) => next = u.to_string(),
+                None => break,
+            }
+            if raw_tracks.iter().all(|t| t.isrc.is_some()) {
+                break;
+            }
+        }
+    }
+
+    album_detail_from_raw(&raw, &raw_tracks)
+}
+
+/// Fill missing ISRCs from the album's tracklist, matching by Deezer track id
+/// first and by `track_position` second.
+fn merge_isrcs(local: &mut [RawAlbumTrack], incoming: &[RawAlbumTrack]) {
+    for track in local.iter_mut() {
+        if track.isrc.is_some() {
+            continue;
+        }
+        let found = track
+            .id
+            .and_then(|id| incoming.iter().find(|i| i.id == Some(id)))
+            .or_else(|| {
+                track
+                    .track_position
+                    .and_then(|p| incoming.iter().find(|i| i.track_position == Some(p)))
+            });
+        if let Some(hit) = found {
+            track.isrc = hit.isrc.clone();
+        }
+    }
 }
 
 /// `GET {base}/search/artist?q=&limit=` — artists matching a free-text query.
@@ -812,6 +884,55 @@ mod tests {
         assert_eq!(wire["tracks"][0]["durationMs"], 98_000);
         assert_eq!(wire["tracks"][0]["position"], 1);
         assert!(wire["tracks"][2]["isrc"].is_null());
+    }
+
+    #[test]
+    fn merge_isrcs_matches_by_id_then_by_position() {
+        let mut local = vec![
+            RawAlbumTrack {
+                id: Some(10),
+                isrc: None,
+                title: "a".into(),
+                duration: 1,
+                track_position: Some(1),
+            },
+            RawAlbumTrack {
+                id: Some(11),
+                isrc: None,
+                title: "b".into(),
+                duration: 1,
+                track_position: Some(2),
+            },
+            RawAlbumTrack {
+                id: Some(12),
+                isrc: Some("KEEP".into()),
+                title: "c".into(),
+                duration: 1,
+                track_position: Some(3),
+            },
+        ];
+        let incoming = vec![
+            RawAlbumTrack {
+                id: Some(11),
+                isrc: Some("BY_ID".into()),
+                title: "b".into(),
+                duration: 1,
+                track_position: Some(2),
+            },
+            RawAlbumTrack {
+                id: Some(99),
+                isrc: Some("BY_POS".into()),
+                title: "a".into(),
+                duration: 1,
+                track_position: Some(1),
+            },
+        ];
+
+        merge_isrcs(&mut local, &incoming);
+
+        assert_eq!(local[0].isrc.as_deref(), Some("BY_POS"));
+        assert_eq!(local[1].isrc.as_deref(), Some("BY_ID"));
+        assert_eq!(local[2].isrc.as_deref(), Some("KEEP"));
     }
 
     #[test]
