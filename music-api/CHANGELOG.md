@@ -8,7 +8,7 @@ Versioning: per-component tag line `api-v<x.y.z>` (see
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-11-19
+## [0.7.0] - 2026-11-19
 
 Native Deezer download is the only path — the deemix sidecar is removed
 entirely (#518).
