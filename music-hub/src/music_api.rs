@@ -83,6 +83,119 @@ fn token(cfg: &Config) -> Result<&str> {
         .context("MUSIC_API_TOKEN is not set")
 }
 
+// ── Deezer metadata (album sources) ─────────────────────────────────────────
+
+/// One album as listed for an artist (`GET /deezer/artist/{id}/albums`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeezerAlbumSummary {
+    pub album_id: String,
+    pub title: String,
+    pub release_date: Option<String>,
+    pub record_type: Option<String>,
+    pub cover_url: Option<String>,
+}
+
+/// One page of an artist's albums.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeezerArtistAlbums {
+    pub albums: Vec<DeezerAlbumSummary>,
+    pub total: Option<i64>,
+    pub next: Option<String>,
+}
+
+/// One track of a Deezer album.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeezerAlbumTrack {
+    pub isrc: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub duration_ms: i64,
+    pub position: Option<i64>,
+}
+
+/// Album metadata plus its tracklist.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeezerAlbum {
+    pub album_id: String,
+    pub title: String,
+    pub release_date: Option<String>,
+    pub record_type: Option<String>,
+    pub cover_url: Option<String>,
+    pub seconds: Option<i64>,
+    #[serde(default)]
+    pub tracks: Vec<DeezerAlbumTrack>,
+}
+
+/// One artist search hit.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeezerArtistHit {
+    pub artist_id: String,
+    pub name: String,
+    pub cover_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct DeezerArtistHits {
+    #[serde(default)]
+    artists: Vec<DeezerArtistHit>,
+}
+
+/// Authenticated GET against music-api's Deezer metadata routes.
+async fn deezer_get<T: serde::de::DeserializeOwned>(cfg: &Config, path: &str) -> Result<T> {
+    let url = format!("{}{}", cfg.music_api_base, path);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(token(cfg)?)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("music-api antwortete {} fuer {path}", resp.status());
+    }
+    resp.json().await.with_context(|| format!("GET {url}"))
+}
+
+/// `GET /deezer/artist/{id}/albums` — one page of an artist's albums.
+pub async fn deezer_artist_albums(
+    cfg: &Config,
+    artist_id: &str,
+    limit: u32,
+    index: u32,
+) -> Result<DeezerArtistAlbums> {
+    deezer_get(
+        cfg,
+        &format!("/deezer/artist/{artist_id}/albums?limit={limit}&index={index}"),
+    )
+    .await
+}
+
+/// `GET /deezer/album/{id}` — metadata plus tracklist (carries the ISRCs).
+pub async fn deezer_album(cfg: &Config, album_id: &str) -> Result<DeezerAlbum> {
+    deezer_get(cfg, &format!("/deezer/album/{}", urlencoding::encode(album_id))).await
+}
+
+/// `GET /deezer/search/artist?q=` — name search for the picker.
+pub async fn deezer_search_artist(
+    cfg: &Config,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<DeezerArtistHit>> {
+    let hits: DeezerArtistHits = deezer_get(
+        cfg,
+        &format!(
+            "/deezer/search/artist?q={}&limit={limit}",
+            urlencoding::encode(query)
+        ),
+    )
+    .await?;
+    Ok(hits.artists)
+}
+
 /// `GET /isrc/{isrc}` — current state of one ISRC.
 pub async fn status(cfg: &Config, isrc: &str) -> Result<IsrcState> {
     let url = format!("{}/isrc/{}", cfg.music_api_base, urlencoding::encode(isrc));

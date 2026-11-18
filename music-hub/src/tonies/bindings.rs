@@ -29,6 +29,27 @@ pub const ORDER_NEWEST: &str = "newest";
 /// tracks were added (oldest first) - what serialised audio dramas want.
 pub const ORDER_NEWEST_CHRONO: &str = "newest_chrono";
 
+/// Album order for [`SOURCE_ALBUMS`]: newest release first.
+pub const ALBUM_MODE_NEWEST: &str = "newest";
+/// Oldest first - "start at episode 1 and work forward".
+pub const ALBUM_MODE_OLDEST: &str = "oldest";
+/// Explicit album list from `hub_tonie_album_items`.
+pub const ALBUM_MODE_BASKET: &str = "basket";
+
+/// Whether `m` is a supported album mode.
+pub fn valid_album_mode(m: &str) -> bool {
+    matches!(m, ALBUM_MODE_NEWEST | ALBUM_MODE_OLDEST | ALBUM_MODE_BASKET)
+}
+
+/// German label for an album mode; unknown values fall back to `newest`.
+pub fn album_mode_label(mode: &str) -> &'static str {
+    match mode {
+        ALBUM_MODE_OLDEST => "Aelteste zuerst",
+        ALBUM_MODE_BASKET => "Eigene Auswahl",
+        _ => "Neueste zuerst",
+    }
+}
+
 /// Whether `o` is a supported track order.
 pub fn valid_order_by(o: &str) -> bool {
     matches!(o, ORDER_PLAYLIST | ORDER_NEWEST | ORDER_NEWEST_CHRONO)
@@ -60,10 +81,18 @@ pub const SOURCE_PLAYLIST: &str = "playlist";
 pub const SOURCE_BACKPACK: &str = "backpack";
 /// A tag (its resolved tracks) feeds the Tonie.
 pub const SOURCE_TAG: &str = "tag";
+/// A Deezer artist's albums feed the Tonie.
+///
+/// ISRC is edition-bound, so a playlist cannot reach chapters that exist
+/// under a different cut (`plans/proposed/tonie-album-queue.md`).
+pub const SOURCE_ALBUMS: &str = "albums";
 
 /// Whether `k` is a supported source kind (`playlist` | `backpack` | `tag`).
 pub fn valid_source_kind(k: &str) -> bool {
-    matches!(k, SOURCE_PLAYLIST | SOURCE_BACKPACK | SOURCE_TAG)
+    matches!(
+        k,
+        SOURCE_PLAYLIST | SOURCE_BACKPACK | SOURCE_TAG | SOURCE_ALBUMS
+    )
 }
 
 /// German display label for a source kind; unknown kinds fall back to the raw
@@ -73,6 +102,7 @@ pub fn source_kind_label(kind: &str) -> &str {
         SOURCE_PLAYLIST => "Playlist",
         SOURCE_BACKPACK => "Backpack",
         SOURCE_TAG => "Tag",
+        SOURCE_ALBUMS => "Alben",
         other => other,
     }
 }
@@ -91,6 +121,8 @@ pub struct Binding {
     /// Track order for playlist sources (`playlist` | `newest` |
     /// `newest_chrono`). Ignored for tag/backpack sources.
     pub order_by: String,
+    /// Album order for album sources (`newest` | `oldest` | `basket`).
+    pub album_mode: String,
     pub dirty_since: Option<String>,
     pub last_sync_at: Option<String>,
     pub last_sync_status: Option<String>,
@@ -107,6 +139,7 @@ fn row_to_binding(r: sqlx::sqlite::SqliteRow) -> Binding {
         cap_seconds: r.get("cap_seconds"),
         mode: r.get("mode"),
         order_by: r.get("order_by"),
+        album_mode: r.get("album_mode"),
         dirty_since: r.get("dirty_since"),
         last_sync_at: r.get("last_sync_at"),
         last_sync_status: r.get("last_sync_status"),
@@ -114,7 +147,7 @@ fn row_to_binding(r: sqlx::sqlite::SqliteRow) -> Binding {
 }
 
 const SELECT_COLS: &str = "id, tonie_id, tonie_name, source_kind, source_id, format, \
-     cap_seconds, mode, order_by, dirty_since, last_sync_at, last_sync_status";
+     cap_seconds, mode, order_by, album_mode, dirty_since, last_sync_at, last_sync_status";
 
 /// All bindings owned by `user_id`, ordered by Tonie id.
 pub async fn list_bindings(pool: &SqlitePool, user_id: i64) -> Result<Vec<Binding>> {
@@ -212,6 +245,140 @@ pub async fn set_binding_order(
     .await
     .context("Tonies-Reihenfolge konnte nicht gespeichert werden")?;
     Ok(res.rows_affected() > 0)
+}
+
+/// Store the album order of one binding (`newest` | `oldest` | `basket`).
+pub async fn set_binding_album_mode(
+    pool: &SqlitePool,
+    user_id: i64,
+    tonie_id: &str,
+    album_mode: &str,
+) -> Result<bool> {
+    let res = sqlx::query(
+        "UPDATE hub_tonie_bindings SET album_mode = ?3, updated_at = ?4
+          WHERE user_id = ?1 AND tonie_id = ?2",
+    )
+    .bind(user_id)
+    .bind(tonie_id)
+    .bind(album_mode)
+    .bind(now_iso())
+    .execute(pool)
+    .await
+    .context("Tonie-Album-Reihenfolge konnte nicht gespeichert werden")?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// One album in a binding's basket.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AlbumItem {
+    pub album_id: String,
+    pub album_title: String,
+    pub seconds: i64,
+    pub position: i64,
+}
+
+/// One album the user already had on a tonie.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SeenAlbum {
+    pub album_id: String,
+    pub album_title: String,
+    pub last_used_at: String,
+}
+
+/// The basket of one binding, in user order.
+pub async fn list_album_items(pool: &SqlitePool, binding_id: i64) -> Result<Vec<AlbumItem>> {
+    let rows = sqlx::query(
+        "SELECT album_id, IFNULL(album_title, '') AS album_title,
+                IFNULL(seconds, 0) AS seconds, position
+           FROM hub_tonie_album_items
+          WHERE binding_id = ?1
+          ORDER BY position, id",
+    )
+    .bind(binding_id)
+    .fetch_all(pool)
+    .await
+    .context("Album-Warenkorb konnte nicht gelesen werden")?;
+    Ok(rows
+        .into_iter()
+        .map(|r| AlbumItem {
+            album_id: r.get("album_id"),
+            album_title: r.get("album_title"),
+            seconds: r.get("seconds"),
+            position: r.get("position"),
+        })
+        .collect())
+}
+
+/// Replace a binding's basket. `items` is `(album_id, title, seconds)` in
+/// the desired order; duplicates are dropped (first wins).
+pub async fn set_album_items(
+    pool: &SqlitePool,
+    binding_id: i64,
+    items: &[(String, String, i64)],
+) -> Result<()> {
+    let ts = now_iso();
+    sqlx::query("DELETE FROM hub_tonie_album_items WHERE binding_id = ?1")
+        .bind(binding_id)
+        .execute(pool)
+        .await
+        .context("Album-Warenkorb konnte nicht geleert werden")?;
+    for (position, (album_id, title, seconds)) in items.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO hub_tonie_album_items
+                 (binding_id, position, album_id, album_title, seconds, added_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(binding_id, album_id) DO NOTHING",
+        )
+        .bind(binding_id)
+        .bind(position as i64)
+        .bind(album_id)
+        .bind(title)
+        .bind(seconds)
+        .bind(&ts)
+        .execute(pool)
+        .await
+        .context("Album-Warenkorb konnte nicht geschrieben werden")?;
+    }
+    Ok(())
+}
+
+/// Albums this user has already listened to, newest first.
+pub async fn list_seen_albums(
+    pool: &SqlitePool,
+    user_id: i64,
+    limit: i64,
+) -> Result<Vec<SeenAlbum>> {
+    let rows = sqlx::query(
+        "SELECT album_id, IFNULL(album_title, '') AS album_title, last_used_at
+           FROM hub_tonie_albums_seen
+          WHERE user_id = ?1
+          ORDER BY last_used_at DESC
+          LIMIT ?2",
+    )
+    .bind(user_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("Tonie-Album-Ledger konnte nicht gelesen werden")?;
+    Ok(rows
+        .into_iter()
+        .map(|r| SeenAlbum {
+            album_id: r.get("album_id"),
+            album_title: r.get("album_title"),
+            last_used_at: r.get("last_used_at"),
+        })
+        .collect())
+}
+
+/// Drop one album from the listened ledger ("unlistened").
+pub async fn unlisten_album(pool: &SqlitePool, user_id: i64, album_id: &str) -> Result<()> {
+    sqlx::query("DELETE FROM hub_tonie_albums_seen WHERE user_id = ?1 AND album_id = ?2")
+        .bind(user_id)
+        .bind(album_id)
+        .execute(pool)
+        .await
+        .context("Album konnte nicht zurueckgesetzt werden")?;
+    Ok(())
 }
 
 /// Remove `user_id`'s binding for `tonie_id`. No-op when it does not exist.

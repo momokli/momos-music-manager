@@ -80,6 +80,7 @@ pub fn reason_str(r: SkipReason) -> &'static str {
         SkipReason::NoIsrc => "no_isrc",
         SkipReason::DuplicateIsrc => "duplicate_isrc",
         SkipReason::CapReached => "cap_reached",
+        SkipReason::AlbumNotReady => "album_not_ready",
     }
 }
 
@@ -90,6 +91,7 @@ pub fn reason_label(reason: &str) -> &'static str {
         "no_isrc" => "ohne ISRC",
         "duplicate_isrc" => "doppelt",
         "cap_reached" => "passten nicht mehr",
+        "album_not_ready" => "Album noch nicht im Vault",
         _ => "übersprungen",
     }
 }
@@ -662,28 +664,66 @@ pub async fn execute_binding(
         },
     };
 
-    let desired = match super::sync::desired_for_source(
-        pool,
-        uid,
-        &binding.source_kind,
-        binding.source_id,
-        &binding.order_by,
-    )
-    .await
-    {
-        Ok(d) => d,
-        Err(e) => return fail(format!("Quelle konnte nicht aufgelöst werden: {e}")),
+    // Two planners: an album source fits whole Deezer albums (ISRC is
+    // edition-bound, so a playlist can never reach those chapters),
+    // everything else fits tracks from the hub tables.
+    let album_source = binding.source_kind == super::bindings::SOURCE_ALBUMS;
+    let mut used_albums: Vec<super::albums::AlbumPlan> = Vec::new();
+    let skipped_albums: Vec<super::sync::SkippedTrack> = Vec::new();
+    let (desired, ready) = if album_source {
+        let albums = match super::albums::resolve(pool, cfg, uid, binding).await {
+            Ok(a) => a,
+            Err(e) => return fail(format!("Alben konnten nicht geladen werden: {e}")),
+        };
+        if albums.is_empty() {
+            return fail("Keine Alben für diese Quelle gefunden".to_string());
+        }
+        let isrcs: Vec<String> = albums
+            .iter()
+            .flat_map(|a| a.tracks.iter())
+            .filter_map(|t| t.isrc.clone())
+            .collect();
+        let ready = readiness(cfg, isrcs).await;
+        let fit = super::albums::fit_albums(albums, binding.cap_seconds, |isrc| {
+            ready.contains(isrc)
+        });
+        if fit.albums.is_empty() {
+            return fail(
+                "Kein ganzes Album passt in die verbleibende Kapazität".to_string(),
+            );
+        }
+        let desired: Vec<super::sync::DesiredTrack> = fit
+            .albums
+            .iter()
+            .flat_map(|a| a.tracks.iter().cloned())
+            .collect();
+        used_albums = fit.albums;
+        (desired, ready)
+    } else {
+        let desired = match super::sync::desired_for_source(
+            pool,
+            uid,
+            &binding.source_kind,
+            binding.source_id,
+            &binding.order_by,
+        )
+        .await
+        {
+            Ok(d) => d,
+            Err(e) => return fail(format!("Quelle konnte nicht aufgelöst werden: {e}")),
+        };
+        if desired.is_empty() {
+            return fail(format!(
+                "Quelle ist leer oder nicht mehr vorhanden ({})",
+                binding.source_kind
+            ));
+        }
+        // Readiness: one music-api status call per distinct ISRC.
+        let isrcs: Vec<String> =
+            desired.iter().filter_map(|t| t.isrc.clone()).collect();
+        let ready = readiness(cfg, isrcs).await;
+        (desired, ready)
     };
-    if desired.is_empty() {
-        return fail(format!(
-            "Quelle ist leer oder nicht mehr vorhanden ({})",
-            binding.source_kind
-        ));
-    }
-
-    // Readiness: one music-api status call per distinct ISRC.
-    let isrcs: Vec<String> = desired.iter().filter_map(|t| t.isrc.clone()).collect();
-    let ready = readiness(cfg, isrcs).await;
 
     // Byte source: the real music-api download, mapped via `binding.format`.
     let cfg = cfg.clone();
@@ -696,7 +736,7 @@ pub async fn execute_binding(
     };
 
     let opts = SyncOptions::default();
-    run_sync(
+    let mut outcome = run_sync(
         &mut client,
         &household,
         binding,
@@ -705,7 +745,22 @@ pub async fn execute_binding(
         fetch,
         &opts,
     )
-    .await
+    .await;
+
+    if album_source {
+        // Album-level skips belong in the same run log as the track skips.
+        let mut all = skipped_albums;
+        all.extend(outcome.skipped);
+        outcome.skipped = all;
+        // Listened ledger: only a run that actually matches the tonie or
+        // changed it counts as "heard".
+        if matches!(outcome.status.as_str(), STATUS_OK | STATUS_NOOP)
+            && let Err(e) = super::albums::mark_seen(pool, uid, &used_albums).await
+        {
+            tracing::warn!("tonies album ledger write failed for user {uid}: {e:#}");
+        }
+    }
+    outcome
 }
 
 /// One-line, credential-free summary for the htmx toast.

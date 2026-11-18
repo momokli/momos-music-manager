@@ -5,6 +5,7 @@
 //! [`client`]. No secret ever touches `tracing`, an `anyhow` message, or a
 //! template — only typed, status-level errors.
 
+pub mod albums;
 pub mod autosync;
 pub mod bindings;
 pub mod client;
@@ -12,10 +13,13 @@ pub mod run;
 pub mod sync;
 
 pub use autosync::{Debounce, due_bindings, is_due, run_due};
+pub use albums::{AlbumFit, AlbumPlan, fit_albums, mark_seen, resolve, seen_ids};
 pub use bindings::{
-    Binding, SOURCE_BACKPACK, SOURCE_PLAYLIST, SOURCE_TAG, delete_binding, get_binding,
-    list_bindings, order_by_label, set_binding_order, source_kind_label, upsert_binding,
-    valid_format, valid_mode, valid_order_by, valid_source_kind,
+    AlbumItem, Binding, SOURCE_ALBUMS, SOURCE_BACKPACK, SOURCE_PLAYLIST, SOURCE_TAG,
+    delete_binding, get_binding, list_album_items, list_bindings, list_seen_albums,
+    order_by_label, set_album_items, set_binding_album_mode, set_binding_order,
+    source_kind_label, unlisten_album, upsert_binding, valid_album_mode, valid_format,
+    valid_mode, valid_order_by, valid_source_kind,
 };
 pub use run::{
     Claim, RunOutcome, SyncOptions, SyncRow, Transcoding, claim_run, execute_binding, finish_run,

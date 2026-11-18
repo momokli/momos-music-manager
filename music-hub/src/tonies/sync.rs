@@ -29,6 +29,9 @@ pub enum SkipReason {
     DuplicateIsrc,
     /// Adding it would exceed the cap; the fit stops here.
     CapReached,
+    /// A whole album has a track that is not in the vault yet. Albums are
+    /// placed as a unit, so the album is skipped (never partially).
+    AlbumNotReady,
 }
 
 /// A dropped track plus the reason, for user-facing reporting.
