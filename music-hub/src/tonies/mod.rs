@@ -267,12 +267,28 @@ pub async fn client_for(
         refresh_token: Some(refresh_token),
         expires_at: 0,
     };
-    Ok(client::ToniesClient::with_tokens_and_client(
+    let mut client = client::ToniesClient::with_tokens_and_client(
         &cfg.tonies_auth_base,
         &cfg.tonies_api_base,
         tokens,
         &cfg.tonies_client_id,
-    ))
+    );
+
+    // Sofort refreshen und das rotierte Token sichern. Keycloak invalidiert das
+    // alte Refresh-Token bei jeder Nutzung — ohne dieses Zurueckschreiben stirbt
+    // die Verbindung nach dem ersten Refresh.
+    match client.ensure_fresh().await {
+        Ok(()) => {
+            if let Some(rt) = client.refresh_token().map(str::to_owned) {
+                if let Err(e) = update_secret(pool, uid, &rt, key).await {
+                    tracing::warn!("tonies: rotiertes Refresh-Token nicht gespeichert: {e:#}");
+                }
+            }
+        }
+        Err(e) => tracing::warn!("tonies: Token-Refresh fehlgeschlagen: {e}"),
+    }
+
+    Ok(client)
 }
 
 /// Resolve the household id: prefer the configured/first household, else the id
@@ -307,6 +323,28 @@ pub async fn resolve_household(client: &mut client::ToniesClient) -> Option<Stri
             None
         }
     }
+}
+
+/// Replace only the stored refresh token. Needed because Keycloak rotates it on
+/// every use: without writing the new value back, the next refresh fails and the
+/// connection dies (real: "Tonies-Sitzung abgelaufen" ~5 min after connecting).
+pub async fn update_secret(
+    pool: &SqlitePool,
+    user_id: i64,
+    refresh_token: &str,
+    secret_key: &str,
+) -> Result<()> {
+    let secret_enc = encrypt_secret(secret_key, refresh_token)?;
+    sqlx::query(
+        "UPDATE hub_tonies_accounts SET secret_enc = ?2, updated_at = ?3 WHERE user_id = ?1",
+    )
+    .bind(user_id)
+    .bind(&secret_enc)
+    .bind(now_iso())
+    .execute(pool)
+    .await
+    .context("Tonies-Token konnte nicht aktualisiert werden")?;
+    Ok(())
 }
 
 /// Upsert the account, encrypting `refresh_token` at rest and clearing any

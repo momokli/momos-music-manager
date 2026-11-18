@@ -223,6 +223,16 @@ impl ToniesClient {
         self.expires_at
     }
 
+    /// Refresh once if the access token is (about to be) expired. The caller
+    /// has to persist the rotated refresh token afterwards — Keycloak
+    /// invalidates the old one on use.
+    pub async fn ensure_fresh(&mut self) -> TResult<()> {
+        if now_epoch() + 30 < self.expires_at {
+            return Ok(());
+        }
+        self.refresh_now().await
+    }
+
     /// Refresh once using the stored refresh token; map any failure to
     /// `AuthExpired` so the UI can offer "reconnect".
     async fn refresh_now(&mut self) -> TResult<()> {
