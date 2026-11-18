@@ -1,0 +1,327 @@
+{% extends "base.html" %} {% block title %}Tonies · Alben — Spelunke{% endblock %} {%
+block content %}
+<style>
+    /* Album picker: same terminal look as `tonies.html`, mobile first. */
+    .tonies-albums {
+        display: flex;
+        flex-direction: column;
+        gap: 0.7rem;
+    }
+    .tonies-albums section {
+        margin: 0;
+        padding: 0.6rem;
+    }
+    .tonies-albums h3 {
+        margin: 0 0 0.4rem 0;
+        font-size: 0.9rem;
+    }
+    .tonies-hint {
+        margin: 0.2rem 0 0 0;
+        font-size: 0.72rem;
+        opacity: 0.78;
+    }
+    .tonies-row {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        flex-wrap: wrap;
+    }
+    .tonies-row input[type="search"] {
+        flex: 1 1 12rem;
+        margin: 0;
+    }
+    .tonies-modes {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+    }
+    .tonies-modes form {
+        margin: 0;
+    }
+    .tonies-modes button {
+        margin: 0;
+        font-size: 0.75rem;
+        padding: 0.25rem 0.6rem;
+    }
+    .tonies-modes button.on {
+        border-color: var(--pico-primary);
+        color: var(--pico-primary);
+    }
+    .tonies-album-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+        gap: 0.5rem;
+    }
+    .tonies-album-card {
+        margin: 0;
+        padding: 0.4rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+    }
+    .tonies-album-cover {
+        width: 100%;
+        aspect-ratio: 1;
+        object-fit: cover;
+        border-radius: 0.35rem;
+        background: #161b22;
+        border: 1px solid #30363d;
+    }
+    .tonies-album-cover-empty {
+        display: grid;
+        place-items: center;
+        font-size: 1.4rem;
+        color: var(--pico-primary);
+    }
+    .tonies-album-title {
+        margin: 0;
+        font-size: 0.76rem;
+        line-height: 1.2;
+    }
+    .tonies-album-date {
+        margin: 0;
+        font-size: 0.68rem;
+        opacity: 0.7;
+    }
+    .tonies-badges {
+        margin: 0;
+        display: flex;
+        gap: 0.25rem;
+        flex-wrap: wrap;
+    }
+    .tonies-badge {
+        font-size: 0.64rem;
+        padding: 0.02rem 0.3rem;
+        border: 1px solid #30363d;
+        border-radius: 0.2rem;
+    }
+    .tonies-badge-seen {
+        color: var(--pico-primary);
+        border-color: var(--pico-primary);
+    }
+    .tonies-badge-err {
+        color: #ff7b72;
+        border-color: #ff7b72;
+    }
+    .tonies-list {
+        list-style: none;
+        margin: 0.4rem 0 0 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+    }
+    .tonies-list li {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        flex-wrap: wrap;
+        font-size: 0.78rem;
+    }
+    .tonies-list form {
+        margin: 0;
+    }
+    .tonies-list button {
+        margin: 0;
+        padding: 0.05rem 0.45rem;
+        font-size: 0.7rem;
+    }
+    .tonies-hit-cover {
+        width: 1.8rem;
+        height: 1.8rem;
+        border-radius: 50%;
+        object-fit: cover;
+        background: #161b22;
+        border: 1px solid #30363d;
+    }
+</style>
+
+<hgroup>
+    <h1>Alben · {{ tonie_name }}</h1>
+    <p class="hub-muted">
+        Der Tonie wird aus <strong>ganzen</strong> Deezer-Alben gefüllt. ISRCs sind
+        editionsgebunden — eine Spotify-Playlist findet die Kapitel einer anderen Edition
+        nicht.
+    </p>
+</hgroup>
+
+<p class="tonies-hint"><a href="/tonies">&#8592; zurück zu den Tonies</a></p>
+
+{% if !message.is_empty() %}
+<article class="hub-card">{{ message }}</article>
+{% endif %} {# Every form inside this block posts, and the response (the whole page) is
+reduced to `#tonies-albums` again — so a mutation never leaves a bare fragment behind and
+the toast header still fires. #}
+<div
+    id="tonies-albums"
+    class="tonies-albums"
+    hx-target="#tonies-albums"
+    hx-select="#tonies-albums"
+    hx-swap="outerHTML"
+>
+    <section>
+        <h3>Künstler</h3>
+        {% if artist_id.is_empty() %}
+        <p class="tonies-hint">
+            Noch kein Deezer-Künstler verknüpft — suche einen und setze ihn als Quelle.
+        </p>
+        {% else %}
+        <p class="tonies-hint">
+            Verknüpft: Deezer-Artist <strong>#{{ artist_id }}</strong>
+        </p>
+        {% endif %}
+        <form method="get" action="/tonies/{{ tonie_id }}/albums" class="tonies-row">
+            <input
+                type="search"
+                name="q"
+                value="{{ q }}"
+                placeholder="Künstler suchen …"
+            />
+            <button type="submit">Suchen</button>
+        </form>
+        {% if !hits.is_empty() %}
+        <ul class="tonies-list">
+            {% for h in hits %}
+            <li>
+                {% if let Some(cover) = h.cover_url %}
+                <img
+                    class="tonies-hit-cover"
+                    src="{{ cover }}"
+                    alt=""
+                    loading="lazy"
+                    referrerpolicy="no-referrer"
+                />
+                {% endif %}
+                <strong>{{ h.name }}</strong>
+                <span class="tonies-hint">#{{ h.artist_id }}</span>
+                <form
+                    method="post"
+                    action="/tonies/{{ tonie_id }}/albums/artist"
+                    hx-post="/tonies/{{ tonie_id }}/albums/artist"
+                >
+                    <input type="hidden" name="artist_id" value="{{ h.artist_id }}" />
+                    <input type="hidden" name="artist_name" value="{{ h.name }}" />
+                    <button type="submit">Als Quelle setzen</button>
+                </form>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else if !q.is_empty() %}
+        <p class="tonies-hint">Keine Treffer für „{{ q }}“.</p>
+        {% endif %}
+    </section>
+
+    <section>
+        <h3>Album-Modus</h3>
+        <div class="tonies-modes">
+            {% for m in modes %}
+            <form
+                method="post"
+                action="/tonies/{{ tonie_id }}/albums/mode"
+                hx-post="/tonies/{{ tonie_id }}/albums/mode"
+            >
+                <input type="hidden" name="album_mode" value="{{ m.token }}" />
+                <button type="submit" class="{{ m.class }}">{{ m.label }}</button>
+            </form>
+            {% endfor %}
+        </div>
+        <p class="tonies-hint">
+            Aktuell: {{ mode_label }}. „Eigene Auswahl“ nimmt nur den Warenkorb, in dessen
+            Reihenfolge.
+        </p>
+    </section>
+
+    <section>
+        <h3>Alben</h3>
+        {% if albums.is_empty() %}
+        <p class="tonies-hint">
+            {% if artist_id.is_empty() %}Erst einen Künstler verknüpfen.{% else %}Keine
+            Alben gefunden.{% endif %}
+        </p>
+        {% else %}
+        <div class="tonies-album-grid">
+            {% for a in albums %} {% include "_partials/tonie_album_grid.html" %} {%
+            endfor %}
+        </div>
+        {% endif %}
+    </section>
+
+    <section>
+        <h3>Warenkorb</h3>
+        {% if basket.is_empty() %}
+        <p class="tonies-hint">Noch keine Alben im Korb.</p>
+        {% else %}
+        <ul class="tonies-list">
+            {% for b in basket %}
+            <li>
+                <span>{{ b.title }}</span>
+                {% if b.unresolved %}
+                <span class="tonies-badge tonies-badge-err">nicht auflösbar</span>
+                {% endif %}
+                <form
+                    method="post"
+                    action="/tonies/{{ tonie_id }}/albums/move"
+                    hx-post="/tonies/{{ tonie_id }}/albums/move"
+                >
+                    <input type="hidden" name="album_id" value="{{ b.album_id }}" />
+                    <input type="hidden" name="direction" value="up" />
+                    <button type="submit" title="hoch" aria-label="hoch">&#8593;</button>
+                </form>
+                <form
+                    method="post"
+                    action="/tonies/{{ tonie_id }}/albums/move"
+                    hx-post="/tonies/{{ tonie_id }}/albums/move"
+                >
+                    <input type="hidden" name="album_id" value="{{ b.album_id }}" />
+                    <input type="hidden" name="direction" value="down" />
+                    <button type="submit" title="runter" aria-label="runter">
+                        &#8595;
+                    </button>
+                </form>
+                <form
+                    method="post"
+                    action="/tonies/{{ tonie_id }}/albums/remove"
+                    hx-post="/tonies/{{ tonie_id }}/albums/remove"
+                >
+                    <input type="hidden" name="album_id" value="{{ b.album_id }}" />
+                    <button type="submit">entfernen</button>
+                </form>
+            </li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </section>
+
+    <section>
+        <h3>Gehört</h3>
+        {% if seen.is_empty() %}
+        <p class="tonies-hint">Noch kein Album abgespielt.</p>
+        {% else %}
+        <ul class="tonies-list">
+            {% for s in seen %}
+            <li>
+                <span>{{ s.title }}</span>
+                <span class="tonies-hint">{{ s.last_used_at }}</span>
+                <form
+                    method="post"
+                    action="/tonies/{{ tonie_id }}/albums/unlisten"
+                    hx-post="/tonies/{{ tonie_id }}/albums/unlisten"
+                >
+                    <input type="hidden" name="album_id" value="{{ s.album_id }}" />
+                    <button type="submit">unlistened</button>
+                </form>
+            </li>
+            {% endfor %}
+        </ul>
+        <form
+            method="post"
+            action="/tonies/{{ tonie_id }}/albums/reset"
+            hx-post="/tonies/{{ tonie_id }}/albums/reset"
+            style="margin-top: 0.55rem"
+        >
+            <button type="submit" class="hub-ta-cancel">alle zurücksetzen</button>
+        </form>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}

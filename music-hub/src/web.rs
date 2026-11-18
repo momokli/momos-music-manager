@@ -65,6 +65,26 @@ pub fn router(state: AppState) -> Router {
             post(tonies_binding_delete),
         )
         .route("/tonies/{tonie_id}/sync", post(tonies_sync))
+        .route("/tonies/{tonie_id}/albums", get(tonie_albums_page))
+        .route(
+            "/tonies/{tonie_id}/albums/artist",
+            post(tonie_albums_set_artist),
+        )
+        .route(
+            "/tonies/{tonie_id}/albums/mode",
+            post(tonie_albums_set_mode),
+        )
+        .route("/tonies/{tonie_id}/albums/add", post(tonie_albums_add))
+        .route(
+            "/tonies/{tonie_id}/albums/remove",
+            post(tonie_albums_remove),
+        )
+        .route("/tonies/{tonie_id}/albums/move", post(tonie_albums_move))
+        .route(
+            "/tonies/{tonie_id}/albums/unlisten",
+            post(tonie_albums_unlisten),
+        )
+        .route("/tonies/{tonie_id}/albums/reset", post(tonie_albums_reset))
         .route("/curate", get(curate_page).post(curate_create))
         .route("/curate/{id}", get(curate_detail))
         .route("/curate/{id}/update", post(curate_update))
@@ -3621,6 +3641,8 @@ struct BindingView {
     mode: String,
     /// Track order for playlist sources.
     order_by: String,
+    /// Album order for album sources (`newest` | `oldest` | `basket`).
+    album_mode: String,
     /// Last sync timestamp (RFC3339), when a run has finished.
     last_sync_at: String,
     /// Last sync status token (`ok`/`noop`/`timeout`/`error`).
@@ -3636,6 +3658,11 @@ impl BindingView {
     /// German label for the track order.
     fn order_label(&self) -> &'static str {
         crate::tonies::bindings::order_by_label(&self.order_by)
+    }
+
+    /// German label for the album order (album sources only).
+    fn album_label(&self) -> &'static str {
+        crate::tonies::bindings::album_mode_label(&self.album_mode)
     }
 }
 
@@ -3989,6 +4016,7 @@ fn binding_view(b: &crate::tonies::Binding, sources: &SourceGroups) -> BindingVi
         format: b.format.clone(),
         mode: b.mode.clone(),
         order_by: b.order_by.clone(),
+        album_mode: b.album_mode.clone(),
         last_sync_at: b.last_sync_at.clone().unwrap_or_default(),
         last_sync_status: b.last_sync_status.clone().unwrap_or_default(),
     }
@@ -4350,4 +4378,645 @@ async fn execute_sync(
     binding: &crate::tonies::Binding,
 ) -> crate::tonies::run::RunOutcome {
     crate::tonies::run::execute_binding(&st.pool, &st.cfg, uid, binding).await
+}
+
+// ── Tonie album picker (album sources) ────────────────────────────────────────
+//
+// Album sources need their own page: the user picks a Deezer artist, an album
+// order (`newest`/`oldest`/`basket`), fills a basket and curates the listened
+// ledger. Every handler answers with the *same* page plus a toast, so a
+// mutation never leaves the user on a bare fragment.
+
+/// Upper bound of albums shown in the grid (one music-api page).
+const ALBUM_GRID_LIMIT: u32 = 50;
+/// Number of listened albums shown in the ledger list.
+const ALBUM_SEEN_LIMIT: i64 = 50;
+/// Artist search hits offered in the picker.
+const ALBUM_ARTIST_HITS: u32 = 10;
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct TonieAlbumsQuery {
+    /// Artist search term (`GET /tonies/{id}/albums?q=…`).
+    q: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "tonie_albums.html")]
+struct TonieAlbumsPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    tonie_id: String,
+    tonie_name: String,
+    /// Bound Deezer artist id (`""` when none is linked).
+    artist_id: String,
+    /// The three album-mode buttons (pre-styled so the template needs no
+    /// conditional inside an HTML tag), in display order.
+    modes: Vec<ModeButton>,
+    /// German label of the current album mode.
+    mode_label: String,
+    /// Current artist search term.
+    q: String,
+    /// Hint shown instead of a 500 (no token, music-api unreachable, …).
+    message: String,
+    hits: Vec<ArtistHitRow>,
+    albums: Vec<AlbumTile>,
+    basket: Vec<BasketRow>,
+    seen: Vec<SeenRow>,
+}
+
+struct ArtistHitRow {
+    artist_id: String,
+    name: String,
+    cover_url: Option<String>,
+}
+
+/// One button of the album-mode switch.
+struct ModeButton {
+    token: &'static str,
+    label: &'static str,
+    /// `tonies-mode on` for the active mode, `tonies-mode` otherwise.
+    class: &'static str,
+}
+
+/// One album of the bound artist's catalogue.
+struct AlbumTile {
+    album_id: String,
+    title: String,
+    release_date: String,
+    cover_url: Option<String>,
+    /// This user already had the album on a tonie.
+    seen: bool,
+    /// The album is already in the basket.
+    in_basket: bool,
+}
+
+/// One album of the explicit basket, in user order.
+struct BasketRow {
+    album_id: String,
+    title: String,
+    /// The album is neither in the artist catalogue nor in the album cache.
+    unresolved: bool,
+}
+
+/// One album of the listened ledger.
+struct SeenRow {
+    album_id: String,
+    title: String,
+    last_used_at: String,
+}
+
+/// `GET /tonies/{id}/albums` — the album picker.
+async fn tonie_albums_page(
+    State(st): State<AppState>,
+    Path(tonie_id): Path<String>,
+    Query(q): Query<TonieAlbumsQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let q = q.q.unwrap_or_default();
+    tonie_albums_render(&st, nav, &tonie_id, q.trim(), "").await
+}
+
+/// Render the album picker for `tonie_id`. `message` is a hint, never a
+/// failure: a missing `MUSIC_API_TOKEN` or an unreachable music-api only adds a
+/// note, the page still renders.
+async fn tonie_albums_render(
+    st: &AppState,
+    nav: crate::ui::Nav,
+    tonie_id: &str,
+    q: &str,
+    message: &str,
+) -> Response {
+    let uid = nav.id;
+    let binding = crate::tonies::get_binding(&st.pool, uid, tonie_id)
+        .await
+        .ok()
+        .flatten();
+
+    let tonie_name = binding
+        .as_ref()
+        .and_then(|b| b.tonie_name.clone())
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "Kreativ-Tonie".to_string());
+    let album_mode = binding
+        .as_ref()
+        .map(|b| b.album_mode.clone())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| crate::tonies::bindings::ALBUM_MODE_NEWEST.to_string());
+    let mode_label = crate::tonies::bindings::album_mode_label(&album_mode).to_string();
+    let modes: Vec<ModeButton> = [
+        crate::tonies::bindings::ALBUM_MODE_NEWEST,
+        crate::tonies::bindings::ALBUM_MODE_OLDEST,
+        crate::tonies::bindings::ALBUM_MODE_BASKET,
+    ]
+    .into_iter()
+    .map(|token| ModeButton {
+        token,
+        label: crate::tonies::bindings::album_mode_label(token),
+        class: if album_mode == token {
+            "tonies-mode on"
+        } else {
+            "tonies-mode"
+        },
+    })
+    .collect();
+    let artist_id = binding
+        .as_ref()
+        .and_then(|b| b.source_id)
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+
+    let mut notes: Vec<String> = Vec::new();
+    if st
+        .cfg
+        .music_api_token
+        .as_deref()
+        .map(|t| t.trim().is_empty())
+        .unwrap_or(true)
+    {
+        notes.push(
+            "MUSIC_API_TOKEN ist nicht gesetzt — Deezer-Metadaten sind nicht verfügbar."
+                .to_string(),
+        );
+    }
+    if !message.is_empty() {
+        notes.push(message.to_string());
+    }
+
+    let items = match binding.as_ref() {
+        Some(b) => crate::tonies::list_album_items(&st.pool, b.id)
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let basket_ids: std::collections::HashSet<String> =
+        items.iter().map(|i| i.album_id.clone()).collect();
+
+    let seen_set = crate::tonies::seen_ids(&st.pool, uid)
+        .await
+        .unwrap_or_default();
+
+    // The artist catalogue. Fetched *before* the basket is judged: an album that
+    // is not in the catalogue is only marked unresolved when we actually have a
+    // catalogue to compare against.
+    let mut tiles: Vec<AlbumTile> = Vec::new();
+    let mut catalog: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut catalog_loaded = false;
+    if !artist_id.is_empty() {
+        match crate::music_api::deezer_artist_albums(&st.cfg, &artist_id, ALBUM_GRID_LIMIT, 0).await
+        {
+            Ok(page) => {
+                catalog_loaded = true;
+                for a in page.albums {
+                    catalog.insert(a.album_id.clone());
+                    tiles.push(AlbumTile {
+                        seen: seen_set.contains(&a.album_id),
+                        in_basket: basket_ids.contains(&a.album_id),
+                        album_id: a.album_id,
+                        title: a.title,
+                        release_date: a.release_date.unwrap_or_default(),
+                        cover_url: a.cover_url,
+                    });
+                }
+            }
+            Err(e) => notes.push(format!("Alben nicht ladbar: {e}")),
+        }
+    }
+
+    // The basket keeps every entry visible; an album without a catalogue entry
+    // and without cached metadata is flagged instead of silently disappearing.
+    let mut basket = Vec::with_capacity(items.len());
+    for item in items {
+        let unresolved = catalog_loaded
+            && !catalog.contains(&item.album_id)
+            && !album_is_cached(&st.pool, &item.album_id).await;
+        let title = if item.album_title.trim().is_empty() {
+            format!("#{}", item.album_id)
+        } else {
+            item.album_title
+        };
+        basket.push(BasketRow {
+            album_id: item.album_id,
+            title,
+            unresolved,
+        });
+    }
+
+    let mut hits = Vec::new();
+    if !q.is_empty() {
+        match crate::music_api::deezer_search_artist(&st.cfg, q, ALBUM_ARTIST_HITS).await {
+            Ok(list) => {
+                hits = list
+                    .into_iter()
+                    .map(|h| ArtistHitRow {
+                        artist_id: h.artist_id,
+                        name: h.name,
+                        cover_url: h.cover_url,
+                    })
+                    .collect()
+            }
+            Err(e) => notes.push(format!("Artist-Suche fehlgeschlagen: {e}")),
+        }
+    }
+
+    let seen = crate::tonies::list_seen_albums(&st.pool, uid, ALBUM_SEEN_LIMIT)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| SeenRow {
+            album_id: s.album_id,
+            title: if s.album_title.trim().is_empty() {
+                "(unbekannt)".to_string()
+            } else {
+                s.album_title
+            },
+            last_used_at: s.last_used_at,
+        })
+        .collect();
+
+    render(&TonieAlbumsPage {
+        nav,
+        flash: String::new(),
+        tonie_id: tonie_id.to_string(),
+        tonie_name,
+        artist_id,
+        mode_label,
+        modes,
+        q: q.to_string(),
+        message: notes.join(" · "),
+        hits,
+        albums: tiles,
+        basket,
+        seen,
+    })
+}
+
+/// Whether the album metadata cache already knows `album_id`.
+async fn album_is_cached(pool: &SqlitePool, album_id: &str) -> bool {
+    sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_deezer_albums WHERE album_id = ?1")
+        .bind(album_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+/// Cached `(title, seconds)` of an album; empty when the cache misses.
+async fn album_cache_meta(pool: &SqlitePool, album_id: &str) -> (Option<String>, i64) {
+    let row = sqlx::query("SELECT title, seconds FROM hub_deezer_albums WHERE album_id = ?1")
+        .bind(album_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+    match row {
+        Some(r) => (
+            r.get::<Option<String>, _>("title"),
+            r.get::<Option<i64>, _>("seconds").unwrap_or(0),
+        ),
+        None => (None, 0),
+    }
+}
+
+/// The owner's binding for `tonie_id`, or a 404 (never another user's Tonie).
+async fn tonie_albums_binding(
+    st: &AppState,
+    uid: i64,
+    tonie_id: &str,
+) -> Result<crate::tonies::Binding, Response> {
+    match crate::tonies::get_binding(&st.pool, uid, tonie_id).await {
+        Ok(Some(b)) => Ok(b),
+        Ok(None) => Err(StatusCode::NOT_FOUND.into_response()),
+        Err(e) => {
+            tracing::warn!("tonies binding load failed for user {uid}: {e:#}");
+            Err(error_page("Tonies-Quelle konnte nicht geladen werden"))
+        }
+    }
+}
+
+/// Re-render the picker and attach `msg` as a toast.
+async fn tonie_albums_toast(
+    st: &AppState,
+    nav: crate::ui::Nav,
+    tonie_id: &str,
+    msg: &str,
+    kind: &str,
+) -> Response {
+    let resp = tonie_albums_render(st, nav, tonie_id, "", "").await;
+    crate::toast::apply(resp, msg, kind)
+}
+
+#[derive(Deserialize)]
+struct TonieAlbumArtistForm {
+    #[serde(default)]
+    artist_id: String,
+    /// Only used for the toast — the name is not persisted (no column).
+    #[serde(default)]
+    artist_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TonieAlbumModeForm {
+    #[serde(default)]
+    album_mode: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TonieAlbumItemForm {
+    #[serde(default)]
+    album_id: String,
+    #[serde(default)]
+    album_title: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TonieAlbumMoveForm {
+    #[serde(default)]
+    album_id: String,
+    #[serde(default)]
+    direction: Option<String>,
+}
+
+/// `POST /tonies/{id}/albums/artist` — bind a Deezer artist as the source.
+/// Existing format/mode/tonie name are preserved.
+async fn tonie_albums_set_artist(
+    State(st): State<AppState>,
+    Path(tonie_id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<TonieAlbumArtistForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let uid = nav.id;
+    let raw = form.artist_id.trim().to_string();
+    let label = form
+        .artist_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(&raw)
+        .to_string();
+    let Ok(artist_id) = raw.parse::<i64>() else {
+        return tonie_albums_toast(&st, nav, &tonie_id, "Ungültige Deezer-Artist-ID.", "err").await;
+    };
+
+    let existing = crate::tonies::get_binding(&st.pool, uid, &tonie_id)
+        .await
+        .ok()
+        .flatten();
+    let format = existing
+        .as_ref()
+        .map(|b| b.format.clone())
+        .filter(|f| crate::tonies::valid_format(f))
+        .unwrap_or_else(|| crate::tonies::bindings::FORMAT_MP3_128.to_string());
+    let mode = existing
+        .as_ref()
+        .map(|b| b.mode.clone())
+        .filter(|m| crate::tonies::valid_mode(m))
+        .unwrap_or_else(|| crate::tonies::bindings::MODE_MANUAL.to_string());
+    let tonie_name = existing.as_ref().and_then(|b| b.tonie_name.clone());
+
+    let (msg, kind) = match crate::tonies::upsert_binding(
+        &st.pool,
+        uid,
+        &tonie_id,
+        tonie_name.as_deref(),
+        crate::tonies::bindings::SOURCE_ALBUMS,
+        Some(artist_id),
+        &format,
+        &mode,
+    )
+    .await
+    {
+        Ok(()) => (format!("Künstler „{label}“ als Quelle gesetzt"), "ok"),
+        Err(e) => (format!("Fehler: {e}"), "err"),
+    };
+    tonie_albums_toast(&st, nav, &tonie_id, &msg, kind).await
+}
+
+/// `POST /tonies/{id}/albums/mode` — set the album order.
+async fn tonie_albums_set_mode(
+    State(st): State<AppState>,
+    Path(tonie_id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<TonieAlbumModeForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let uid = nav.id;
+    let mode = form
+        .album_mode
+        .or(form.mode)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let (msg, kind) = if !crate::tonies::valid_album_mode(&mode) {
+        ("Unbekannter Album-Modus.".to_string(), "err")
+    } else {
+        match crate::tonies::set_binding_album_mode(&st.pool, uid, &tonie_id, &mode).await {
+            Ok(true) => (
+                format!(
+                    "Album-Modus: {}",
+                    crate::tonies::bindings::album_mode_label(&mode)
+                ),
+                "ok",
+            ),
+            Ok(false) => ("Keine Tonie-Quelle verknüpft.".to_string(), "err"),
+            Err(e) => (format!("Fehler: {e}"), "err"),
+        }
+    };
+    tonie_albums_toast(&st, nav, &tonie_id, &msg, kind).await
+}
+
+/// Write `items` back to the basket of `binding_id` in the given order.
+async fn album_basket_write(
+    pool: &SqlitePool,
+    binding_id: i64,
+    items: &[crate::tonies::AlbumItem],
+) -> anyhow::Result<()> {
+    let rows: Vec<(String, String, i64)> = items
+        .iter()
+        .map(|i| (i.album_id.clone(), i.album_title.clone(), i.seconds))
+        .collect();
+    crate::tonies::set_album_items(pool, binding_id, &rows).await
+}
+
+/// `POST /tonies/{id}/albums/add` — append an album to the basket.
+async fn tonie_albums_add(
+    State(st): State<AppState>,
+    Path(tonie_id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<TonieAlbumItemForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let uid = nav.id;
+    let binding = match tonie_albums_binding(&st, uid, &tonie_id).await {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let album_id = form.album_id.trim().to_string();
+    let (msg, kind) = if album_id.is_empty() {
+        ("Kein Album gewählt.".to_string(), "err")
+    } else {
+        let mut items = crate::tonies::list_album_items(&st.pool, binding.id)
+            .await
+            .unwrap_or_default();
+        if items.iter().any(|i| i.album_id == album_id) {
+            ("Album ist schon im Korb.".to_string(), "err")
+        } else {
+            // Duration and title come from the cache when the caller sent none.
+            let (cached_title, seconds) = album_cache_meta(&st.pool, &album_id).await;
+            let sent = form.album_title.unwrap_or_default().trim().to_string();
+            let title = if sent.is_empty() {
+                cached_title.unwrap_or_default()
+            } else {
+                sent
+            };
+            let label = if title.is_empty() {
+                album_id.clone()
+            } else {
+                title.clone()
+            };
+            items.push(crate::tonies::AlbumItem {
+                album_id: album_id.clone(),
+                album_title: title,
+                seconds,
+                position: items.len() as i64,
+            });
+            match album_basket_write(&st.pool, binding.id, &items).await {
+                Ok(()) => (format!("„{label}“ in den Korb"), "ok"),
+                Err(e) => (format!("Fehler: {e}"), "err"),
+            }
+        }
+    };
+    tonie_albums_toast(&st, nav, &tonie_id, &msg, kind).await
+}
+
+/// `POST /tonies/{id}/albums/remove` — drop one album from the basket.
+async fn tonie_albums_remove(
+    State(st): State<AppState>,
+    Path(tonie_id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<TonieAlbumItemForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let uid = nav.id;
+    let binding = match tonie_albums_binding(&st, uid, &tonie_id).await {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let album_id = form.album_id.trim().to_string();
+    let items = crate::tonies::list_album_items(&st.pool, binding.id)
+        .await
+        .unwrap_or_default();
+    let before = items.len();
+    let kept: Vec<crate::tonies::AlbumItem> = items
+        .into_iter()
+        .filter(|i| i.album_id != album_id)
+        .collect();
+    let (msg, kind) = if kept.len() == before {
+        ("Album ist nicht im Korb.".to_string(), "err")
+    } else {
+        match album_basket_write(&st.pool, binding.id, &kept).await {
+            Ok(()) => ("Album aus dem Korb entfernt".to_string(), "ok"),
+            Err(e) => (format!("Fehler: {e}"), "err"),
+        }
+    };
+    tonie_albums_toast(&st, nav, &tonie_id, &msg, kind).await
+}
+
+/// `POST /tonies/{id}/albums/move` — move an album one slot up/down.
+async fn tonie_albums_move(
+    State(st): State<AppState>,
+    Path(tonie_id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<TonieAlbumMoveForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let uid = nav.id;
+    let binding = match tonie_albums_binding(&st, uid, &tonie_id).await {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let album_id = form.album_id.trim().to_string();
+    let dir = form.direction.unwrap_or_default();
+    let mut items = crate::tonies::list_album_items(&st.pool, binding.id)
+        .await
+        .unwrap_or_default();
+    let (msg, kind) = if dir != "up" && dir != "down" {
+        ("Unbekannte Richtung.".to_string(), "err")
+    } else {
+        match items.iter().position(|i| i.album_id == album_id) {
+            None => ("Album ist nicht im Korb.".to_string(), "err"),
+            Some(0) if dir == "up" => ("Album ist schon ganz oben.".to_string(), "err"),
+            Some(i) if dir == "down" && i + 1 == items.len() => {
+                ("Album ist schon ganz unten.".to_string(), "err")
+            }
+            Some(i) => {
+                let other = if dir == "up" { i - 1 } else { i + 1 };
+                items.swap(i, other);
+                match album_basket_write(&st.pool, binding.id, &items).await {
+                    Ok(()) => ("Reihenfolge gespeichert".to_string(), "ok"),
+                    Err(e) => (format!("Fehler: {e}"), "err"),
+                }
+            }
+        }
+    };
+    tonie_albums_toast(&st, nav, &tonie_id, &msg, kind).await
+}
+
+/// `POST /tonies/{id}/albums/unlisten` — put one album back on the queue.
+async fn tonie_albums_unlisten(
+    State(st): State<AppState>,
+    Path(tonie_id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<TonieAlbumItemForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let uid = nav.id;
+    let album_id = form.album_id.trim().to_string();
+    let (msg, kind) = if album_id.is_empty() {
+        ("Kein Album gewählt.".to_string(), "err")
+    } else {
+        match crate::tonies::unlisten_album(&st.pool, uid, &album_id).await {
+            Ok(()) => ("Album wieder auf der Liste".to_string(), "ok"),
+            Err(e) => (format!("Fehler: {e}"), "err"),
+        }
+    };
+    tonie_albums_toast(&st, nav, &tonie_id, &msg, kind).await
+}
+
+/// `POST /tonies/{id}/albums/reset` — clear the whole listened ledger of the
+/// user (the ledger is per user, not per Tonie).
+async fn tonie_albums_reset(
+    State(st): State<AppState>,
+    Path(tonie_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let uid = nav.id;
+    let (msg, kind) = match crate::tonies::reset_seen(&st.pool, uid).await {
+        Ok(n) => (format!("{n} Album(e) zurückgesetzt"), "ok"),
+        Err(e) => (format!("Fehler: {e}"), "err"),
+    };
+    tonie_albums_toast(&st, nav, &tonie_id, &msg, kind).await
 }

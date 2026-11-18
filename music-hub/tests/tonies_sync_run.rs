@@ -218,6 +218,7 @@ fn binding() -> Binding {
         cap_seconds: 5400,
         mode: "manual".into(),
         order_by: "playlist".into(),
+        album_mode: "newest".into(),
         dirty_since: Some("2026-01-01T00:00:00+00:00".into()),
         last_sync_at: None,
         last_sync_status: None,
