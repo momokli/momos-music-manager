@@ -307,12 +307,30 @@ pub async fn order(cfg: &Config, isrcs: &[String]) -> Result<String> {
 /// `POST /orders` with an explicit `priority` (higher = earlier). Returns the
 /// order id. Used by the playlist "Priorisieren" action.
 pub async fn order_with_priority(cfg: &Config, isrcs: &[String], priority: i32) -> Result<String> {
+    order_with_priority_intent(cfg, isrcs, priority, "library", None).await
+}
+
+/// `POST /orders` with an explicit `intent`/`target` (U0b).
+///
+/// `intent: toys` tells music-api not to fetch FLAC or run the BPM/key
+/// analysis; `target` is the store tier (`flac` | `mp3-320` | `mp3-128`).
+pub async fn order_with_priority_intent(
+    cfg: &Config,
+    isrcs: &[String],
+    priority: i32,
+    intent: &str,
+    target: Option<&str>,
+) -> Result<String> {
     let url = format!("{}/orders", cfg.music_api_base);
     let items: Vec<_> = isrcs.iter().map(|i| order_item(i)).collect();
+    let mut body = json!({ "items": items, "priority": priority, "intent": intent });
+    if let Some(t) = target {
+        body["target"] = json!(t);
+    }
     let resp = reqwest::Client::new()
         .post(&url)
         .bearer_auth(token(cfg)?)
-        .json(&json!({ "items": items, "priority": priority }))
+        .json(&body)
         .send()
         .await
         .with_context(|| format!("POST {url}"))?;

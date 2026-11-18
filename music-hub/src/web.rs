@@ -4593,7 +4593,7 @@ async fn tonie_albums_render(
     for item in items {
         let unresolved = catalog_loaded
             && !catalog.contains(&item.album_id)
-            && !album_is_cached(&st.pool, &item.album_id).await;
+            && album_meta_from_api(&st.cfg, &item.album_id).await.is_none();
         let title = if item.album_title.trim().is_empty() {
             format!("#{}", item.album_id)
         } else {
@@ -4655,32 +4655,16 @@ async fn tonie_albums_render(
     })
 }
 
-/// Whether the album metadata cache already knows `album_id`.
-async fn album_is_cached(pool: &SqlitePool, album_id: &str) -> bool {
-    sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_deezer_albums WHERE album_id = ?1")
-        .bind(album_id)
-        .fetch_optional(pool)
+/// Album `(title, seconds)` from music-api, which owns the catalogue cache
+/// (U0a). `None` when the album cannot be resolved at all.
+async fn album_meta_from_api(
+    cfg: &crate::config::Config,
+    album_id: &str,
+) -> Option<(String, i64)> {
+    crate::music_api::deezer_album(cfg, album_id)
         .await
         .ok()
-        .flatten()
-        .is_some()
-}
-
-/// Cached `(title, seconds)` of an album; empty when the cache misses.
-async fn album_cache_meta(pool: &SqlitePool, album_id: &str) -> (Option<String>, i64) {
-    let row = sqlx::query("SELECT title, seconds FROM hub_deezer_albums WHERE album_id = ?1")
-        .bind(album_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
-    match row {
-        Some(r) => (
-            r.get::<Option<String>, _>("title"),
-            r.get::<Option<i64>, _>("seconds").unwrap_or(0),
-        ),
-        None => (None, 0),
-    }
+        .map(|a| (a.title, a.seconds.unwrap_or(0)))
 }
 
 /// The owner's binding for `tonie_id`, or a 404 (never another user's Tonie).
@@ -4875,11 +4859,14 @@ async fn tonie_albums_add(
         if items.iter().any(|i| i.album_id == album_id) {
             ("Album ist schon im Korb.".to_string(), "err")
         } else {
-            // Duration and title come from the cache when the caller sent none.
-            let (cached_title, seconds) = album_cache_meta(&st.pool, &album_id).await;
+            // Duration and title come from the catalogue when the caller sent none.
+            let (api_title, seconds) = album_meta_from_api(&st.cfg, &album_id)
+                .await
+                .map(|(title, seconds)| (Some(title), seconds))
+                .unwrap_or((None, 0));
             let sent = form.album_title.unwrap_or_default().trim().to_string();
             let title = if sent.is_empty() {
-                cached_title.unwrap_or_default()
+                api_title.unwrap_or_default()
             } else {
                 sent
             };

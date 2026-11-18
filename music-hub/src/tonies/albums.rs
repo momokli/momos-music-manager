@@ -9,15 +9,13 @@
 //! albums only** — never a partial one.
 
 use anyhow::{Context, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 
 use super::bindings::{self, Binding};
 use super::sync::{DesiredTrack, SkipReason, SkippedTrack};
 use crate::config::Config;
 use crate::music_api;
 
-/// How long a cached album detail (tracks + duration) stays valid.
-pub const CACHE_TTL_SECS: i64 = 7 * 24 * 3600;
 /// Bound on artist pages fetched in one resolve (PAW Patrol has 417 albums).
 const MAX_ALBUM_PAGES: u32 = 12;
 const PAGE_SIZE: u32 = 100;
@@ -113,7 +111,7 @@ async fn basket(pool: &SqlitePool, cfg: &Config, binding: &Binding) -> Result<Ve
     let items = bindings::list_album_items(pool, binding.id).await?;
     let mut out = Vec::with_capacity(items.len());
     for item in items {
-        out.push(album_plan(pool, cfg, &item.album_id).await?);
+        out.push(album_plan(cfg, &item.album_id).await?);
     }
     Ok(out)
 }
@@ -173,106 +171,35 @@ async fn artist(
             continue;
         }
         looked += 1;
-        let plan = album_plan(pool, cfg, &summary.album_id).await?;
+        let plan = album_plan(cfg, &summary.album_id).await?;
         seconds += plan.seconds;
         out.push(plan);
     }
     Ok(out)
 }
 
-/// Album detail from the cache, falling back to one music-api call.
-async fn album_plan(pool: &SqlitePool, cfg: &Config, album_id: &str) -> Result<AlbumPlan> {
-    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(CACHE_TTL_SECS)).to_rfc3339();
-    let row = sqlx::query(
-        "SELECT title, cover_url, release_date, seconds, tracks_json
-           FROM hub_deezer_albums
-          WHERE album_id = ?1 AND fetched_at >= ?2",
-    )
-    .bind(album_id)
-    .bind(&cutoff)
-    .fetch_optional(pool)
-    .await
-    .context("Album-Cache konnte nicht gelesen werden")?;
-
-    if let Some(r) = row
-        && let Ok(tracks) =
-            serde_json::from_str::<Vec<CachedTrack>>(&r.get::<String, _>("tracks_json"))
-    {
-        return Ok(AlbumPlan {
-            album_id: album_id.to_string(),
-            title: r.get::<Option<String>, _>("title").unwrap_or_default(),
-            seconds: r.get::<Option<i64>, _>("seconds").unwrap_or(0),
-            cover_url: r.get("cover_url"),
-            release_date: r.get("release_date"),
-            tracks: tracks.into_iter().map(|t| t.into_desired()).collect(),
-        });
-    }
-
+/// Album detail from music-api, which owns the catalogue cache (U0a).
+async fn album_plan(cfg: &Config, album_id: &str) -> Result<AlbumPlan> {
     let detail = music_api::deezer_album(cfg, album_id).await?;
-    let tracks: Vec<CachedTrack> = detail
-        .tracks
-        .iter()
-        .map(|t| CachedTrack {
-            isrc: t.isrc.clone(),
-            title: t.title.clone(),
-            duration_ms: t.duration_ms,
-        })
-        .collect();
     let seconds = detail
         .seconds
-        .unwrap_or_else(|| tracks.iter().map(|t| t.duration_ms / 1000).sum());
-    let tracks_json = serde_json::to_string(&tracks)?;
-
-    sqlx::query(
-        "INSERT INTO hub_deezer_albums
-             (album_id, artist_id, title, release_date, record_type, cover_url, seconds,
-              tracks_json, fetched_at)
-         VALUES (?1, NULL, ?2, ?3, NULL, ?4, ?5, ?6, ?7)
-         ON CONFLICT(album_id) DO UPDATE SET
-             title = excluded.title,
-             release_date = excluded.release_date,
-             cover_url = excluded.cover_url,
-             seconds = excluded.seconds,
-             tracks_json = excluded.tracks_json,
-             fetched_at = excluded.fetched_at",
-    )
-    .bind(album_id)
-    .bind(&detail.title)
-    .bind(&detail.release_date)
-    .bind(&detail.cover_url)
-    .bind(seconds)
-    .bind(&tracks_json)
-    .bind(chrono::Utc::now().to_rfc3339())
-    .execute(pool)
-    .await
-    .context("Album-Cache konnte nicht geschrieben werden")?;
-
+        .unwrap_or_else(|| detail.tracks.iter().map(|t| t.duration_ms / 1000).sum());
     Ok(AlbumPlan {
         album_id: album_id.to_string(),
         title: detail.title,
         seconds,
         cover_url: detail.cover_url,
         release_date: detail.release_date,
-        tracks: tracks.into_iter().map(|t| t.into_desired()).collect(),
+        tracks: detail
+            .tracks
+            .into_iter()
+            .map(|t| DesiredTrack {
+                isrc: t.isrc,
+                title: t.title,
+                duration_ms: t.duration_ms,
+            })
+            .collect(),
     })
-}
-
-/// One track of a cached album.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct CachedTrack {
-    isrc: Option<String>,
-    title: String,
-    duration_ms: i64,
-}
-
-impl CachedTrack {
-    fn into_desired(self) -> DesiredTrack {
-        DesiredTrack {
-            isrc: self.isrc,
-            title: self.title,
-            duration_ms: self.duration_ms,
-        }
-    }
 }
 
 /// Album ids this user has already had on a tonie.
