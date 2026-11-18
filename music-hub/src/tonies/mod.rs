@@ -146,7 +146,7 @@ pub struct CreativeTonie {
 
 /// One chapter of a creative Tonie. Serialisable so it can be reused verbatim
 /// in a `PATCH …/creativetonies/{ctid}` body.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Chapter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -154,9 +154,12 @@ pub struct Chapter {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
-    /// Chapter length in seconds, when known. Additive and tolerant.
+    /// Chapter length in seconds. The live API returns fractional
+    /// values (`"seconds": 92.820646`), so this must be floating point:
+    /// an `i64` rejected every chapter and thereby dropped every Tonie
+    /// that had one (verified against `api.tonie.cloud`, 2026-11-18).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seconds: Option<i64>,
+    pub seconds: Option<f64>,
     /// `true` while the Tonies backend is still transcoding this chapter.
     /// Additive and tolerant; `None` means the API did not say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -471,6 +474,21 @@ mod tests {
         raw[last] ^= 0x01; // flip a ciphertext/tag bit
         let tampered = B64.encode(&raw);
         assert!(decrypt_secret("k", &tampered).is_err());
+    }
+
+    /// Regression: fractional chapter seconds used to reject the whole
+    /// Tonie, so the page claimed the household had none.
+    #[test]
+    fn fractional_chapter_seconds_deserialize() {
+        let v = serde_json::json!({
+            "id": "ct1", "name": "Story One",
+            "secondsPresent": 4435, "secondsRemaining": 964,
+            "chapters": [{"id": "ch1", "title": "Intro", "seconds": 92.820646}]
+        });
+        let t: CreativeTonie =
+            serde_json::from_value(v).expect("fractional seconds must parse");
+        assert_eq!(t.chapters.len(), 1);
+        assert_eq!(t.chapters[0].seconds, Some(92.820646));
     }
 
     #[test]

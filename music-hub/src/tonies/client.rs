@@ -404,6 +404,10 @@ impl ToniesClient {
 }
 
 /// Accept either a bare JSON array or `{"<key>": [...]}` / `{"items": [...]}`.
+///
+/// Entries that fail to deserialise are logged, never dropped silently: a
+/// single mismatched field used to empty a whole list, and the UI then
+/// claimed the household had no creative Tonies at all.
 fn parse_list<T: serde::de::DeserializeOwned>(v: &Value, key: &str) -> Vec<T> {
     let arr = if let Some(a) = v.as_array() {
         a.clone()
@@ -414,7 +418,17 @@ fn parse_list<T: serde::de::DeserializeOwned>(v: &Value, key: &str) -> Vec<T> {
             .unwrap_or_default()
     };
     arr.into_iter()
-        .filter_map(|item| serde_json::from_value(item).ok())
+        .filter_map(|item| match serde_json::from_value(item.clone()) {
+            Ok(parsed) => Some(parsed),
+            Err(e) => {
+                let fields: Vec<String> = item
+                    .as_object()
+                    .map(|o| o.keys().cloned().collect())
+                    .unwrap_or_default();
+                tracing::warn!("tonies: {key}-Eintrag nicht lesbar ({e}); Felder: {fields:?}");
+                None
+            }
+        })
         .collect()
 }
 

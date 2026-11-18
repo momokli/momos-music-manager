@@ -472,7 +472,7 @@ where
         id: None,
         title: Some(track.title.clone()),
         file: Some(ticket.file_id.clone()),
-        seconds: Some(ms_to_seconds(track.duration_ms)),
+        seconds: Some(ms_to_seconds(track.duration_ms) as f64),
         transcoding: None,
         chapter_type: None,
     })
