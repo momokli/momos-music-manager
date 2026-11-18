@@ -541,16 +541,34 @@ async fn deezer_artist_albums(
         .clamp(1, crate::deezer::METADATA_MAX_LIMIT);
     let index = q.index.unwrap_or(0);
 
+    // Catalogue first: the tonie picker re-renders often and Deezer is rate
+    // limited. A cache problem must never break the request.
+    match crate::db::catalogue_page_get(&state.pool, &artist_id, index as i64).await {
+        Ok(Some(cached)) => return Json(cached).into_response(),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("catalogue page read failed: {e:#}"),
+    }
+
     match crate::deezer::artist_albums(
         &state.http,
         &state.config.deezer_base,
-        artist_id,
+        &artist_id,
         limit,
         index,
     )
     .await
     {
-        Ok(page) => Json(page).into_response(),
+        Ok(page) => {
+            if let Ok(payload) = serde_json::to_value(&page) {
+                if let Err(e) =
+                    crate::db::catalogue_page_put(&state.pool, &artist_id, index as i64, &payload)
+                        .await
+                {
+                    tracing::warn!("catalogue page write failed: {e:#}");
+                }
+            }
+            Json(page).into_response()
+        }
         Err(e) => deezer_meta_failure("artist", e),
     }
 }
@@ -566,8 +584,23 @@ async fn deezer_album(
         return error(StatusCode::BAD_REQUEST, "invalid album id");
     };
 
-    match crate::deezer::album_detail(&state.http, &state.config.deezer_base, album_id).await {
-        Ok(album) => Json(album).into_response(),
+    match crate::db::catalogue_album_get(&state.pool, &album_id).await {
+        Ok(Some(cached)) => return Json(cached).into_response(),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("catalogue album read failed: {e:#}"),
+    }
+
+    match crate::deezer::album_detail(&state.http, &state.config.deezer_base, &album_id).await {
+        Ok(album) => {
+            if let Ok(payload) = serde_json::to_value(&album) {
+                if let Err(e) =
+                    crate::db::catalogue_album_put(&state.pool, &album_id, &payload).await
+                {
+                    tracing::warn!("catalogue album write failed: {e:#}");
+                }
+            }
+            Json(album).into_response()
+        }
         Err(e) => deezer_meta_failure("album", e),
     }
 }
@@ -591,8 +624,22 @@ async fn deezer_search_artist(
         .unwrap_or(10)
         .clamp(1, crate::deezer::METADATA_MAX_LIMIT);
 
+    match crate::db::catalogue_search_get(&state.pool, term, limit as i64).await {
+        Ok(Some(cached)) => return Json(cached).into_response(),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("catalogue search read failed: {e:#}"),
+    }
+
     match crate::deezer::search_artists(&state.http, &state.config.deezer_base, term, limit).await {
-        Ok(artists) => Json(json!({ "artists": artists })).into_response(),
+        Ok(artists) => {
+            let body = json!({ "artists": artists });
+            if let Err(e) =
+                crate::db::catalogue_search_put(&state.pool, term, limit as i64, &body).await
+            {
+                tracing::warn!("catalogue search write failed: {e:#}");
+            }
+            Json(body).into_response()
+        }
         Err(e) => deezer_meta_failure("artist search", e),
     }
 }

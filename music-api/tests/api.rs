@@ -4187,6 +4187,41 @@ async fn spawn_deezer_meta_mock() -> String {
     format!("http://{addr}")
 }
 
+/// Deezer metadata mock that counts upstream requests, so the catalogue cache
+/// can be proven (second call without network).
+async fn spawn_deezer_meta_mock_counted() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>)
+{
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+
+    async fn bump(
+        axum::extract::State(hits): axum::extract::State<Arc<AtomicUsize>>,
+        req: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        hits.fetch_add(1, Ordering::SeqCst);
+        next.run(req).await
+    }
+
+    let app = Router::new()
+        .route("/artist/{id}/albums", get(deezer_artist_albums_mock))
+        .route("/album/{id}", get(deezer_album_meta_mock))
+        .route("/album/{id}/tracks", get(deezer_album_tracks_mock))
+        .route("/search/artist", get(deezer_search_mock))
+        .with_state(())
+        .layer(axum::middleware::from_fn_with_state(counter, bump));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), hits)
+}
+
 async fn harness_deezer_meta(deezer_base: String) -> Harness {
     harness_opts(HarnessOpts {
         analyzer_url: None,
@@ -4202,6 +4237,68 @@ async fn get_json_authed(app: &Router, uri: &str) -> (StatusCode, serde_json::Va
     let (status, body) = send(app, authed("GET", uri).body(Body::empty()).unwrap()).await;
     let v = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
     (status, v)
+}
+
+#[tokio::test]
+async fn catalogue_serves_repeat_calls_without_upstream() {
+    use std::sync::atomic::Ordering;
+
+    let (deezer, hits) = spawn_deezer_meta_mock_counted().await;
+    let h = harness_deezer_meta(deezer).await;
+
+    let (status, first) = get_json_authed(&h.app, "/deezer/album/1137915301").await;
+    assert_eq!(status, StatusCode::OK);
+    let after_first = hits.load(Ordering::SeqCst);
+    assert!(after_first >= 1, "first call must reach Deezer");
+
+    let (status, second) = get_json_authed(&h.app, "/deezer/album/1137915301").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(hits.load(Ordering::SeqCst), after_first, "second call must be cached");
+    assert_eq!(first, second, "cache must return the identical payload");
+
+    // Same for the artist page and the artist search.
+    let _ = get_json_authed(&h.app, "/deezer/artist/15167501/albums").await;
+    let after_artist = hits.load(Ordering::SeqCst);
+    let _ = get_json_authed(&h.app, "/deezer/artist/15167501/albums").await;
+    assert_eq!(hits.load(Ordering::SeqCst), after_artist, "artist page cached");
+
+    let _ = get_json_authed(&h.app, "/deezer/search/artist?q=paw").await;
+    let after_search = hits.load(Ordering::SeqCst);
+    let _ = get_json_authed(&h.app, "/deezer/search/artist?q=paw").await;
+    assert_eq!(hits.load(Ordering::SeqCst), after_search, "search cached");
+}
+
+#[tokio::test]
+async fn catalogue_refreshes_once_after_ttl() {
+    use std::sync::atomic::Ordering;
+
+    let (deezer, hits) = spawn_deezer_meta_mock_counted().await;
+    let h = harness_deezer_meta(deezer).await;
+
+    let _ = get_json_authed(&h.app, "/deezer/album/1137915301").await;
+    let after_first = hits.load(Ordering::SeqCst);
+
+    // Age the entry past the album TTL (7 days).
+    sqlx::query("UPDATE catalogue_albums SET fetched_at = fetched_at - ?")
+        .bind(music_api::db::CATALOGUE_ALBUM_TTL + 1)
+        .execute(&h.state.pool)
+        .await
+        .expect("age the catalogue row");
+
+    let _ = get_json_authed(&h.app, "/deezer/album/1137915301").await;
+    let after_refresh = hits.load(Ordering::SeqCst);
+    assert!(
+        after_refresh > after_first,
+        "expired entry must be refreshed ({after_first} -> {after_refresh})"
+    );
+
+    // …and the refreshed entry is cached again.
+    let _ = get_json_authed(&h.app, "/deezer/album/1137915301").await;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        after_refresh,
+        "refresh must re-populate the cache"
+    );
 }
 
 #[tokio::test]
