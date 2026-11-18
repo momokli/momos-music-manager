@@ -4458,6 +4458,9 @@ struct AlbumTile {
     album_id: String,
     title: String,
     release_date: String,
+    /// Formatted length (`3 min`, `1 h 29`); empty when unknown, so the tile
+    /// renders no length instead of `0 min`.
+    duration: String,
     cover_url: Option<String>,
     /// This user already had the album on a tonie.
     seen: bool,
@@ -4469,6 +4472,9 @@ struct AlbumTile {
 struct BasketRow {
     album_id: String,
     title: String,
+    /// Formatted length from the cart row (empty when unknown): the user
+    /// compares it against the tonie's free minutes.
+    duration: String,
     /// The album is neither in the artist catalogue nor in the album cache.
     unresolved: bool,
 }
@@ -4593,11 +4599,20 @@ async fn tonie_albums_render(
                         album_id: a.album_id,
                         title: a.title,
                         release_date: a.release_date.unwrap_or_default(),
+                        duration: String::new(),
                         cover_url: a.cover_url,
                     });
                 }
             }
             Err(e) => notes.push(format!("Alben nicht ladbar: {e}")),
+        }
+    }
+    // The tiles need their length from the album detail; an album without one
+    // keeps the empty `duration`.
+    let durations = album_durations(&st.cfg, &tiles).await;
+    for tile in &mut tiles {
+        if let Some(seconds) = durations.get(&tile.album_id) {
+            tile.duration = crate::tonies::format_duration(*seconds);
         }
     }
 
@@ -4616,6 +4631,7 @@ async fn tonie_albums_render(
         basket.push(BasketRow {
             album_id: item.album_id,
             title,
+            duration: crate::tonies::format_duration(item.seconds),
             unresolved,
         });
     }
@@ -4679,6 +4695,51 @@ async fn album_meta_from_api(
         .await
         .ok()
         .map(|a| (a.title, a.seconds.unwrap_or(0)))
+}
+
+/// Album lengths in flight at once. One album costs one music-api call (cached
+/// in its catalogue), so the grid is asked in small batches instead of 50 serial
+/// round trips.
+const ALBUM_DURATION_BATCH: usize = 8;
+
+/// `album_id -> seconds` for the grid tiles.
+///
+/// The artist album list carries no length at all, so the album detail is the
+/// only source (music-api owns the catalogue cache). Albums that cannot be
+/// resolved are simply absent from the map — the tile then renders no length,
+/// and a page render never fails because of a lookup.
+async fn album_durations(
+    cfg: &crate::config::Config,
+    tiles: &[AlbumTile],
+) -> std::collections::HashMap<String, i64> {
+    let mut out = std::collections::HashMap::new();
+    for chunk in tiles.chunks(ALBUM_DURATION_BATCH) {
+        let mut set = tokio::task::JoinSet::new();
+        for tile in chunk {
+            let cfg = cfg.clone();
+            let album_id = tile.album_id.clone();
+            set.spawn(async move {
+                let seconds = crate::music_api::deezer_album(&cfg, &album_id)
+                    .await
+                    .ok()
+                    .and_then(|a| a.seconds)
+                    .unwrap_or(0);
+                (album_id, seconds)
+            });
+        }
+        // One failed lookup (or a task that died) must not swallow the lengths
+        // that did arrive.
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok((album_id, seconds)) if seconds > 0 => {
+                    out.insert(album_id, seconds);
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("Album-Dauer nicht ladbar: {e}"),
+            }
+        }
+    }
+    out
 }
 
 /// The owner's binding for `tonie_id`, or a 404 (never another user's Tonie).
