@@ -207,19 +207,29 @@ pub fn plan_diff(existing: &[Chapter], planned: &[DesiredTrack]) -> DiffPlan {
 
 /// Load the desired track list for a playlist (read-only).
 ///
-/// Ordered by `hub_playlist_tracks.position`; NULL title/duration degrade to
-/// an empty title and zero duration.
+/// `order_by` decides which tracks the greedy fit sees first:
+/// `playlist` keeps Spotify's `position` order, `newest`/`newest_chrono`
+/// order by `added_at` descending so the freshest tracks fill the Tonie.
+/// NULL title/duration degrade to an empty title and zero duration.
 pub async fn desired_from_playlist(
     pool: &SqlitePool,
     playlist_id: i64,
+    order_by: &str,
 ) -> Result<Vec<DesiredTrack>> {
-    let rows = sqlx::query(
+    let order_sql = match order_by {
+        super::bindings::ORDER_NEWEST | super::bindings::ORDER_NEWEST_CHRONO => {
+            "ORDER BY IFNULL(hpt.added_at, '') DESC, hpt.position"
+        }
+        _ => "ORDER BY hpt.position",
+    };
+    let sql = format!(
         "SELECT t.isrc AS isrc, t.title AS title, t.duration_ms AS duration_ms
            FROM hub_playlist_tracks hpt
            JOIN hub_tracks t ON t.id = hpt.track_id
           WHERE hpt.playlist_id = ?1
-          ORDER BY hpt.position",
-    )
+          {order_sql}"
+    );
+    let rows = sqlx::query(&sql)
     .bind(playlist_id)
     .fetch_all(pool)
     .await
@@ -240,7 +250,7 @@ pub async fn desired_from_playlist(
 /// Resolve the desired track list for a binding source (#504).
 ///
 /// Dispatches on `source_kind`:
-/// * `playlist` → [`desired_from_playlist`] (playlist `position` order),
+/// * `playlist` → [`desired_from_playlist`] (per-binding `order_by`),
 /// * `tag` → [`desired_from_tag`] (hub track id order),
 /// * `backpack` → [`desired_from_backpack`] (resolver order).
 ///
@@ -260,6 +270,7 @@ pub async fn desired_for_source(
     uid: i64,
     source_kind: &str,
     source_id: Option<i64>,
+    order_by: &str,
 ) -> Result<Vec<DesiredTrack>> {
     let Some(source_id) = source_id else {
         anyhow::bail!("Keine Quelle verknüpft");
@@ -271,7 +282,7 @@ pub async fn desired_for_source(
         return Ok(Vec::new());
     }
     match source_kind {
-        SOURCE_PLAYLIST => desired_from_playlist(pool, source_id).await,
+        SOURCE_PLAYLIST => desired_from_playlist(pool, source_id, order_by).await,
         SOURCE_TAG => desired_from_tag(pool, source_id).await,
         SOURCE_BACKPACK => desired_from_backpack(pool, source_id).await,
         // Unreachable: validated above.

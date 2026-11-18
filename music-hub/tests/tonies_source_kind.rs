@@ -165,13 +165,13 @@ fn chapters(desired: &[DesiredTrack]) -> BTreeSet<(String, i64)> {
 #[tokio::test]
 async fn playlist_tag_and_backpack_yield_the_same_chapters() {
     let w = world().await;
-    let pl = tonies::desired_for_source(&w.pool, 1, "playlist", Some(w.playlist))
+    let pl = tonies::desired_for_source(&w.pool, 1, "playlist", Some(w.playlist), "playlist")
         .await
         .unwrap();
-    let tag = tonies::desired_for_source(&w.pool, 1, "tag", Some(w.tag))
+    let tag = tonies::desired_for_source(&w.pool, 1, "tag", Some(w.tag), "playlist")
         .await
         .unwrap();
-    let bp = tonies::desired_for_source(&w.pool, 1, "backpack", Some(w.backpack))
+    let bp = tonies::desired_for_source(&w.pool, 1, "backpack", Some(w.backpack), "playlist")
         .await
         .unwrap();
 
@@ -182,6 +182,54 @@ async fn playlist_tag_and_backpack_yield_the_same_chapters() {
     assert_eq!(pl.len(), 3);
     assert_eq!(pl, tag);
     assert_eq!(pl, bp);
+}
+
+/// A long playlist can fill the Tonie from the fresh end: `newest` orders by
+/// `added_at` instead of `position`.
+#[tokio::test]
+async fn playlist_order_by_added_at() {
+    let w = world().await;
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM hub_tracks WHERE isrc IN ('isrc-a', 'isrc-b', 'isrc-c') ORDER BY isrc",
+    )
+    .fetch_all(&w.pool)
+    .await
+    .unwrap();
+
+    // Same playlist, but the tracks were added in reverse: C is the newest.
+    let fresh = insert_playlist(&w.pool, 1, "pl-fresh", "Fresh").await;
+    let stamps = [
+        "2026-01-01T00:00:00+00:00",
+        "2026-02-01T00:00:00+00:00",
+        "2026-03-01T00:00:00+00:00",
+    ];
+    for (pos, (track, added)) in ids.iter().zip(stamps.iter()).enumerate() {
+        sqlx::query(
+            "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position, added_at)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(fresh)
+        .bind(track)
+        .bind(pos as i64)
+        .bind(added)
+        .execute(&w.pool)
+        .await
+        .unwrap();
+    }
+
+    let titles = |desired: Vec<DesiredTrack>| -> Vec<String> {
+        desired.into_iter().map(|t| t.title).collect()
+    };
+
+    let pl = tonies::desired_for_source(&w.pool, 1, "playlist", Some(fresh), "playlist")
+        .await
+        .unwrap();
+    let newest = tonies::desired_for_source(&w.pool, 1, "playlist", Some(fresh), "newest")
+        .await
+        .unwrap();
+
+    assert_eq!(titles(pl), vec!["A", "B", "C"], "position order");
+    assert_eq!(titles(newest), vec!["C", "B", "A"], "newest first");
 }
 
 #[tokio::test]
@@ -209,7 +257,7 @@ async fn playlist_respects_position_order() {
         .await
         .unwrap();
     }
-    let d = tonies::desired_for_source(&w.pool, 1, "playlist", Some(shuffled))
+    let d = tonies::desired_for_source(&w.pool, 1, "playlist", Some(shuffled), "playlist")
         .await
         .unwrap();
     assert_eq!(
@@ -231,7 +279,7 @@ async fn empty_sources_resolve_to_empty_lists() {
         ("tag", empty_tag),
         ("backpack", empty_bp),
     ] {
-        let d = tonies::desired_for_source(&w.pool, 1, kind, Some(id))
+        let d = tonies::desired_for_source(&w.pool, 1, kind, Some(id), "playlist")
             .await
             .unwrap();
         assert!(d.is_empty(), "{kind} should resolve to an empty list");
@@ -241,12 +289,12 @@ async fn empty_sources_resolve_to_empty_lists() {
 #[tokio::test]
 async fn unknown_kind_and_missing_source_are_errors() {
     let w = world().await;
-    let err = tonies::desired_for_source(&w.pool, 1, "lens", Some(1))
+    let err = tonies::desired_for_source(&w.pool, 1, "lens", Some(1), "playlist")
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Unbekannte Quellenart"), "{err}");
 
-    let err = tonies::desired_for_source(&w.pool, 1, "playlist", None)
+    let err = tonies::desired_for_source(&w.pool, 1, "playlist", None, "playlist")
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Keine Quelle"), "{err}");
@@ -294,7 +342,7 @@ async fn foreign_source_resolves_to_empty_for_all_kinds() {
         ("tag", bob_tag),
         ("backpack", bob_bp),
     ] {
-        let d = tonies::desired_for_source(&w.pool, 1, kind, Some(id))
+        let d = tonies::desired_for_source(&w.pool, 1, kind, Some(id), "playlist")
             .await
             .unwrap();
         assert!(

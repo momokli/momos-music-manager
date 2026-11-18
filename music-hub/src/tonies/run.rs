@@ -519,7 +519,8 @@ where
 {
     // 1. pure planning: dedupe, then greedy fit against the binding capacity.
     let (deduped, mut skipped) = dedupe_by_isrc(desired);
-    let fit = greedy_fit(&deduped, binding.cap_seconds, |isrc| is_ready(isrc));
+    let mut fit = greedy_fit(&deduped, binding.cap_seconds, |isrc| is_ready(isrc));
+    apply_playback_order(&binding.order_by, &mut fit.tracks);
     skipped.extend(fit.skipped.iter().cloned());
 
     // 2. current state of the Tonie (also the diff basis).
@@ -610,6 +611,18 @@ where
     }
 }
 
+/// Order the fitted tracks for playback.
+///
+/// `newest`/`newest_chrono` both *select* by `added_at` descending, so the
+/// fit already holds the newest tracks in newest-first order. For serialised
+/// audio dramas the first episode still has to come first, so
+/// `newest_chrono` flips the selection back into "as they were added".
+pub fn apply_playback_order(order_by: &str, tracks: &mut [super::sync::DesiredTrack]) {
+    if order_by == super::bindings::ORDER_NEWEST_CHRONO {
+        tracks.reverse();
+    }
+}
+
 /// Execute one binding end-to-end: build the Tonies client, resolve the
 /// household, read the desired tracks from the bound source (playlist, tag or
 /// backpack, #504), check vault readiness, then run the sync (Tonies +
@@ -654,6 +667,7 @@ pub async fn execute_binding(
         uid,
         &binding.source_kind,
         binding.source_id,
+        &binding.order_by,
     )
     .await
     {
@@ -744,6 +758,26 @@ pub fn summary(o: &RunOutcome) -> String {
 mod tests {
     use super::*;
     use crate::tonies::sync::SkipReason;
+
+    #[test]
+    fn newest_chrono_flips_the_selection_into_playback_order() {
+        let mk = |title: &str| crate::tonies::sync::DesiredTrack {
+            isrc: None,
+            title: title.to_string(),
+            duration_ms: 100_000,
+        };
+        let mut newest = vec![mk("neu"), mk("mittel"), mk("alt")];
+        let mut chrono = newest.clone();
+
+        apply_playback_order(crate::tonies::bindings::ORDER_NEWEST, &mut newest);
+        apply_playback_order(crate::tonies::bindings::ORDER_NEWEST_CHRONO, &mut chrono);
+
+        let titles = |v: &[crate::tonies::sync::DesiredTrack]| -> Vec<String> {
+            v.iter().map(|t| t.title.clone()).collect()
+        };
+        assert_eq!(titles(&newest), vec!["neu", "mittel", "alt"]);
+        assert_eq!(titles(&chrono), vec!["alt", "mittel", "neu"]);
+    }
 
     async fn pool_with_binding() -> (SqlitePool, i64) {
         let pool = crate::db::connect("sqlite::memory:").await.unwrap();
