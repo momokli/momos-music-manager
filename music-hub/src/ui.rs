@@ -24,6 +24,10 @@ pub struct Nav {
     pub active_backpack: Option<String>,
     /// Git-derived build version, shown in the shell footer.
     pub version: String,
+    /// The user connected a Tonies account. Drives the Tonies/cart nav entry:
+    /// without a figure the page has nothing to offer and must not clutter the
+    /// menu.
+    pub has_tonies: bool,
 }
 
 impl Nav {
@@ -58,12 +62,23 @@ pub async fn nav(st: &AppState, headers: &HeaderMap, active: &str) -> Option<Nav
         None => (false, String::new()),
     };
 
+    let has_tonies: bool = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM hub_tonies_accounts WHERE user_id = ?1",
+    )
+    .bind(user_id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+
     Some(Nav {
         id: user_id,
         slug,
         active: active.to_string(),
         spotify_connected,
         spotify_label,
+        has_tonies,
         is_admin: crate::settings::is_admin(st, user_id).await,
         active_backpack: crate::backpacks::active_backpack(&st.pool, user_id)
             .await

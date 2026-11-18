@@ -81,6 +81,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/tonies/{tonie_id}/albums/move", post(tonie_albums_move))
         .route(
+            "/tonies/{tonie_id}/albums/move-to",
+            post(tonie_albums_move_to),
+        )
+        .route(
             "/tonies/{tonie_id}/albums/unlisten",
             post(tonie_albums_unlisten),
         )
@@ -3585,6 +3589,8 @@ struct ToniesCard {
     title: String,
     /// Cover image URL from the Tonies API, when it has one.
     image_url: Option<String>,
+    /// Albums waiting in this tonie's cart (the entry point to the picker).
+    cart_count: i64,
     minutes_present: i64,
     minutes_total: i64,
     percent: i64,
@@ -3775,6 +3781,9 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                     .unwrap_or_default(),
                     None => Vec::new(),
                 };
+                let cart_count = crate::tonies::cart::count(&st.pool, uid, &id)
+                    .await
+                    .unwrap_or(0);
                 cards.push(ToniesCard {
                     id,
                     title: t
@@ -3783,6 +3792,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| "Kreativ-Tonie".to_string()),
                     image_url: t.image_url.clone(),
+                    cart_count,
                     minutes_present: cap.minutes_present(),
                     minutes_total: cap.minutes_total(),
                     percent: cap.percent(),
@@ -4076,11 +4086,15 @@ async fn tonies_card_fragment(
         }
     }
 
+    let cart_count = crate::tonies::cart::count(&st.pool, uid, tonie_id)
+        .await
+        .unwrap_or(0);
     render(&TonieCardFragment {
         c: ToniesCard {
             id: tonie_id.to_string(),
             title,
             image_url,
+            cart_count,
             minutes_present,
             minutes_total,
             percent,
@@ -4965,6 +4979,47 @@ async fn tonie_albums_move(
         }
     };
     tonie_albums_toast(&st, nav, &tonie_id, &msg, kind).await
+}
+
+/// `POST /tonies/{id}/albums/move-to` — drop an album at an absolute position.
+///
+/// Used by the drag & drop in the cart; the up/down buttons keep working, so
+/// the feature never depends on JavaScript.
+#[derive(Debug, Deserialize)]
+struct TonieAlbumMoveToForm {
+    album_id: String,
+    position: i64,
+}
+
+async fn tonie_albums_move_to(
+    State(st): State<AppState>,
+    Path(tonie_id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<TonieAlbumMoveToForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let uid = nav.id;
+    if let Err(r) = tonie_albums_binding(&st, uid, &tonie_id).await {
+        return r;
+    }
+    let album_id = form.album_id.trim().to_string();
+    let mut items = crate::tonies::cart::list(&st.pool, uid, &tonie_id)
+        .await
+        .unwrap_or_default();
+
+    if let Some(from) = items.iter().position(|i| i.album_id == album_id) {
+        let item = items.remove(from);
+        let to = form.position.clamp(0, items.len() as i64) as usize;
+        items.insert(to, item);
+        if let Err(e) = album_basket_write(&st.pool, uid, &tonie_id, &items).await {
+            tracing::warn!("tonies cart reorder failed for user {uid}: {e:#}");
+        }
+    }
+
+    // Plain form/fetch POST: go back to the page, the new order is the answer.
+    Redirect::to(&format!("/tonies/{tonie_id}/albums")).into_response()
 }
 
 /// `POST /tonies/{id}/albums/unlisten` — put one album back on the queue.
