@@ -1,0 +1,230 @@
+{% extends "base.html" %} {% block title %}Tonies · Verlauf — Spelunke{% endblock %} {%
+block content %}
+<style>
+    /* Verlauf: mobile first, one column, dense rows. Same terminal look as
+       `tonies.html`; no external assets. */
+    .tonie-history {
+        display: flex;
+        flex-direction: column;
+        gap: 0.7rem;
+    }
+    .tonie-history article {
+        margin: 0;
+        padding: 0.7rem;
+    }
+    .tonie-history h2 {
+        margin: 0 0 0.5rem 0;
+        font-size: 0.85rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        opacity: 0.85;
+    }
+    .tonie-history-figures {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 0.6rem;
+    }
+    @media (min-width: 40rem) {
+        .tonie-history-figures {
+            grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+        }
+    }
+    .tonie-history-figure {
+        margin: 0;
+        padding: 0.6rem;
+        border: 1px solid #30363d;
+        border-radius: 0.4rem;
+    }
+    .tonie-history-name {
+        margin: 0;
+        font-size: 0.95rem;
+        line-height: 1.2;
+    }
+    .tonie-history-source {
+        margin: 0.1rem 0 0 0;
+        font-size: 0.7rem;
+        opacity: 0.72;
+    }
+    .tonie-history-now {
+        margin: 0.5rem 0 0 0;
+        font-size: 0.78rem;
+    }
+    .tonie-history-last {
+        margin: 0.15rem 0 0 0;
+        font-size: 0.72rem;
+        opacity: 0.82;
+    }
+    .tonie-history-last.is-ok {
+        color: var(--pico-primary);
+    }
+    .tonie-history-last.is-warn {
+        color: #d29922;
+    }
+    .tonie-history-last.is-err {
+        color: #ff7b72;
+    }
+    .tonie-history-last.is-run {
+        opacity: 0.7;
+    }
+    .tonie-history-runs {
+        list-style: none;
+        margin: 0.5rem 0 0 0;
+        padding: 0.5rem 0 0 0;
+        border-top: 1px solid #30363d;
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+    }
+    .tonie-history-run {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        font-size: 0.72rem;
+    }
+    .tonie-history-run-when {
+        opacity: 0.62;
+        font-variant-numeric: tabular-nums;
+    }
+    .tonie-history-run-status {
+        font-weight: 600;
+    }
+    .tonie-history-run-meta {
+        opacity: 0.85;
+    }
+    .tonie-history-run-skip {
+        width: 100%;
+        opacity: 0.7;
+    }
+    .tonie-history-run-err {
+        width: 100%;
+        color: #ff7b72;
+    }
+    .tonie-history-seen {
+        list-style: none;
+        margin: 0.35rem 0 0 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+    }
+    .tonie-history-seen li {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        font-size: 0.78rem;
+    }
+    .tonie-history-seen form {
+        margin: 0;
+    }
+    .tonie-history-seen button {
+        margin: 0;
+        padding: 0.05rem 0.5rem;
+        font-size: 0.7rem;
+    }
+    .tonie-history-hint {
+        margin: 0.15rem 0 0 0;
+        font-size: 0.72rem;
+        opacity: 0.78;
+    }
+</style>
+
+<hgroup>
+    <h1>Verlauf</h1>
+    <p class="hub-muted">
+        Was aktuell auf welcher Figur liegt, was zuletzt lief und welche Alben als gehört
+        gelten. Alles aus der Datenbank — ohne Abruf bei Tonies.
+    </p>
+</hgroup>
+
+<p class="tonie-history-hint"><a href="/tonies">&#8592; zurück zu den Tonies</a></p>
+
+<div class="tonie-history">
+    <article>
+        <h2>Figuren</h2>
+        {% if figures.is_empty() %}
+        <p class="tonie-history-hint">
+            Keine Figur verbunden —
+            <a href="/tonies">auf der Tonies-Seite eine Quelle wählen</a>, dann steht hier
+            der Verlauf.
+        </p>
+        {% else %}
+        <div class="tonie-history-figures">
+            {% for f in figures %}
+            <section class="tonie-history-figure" id="figure-{{ f.tonie_id }}">
+                <h3 class="tonie-history-name">{{ f.name }}</h3>
+                <p class="tonie-history-source">{{ f.source_label }}</p>
+
+                {% if let Some(now) = f.current %}
+                <p class="tonie-history-now"><strong>Auf der Figur:</strong> {{ now }}</p>
+                {% else %}
+                <p class="tonie-history-now hub-muted">Noch nichts aufgespielt.</p>
+                {% endif %} {% if let Some(last) = f.last %}
+                <p class="tonie-history-last {{ f.last_class }}">Zuletzt: {{ last }}</p>
+                {% else %}
+                <p class="tonie-history-last">Noch kein Sync gelaufen.</p>
+                {% endif %} {% if !f.runs.is_empty() %}
+                <ol class="tonie-history-runs">
+                    {% for r in f.runs %}
+                    <li class="tonie-history-run">
+                        <span class="tonie-history-run-when"
+                            >{{ r.started_label() }}</span
+                        >
+                        <span class="tonie-history-run-status"
+                            >{{ r.status_label() }}</span
+                        >
+                        <span class="tonie-history-run-meta"
+                            >{{ r.chapters() }} Kapitel &middot; {{ r.minutes() }} min{%
+                            if r.added_count() > 0 %} &middot; +{{ r.added_count() }}{%
+                            endif %}{% if r.removed_count() > 0 %} &middot; -{{
+                            r.removed_count() }}{% endif %}</span
+                        >
+                        {% if !r.skipped.is_empty() %}
+                        <span class="tonie-history-run-skip"
+                            >{{ r.skipped.len() }} übersprungen: {% for s in r.skipped
+                            %}{{ s.title }} ({{ s.label() }}){% if !loop.last %}, {% endif
+                            %}{% endfor %}</span
+                        >
+                        {% endif %} {% if let Some(e) = r.error %}
+                        <span class="tonie-history-run-err">{{ e }}</span>
+                        {% endif %}
+                    </li>
+                    {% endfor %}
+                </ol>
+                {% endif %}
+            </section>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </article>
+
+    <article>
+        <h2>Gehört</h2>
+        {% if seen.is_empty() %}
+        <p class="tonie-history-hint">
+            Noch nichts gehört — sobald ein Album einmal auf einer Figur lief, steht es
+            hier.
+        </p>
+        {% else %}
+        <ul class="tonie-history-seen">
+            {% for s in seen %}
+            <li>
+                <span>{{ s.title }}</span>
+                <span class="tonie-history-hint">{{ s.last_used_at }}</span>
+                <form method="post" action="/tonies/history/unlisten">
+                    <input type="hidden" name="album_id" value="{{ s.album_id }}" />
+                    <button type="submit" title="wieder als ungehört anbieten">
+                        unlistened
+                    </button>
+                </form>
+            </li>
+            {% endfor %}
+        </ul>
+        <form method="post" action="/tonies/history/reset" style="margin-top: 0.6rem">
+            <button type="submit" class="hub-ta-cancel">alle zurücksetzen</button>
+        </form>
+        {% endif %}
+    </article>
+</div>
+{% endblock %}
