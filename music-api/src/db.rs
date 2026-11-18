@@ -185,6 +185,62 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
         .execute(pool)
         .await;
 
+    // Deezer catalogue cache (U0a): the metadata the tonie path reads.
+    // Payloads are stored verbatim, so the HTTP contract stays byte-identical
+    // whether an answer comes from Deezer or from the cache.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS catalogue_album_pages (
+            artist_id  TEXT NOT NULL,
+            page_index INTEGER NOT NULL,
+            payload    TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL,
+            PRIMARY KEY (artist_id, page_index)
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS catalogue_albums (
+            album_id     TEXT PRIMARY KEY,
+            artist_id    TEXT,
+            title        TEXT,
+            release_date TEXT,
+            record_type  TEXT,
+            cover_url    TEXT,
+            seconds      INTEGER,
+            payload      TEXT NOT NULL,
+            fetched_at   INTEGER NOT NULL
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS catalogue_searches (
+            term       TEXT NOT NULL,
+            lim        INTEGER NOT NULL,
+            payload    TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL,
+            PRIMARY KEY (term, lim)
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_catalogue_albums_artist
+             ON catalogue_albums(artist_id, release_date);",
+    )
+    .execute(pool)
+    .await?;
+
     // The unified priority work-queue (additive, idempotent). Every background
     // kind — download, transcode, analyze, crawl:<source> leads — lives here;
     // `next` (see `crate::work`) is the single place priority is applied.
@@ -898,6 +954,163 @@ pub async fn metadata_bulk(
         .into_iter()
         .map(crate::models::TrackMetadata::with_key_alias)
         .collect())
+}
+
+// ── Deezer catalogue cache (U0a) ────────────────────────────────────────────
+
+/// TTL for an artist's album page: release lists change rarely.
+pub const CATALOGUE_ARTIST_TTL: i64 = 24 * 3600;
+/// TTL for an album's tracklist.
+pub const CATALOGUE_ALBUM_TTL: i64 = 7 * 24 * 3600;
+/// TTL for an artist search result.
+pub const CATALOGUE_SEARCH_TTL: i64 = 24 * 3600;
+
+/// One page of an artist's release list, when fresh.
+pub async fn catalogue_page_get(
+    pool: &Pool<Sqlite>,
+    artist_id: &str,
+    index: i64,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let q = sqlx::query(
+        "SELECT payload, fetched_at FROM catalogue_album_pages
+          WHERE artist_id = ? AND page_index = ?",
+    )
+    .bind(artist_id)
+    .bind(index);
+    let row = q.fetch_optional(pool).await?;
+    let Some(row) = row else { return Ok(None) };
+    let fetched_at: i64 = sqlx::Row::get(&row, "fetched_at");
+    if fetched_at < now() - CATALOGUE_ARTIST_TTL {
+        return Ok(None);
+    }
+    let payload: String = sqlx::Row::get(&row, "payload");
+    Ok(serde_json::from_str(&payload).ok())
+}
+
+/// Store one page of an artist's release list.
+pub async fn catalogue_page_put(
+    pool: &Pool<Sqlite>,
+    artist_id: &str,
+    index: i64,
+    page: &serde_json::Value,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO catalogue_album_pages (artist_id, page_index, payload, fetched_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(artist_id, page_index) DO UPDATE SET
+             payload = excluded.payload, fetched_at = excluded.fetched_at",
+    )
+    .bind(artist_id)
+    .bind(index)
+    .bind(page.to_string())
+    .bind(now())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// One album (metadata + tracklist), when fresh.
+pub async fn catalogue_album_get(
+    pool: &Pool<Sqlite>,
+    album_id: &str,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let row = sqlx::query(
+        "SELECT payload, fetched_at FROM catalogue_albums WHERE album_id = ?",
+    )
+    .bind(album_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+    let fetched_at: i64 = sqlx::Row::get(&row, "fetched_at");
+    if fetched_at < now() - CATALOGUE_ALBUM_TTL {
+        return Ok(None);
+    }
+    let payload: String = sqlx::Row::get(&row, "payload");
+    Ok(serde_json::from_str(&payload).ok())
+}
+
+/// Store one album; the derived columns are best effort (the payload is
+/// authoritative and is what the HTTP layer returns).
+pub async fn catalogue_album_put(
+    pool: &Pool<Sqlite>,
+    album_id: &str,
+    album: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let text = |k: &str| album.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    sqlx::query(
+        "INSERT INTO catalogue_albums
+             (album_id, artist_id, title, release_date, record_type, cover_url,
+              seconds, payload, fetched_at)
+         VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(album_id) DO UPDATE SET
+             title = excluded.title,
+             release_date = excluded.release_date,
+             record_type = excluded.record_type,
+             cover_url = excluded.cover_url,
+             seconds = excluded.seconds,
+             payload = excluded.payload,
+             fetched_at = excluded.fetched_at",
+    )
+    .bind(album_id)
+    .bind(text("title"))
+    .bind(text("releaseDate"))
+    .bind(text("recordType"))
+    .bind(text("coverUrl"))
+    .bind(album.get("seconds").and_then(|v| v.as_i64()))
+    .bind(album.to_string())
+    .bind(now())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// An artist search result, when fresh.
+pub async fn catalogue_search_get(
+    pool: &Pool<Sqlite>,
+    term: &str,
+    limit: i64,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let row = sqlx::query(
+        "SELECT payload, fetched_at FROM catalogue_searches WHERE term = ? AND lim = ?",
+    )
+    .bind(normalize_term(term))
+    .bind(limit)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+    let fetched_at: i64 = sqlx::Row::get(&row, "fetched_at");
+    if fetched_at < now() - CATALOGUE_SEARCH_TTL {
+        return Ok(None);
+    }
+    let payload: String = sqlx::Row::get(&row, "payload");
+    Ok(serde_json::from_str(&payload).ok())
+}
+
+/// Store an artist search result.
+pub async fn catalogue_search_put(
+    pool: &Pool<Sqlite>,
+    term: &str,
+    limit: i64,
+    payload: &serde_json::Value,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO catalogue_searches (term, lim, payload, fetched_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(term, lim) DO UPDATE SET
+             payload = excluded.payload, fetched_at = excluded.fetched_at",
+    )
+    .bind(normalize_term(term))
+    .bind(limit)
+    .bind(payload.to_string())
+    .bind(now())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Search terms are matched case-insensitively and trimmed.
+fn normalize_term(term: &str) -> String {
+    term.trim().to_lowercase()
 }
 
 #[cfg(test)]
