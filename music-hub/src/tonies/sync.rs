@@ -62,7 +62,7 @@ impl Default for DiffKind {
 }
 
 /// A plan for reconciling existing chapters with desired tracks.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct DiffPlan {
     pub kind: DiffKind,
     /// The full target chapter list.
@@ -154,14 +154,22 @@ pub fn greedy_fit(
 fn chapter_for(track: &DesiredTrack) -> Chapter {
     Chapter {
         title: Some(track.title.clone()),
-        seconds: Some(ms_to_seconds(track.duration_ms)),
+        seconds: Some(ms_to_seconds(track.duration_ms) as f64),
         ..Default::default()
     }
 }
 
+/// How far a chapter length may deviate before it counts as a
+/// different chapter. The API reports fractional seconds of the
+/// *transcoded* file, which never matches the planned integer length
+/// exactly.
+const SECONDS_TOLERANCE: f64 = 2.0;
+
 fn same_as(chapter: &Chapter, track: &DesiredTrack) -> bool {
     chapter.title.as_deref() == Some(track.title.as_str())
-        && chapter.seconds == Some(ms_to_seconds(track.duration_ms))
+        && chapter.seconds.is_some_and(|s| {
+            (s - ms_to_seconds(track.duration_ms) as f64).abs() <= SECONDS_TOLERANCE
+        })
 }
 
 /// Compare the Tonie's existing chapters with a planned list.
@@ -390,7 +398,7 @@ mod tests {
     fn chapter(title: &str, seconds: i64) -> Chapter {
         Chapter {
             title: Some(title.to_string()),
-            seconds: Some(seconds),
+            seconds: Some(seconds as f64),
             ..Default::default()
         }
     }

@@ -127,11 +127,11 @@ async fn mock_read(st: AuthState) -> String {
         async move {
             match g() {
                 Some(code) => (code, Json(json!({}))).into_response(),
-                None => Json(json!({"creativetonies": [{
+                None => Json(json!([{
                     "id": "ct1", "name": "Story One",
                     "secondsPresent": 3780, "secondsRemaining": 1620,
-                    "chapters": [{"id": "ch1", "title": "Intro"}]
-                }]}))
+                    "chapters": [{"id": "ch1", "title": "Intro", "seconds": 92.820646}]
+                }]))
                 .into_response(),
             }
         }
@@ -200,6 +200,10 @@ async fn read_endpoints_parse_capacity() {
     let list = client.get_creativetonies("hh1").await.unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].title.as_deref(), Some("Story One"));
+    // Die echte API liefert ein nacktes Array mit sekundenbruchteil-
+    // genauen Kapitellaengen.
+    assert_eq!(list[0].chapters.len(), 1, "chapters must survive parsing");
+    assert_eq!(list[0].chapters[0].seconds, Some(92.820646));
     let cap = tonies::Capacity::from_tonie(&list[0]);
     assert_eq!(cap.minutes_present(), 63);
     assert_eq!(cap.minutes_total(), 90);
