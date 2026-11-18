@@ -257,16 +257,19 @@ async fn mock_upload() -> (String, UpState) {
     let file = move || {
         let s = ticket_state.clone();
         async move {
+            // Shape of the live API: the upload target is nested.
             Json(json!({
                 "fileId": "file-1",
-                "url": format!("{}/s3/upload", s.base),
-                "fields": {"key": "k1", "policy": "p1"}
+                "request": {
+                    "url": format!("{}/s3/upload", s.base),
+                    "fields": {"key": "k1", "policy": "p1"}
+                }
             }))
         }
     };
     let app = Router::new()
         .route("/v2/file", post(file))
-        .route("/s3/upload", put(put_handler))
+        .route("/s3/upload", post(put_handler))
         .route("/v2/households/{hid}/creativetonies/{ctid}/chapters", post(chapter_handler))
         .route("/v2/households/{hid}/creativetonies/{ctid}", patch(patch_handler))
         .with_state(st.clone());

@@ -345,8 +345,12 @@ impl ToniesClient {
         Ok(parse_ticket(&v))
     }
 
-    /// Multipart `PUT` to the presigned S3 URL. Fields come first, the file
+    /// Multipart `POST` to the presigned S3 URL. Fields come first, the file
     /// part last — built manually (no reqwest multipart feature).
+    ///
+    /// POST, not PUT: `/v2/file` hands out a **browser-style POST policy**
+    /// (`policy` + `x-amz-signature` form fields), and S3 rejects PUT against
+    /// that URL. Reference implementation: `tonie/src/tonies.rs:upload_to_s3`.
     pub async fn put_multipart(
         &self,
         ticket: &UploadTicket,
@@ -354,11 +358,17 @@ impl ToniesClient {
         content_type: &str,
         bytes: &[u8],
     ) -> TResult<()> {
+        if ticket.url.is_empty() {
+            return Err(ToniesError::Other(anyhow::anyhow!(
+                "Upload-Ticket ohne URL (fileId={})",
+                ticket.file_id
+            )));
+        }
         let boundary = format!("----hubtonies{}", Utc::now().timestamp_nanos_opt().unwrap_or(0));
         let body = build_multipart(&boundary, &ticket.fields, filename, content_type, bytes);
         let resp = self
             .http
-            .put(&ticket.url)
+            .post(&ticket.url)
             .header(
                 reqwest::header::CONTENT_TYPE,
                 format!("multipart/form-data; boundary={boundary}"),
@@ -366,7 +376,11 @@ impl ToniesClient {
             .body(reqwest::Body::from(body))
             .send()
             .await
-            .map_err(|_| ToniesError::Other(anyhow::anyhow!("S3-Upload nicht erreichbar")))?;
+            .map_err(|e| {
+                // `without_url()`: the presigned URL carries a signature and
+                // must never reach a log line or the run log.
+                ToniesError::Other(anyhow::anyhow!("S3-Upload fehlgeschlagen: {}", e.without_url()))
+            })?;
         if !resp.status().is_success() {
             return Err(ToniesError::Other(anyhow::anyhow!(
                 "S3-Upload antwortete {}",
@@ -432,21 +446,32 @@ fn parse_list<T: serde::de::DeserializeOwned>(v: &Value, key: &str) -> Vec<T> {
         .collect()
 }
 
+/// Parse the `POST /v2/file` ticket.
+///
+/// The live API nests the upload target: `{"fileId": …, "request":
+/// {"url": …, "fields": {…}}}` (verified 2026-11-18). Reading `url` /
+/// `fields` off the top level left both empty, so the upload went to the
+/// empty string and surfaced as "S3-Upload nicht erreichbar".
 fn parse_ticket(v: &Value) -> UploadTicket {
+    let nested = v.get("request");
+    let pick = |key: &str, alt: &str| -> Option<&Value> {
+        nested
+            .and_then(|r| r.get(key))
+            .or_else(|| v.get(key))
+            .or_else(|| v.get(alt))
+    };
     let file_id = v
         .get("fileId")
         .or_else(|| v.get("file_id"))
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let url = v
-        .get("url")
-        .or_else(|| v.get("presignedUrl"))
+    let url = pick("url", "presignedUrl")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
     let mut fields = Vec::new();
-    if let Some(obj) = v.get("fields").and_then(Value::as_object) {
+    if let Some(obj) = pick("fields", "fields").and_then(Value::as_object) {
         for (k, val) in obj {
             fields.push((k.clone(), val.as_str().unwrap_or_default().to_string()));
         }
