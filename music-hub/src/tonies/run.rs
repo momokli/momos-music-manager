@@ -699,7 +699,18 @@ pub async fn execute_binding(
                 .into_iter()
                 .filter(|isrc| seen.insert(isrc.clone()))
                 .collect();
-            match crate::music_api::order_with_priority(cfg, &wanted, 5).await {
+            // A tonie never needs FLAC: order as `toys` at the binding's
+            // format, so music-api skips the lossless fetch and the analysis.
+            let target = binding.format.clone();
+            match crate::music_api::order_with_priority_intent(
+                cfg,
+                &wanted,
+                5,
+                "toys",
+                Some(&target),
+            )
+            .await
+            {
                 Ok(_) => tracing::info!(
                     "tonies: {} Album-Tracks geordert (user {uid})",
                     wanted.len()

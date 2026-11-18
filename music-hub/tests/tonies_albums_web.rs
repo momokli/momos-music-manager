@@ -126,7 +126,15 @@ async fn spawn_music_api() -> String {
         }))
     };
     let album = |Path(id): Path<String>| async move {
-        Json(json!({
+        if id.starts_with("gone") {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(json!({"error": "album not found"})),
+            );
+        }
+        (
+            axum::http::StatusCode::OK,
+            Json(json!({
             "albumId": id,
             "title": format!("Folge {id}"),
             "releaseDate": "2026-11-13",
@@ -134,7 +142,8 @@ async fn spawn_music_api() -> String {
             "coverUrl": "https://cdn.example/459.jpg",
             "seconds": 200,
             "tracks": [{"isrc": "A1", "title": "Kapitel 1", "durationMs": 200_000, "position": 1}]
-        }))
+        })),
+        )
     };
 
     let app = Router::new()
@@ -622,7 +631,7 @@ async fn unresolved_basket_entry_stays_visible() {
 }
 
 #[tokio::test]
-async fn cached_album_is_not_flagged_unresolved() {
+async fn catalogue_album_is_not_flagged_unresolved() {
     let app = boot(Some("tok")).await;
     let (uid, cookie) = user(&app, "alb-cached").await;
     bind_albums(&app, uid, Some(15167501), "basket").await;
@@ -631,16 +640,8 @@ async fn cached_album_is_not_flagged_unresolved() {
         .unwrap()
         .unwrap()
         .id;
-    sqlx::query(
-        "INSERT INTO hub_deezer_albums
-             (album_id, artist_id, title, release_date, record_type, cover_url, seconds,
-              tracks_json, fetched_at)
-         VALUES ('777', '1', 'Alte Folge', '2020-01-01', 'album', NULL, 200, '[]', ?1)",
-    )
-    .bind("2026-11-18T00:00:00+00:00")
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    // Not in the artist page, but music-api resolves it (the catalogue owns the
+    // cache now, the hub keeps none).
     tonies::set_album_items(
         &app.pool,
         binding_id,
@@ -651,7 +652,10 @@ async fn cached_album_is_not_flagged_unresolved() {
 
     let html = page(&app, &cookie, "/tonies/ct1/albums").await;
     assert!(html.contains("Alte Folge"));
-    assert!(!html.contains("nicht auflösbar"), "cached album resolves");
+    assert!(
+        !html.contains("nicht auflösbar"),
+        "an album music-api resolves must not be flagged"
+    );
 }
 
 #[tokio::test]
