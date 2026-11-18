@@ -4158,10 +4158,26 @@ async fn deezer_search_mock(
 }
 
 /// Spawn the mock Deezer API on an ephemeral port; returns its base URL.
+/// Tracklist mock: `/album/{id}` omits ISRCs, only this listing carries them.
+async fn deezer_album_tracks_mock(UrlPath(_id): UrlPath<String>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "data": [
+            { "id": 1, "title": "Kapitel 01: Die Robo-Ente (Folge 459)", "duration": 98,
+              "isrc": "CH7812690465", "track_position": 1 },
+            { "id": 2, "title": "Kapitel 02: Die Ente fliegt", "duration": 60,
+              "isrc": "CH7812690466", "track_position": 2 },
+            { "id": 3, "title": "Kapitel 03: Outro", "duration": 10,
+              "isrc": "CH7812690467", "track_position": 3 }
+        ],
+        "next": null
+    }))
+}
+
 async fn spawn_deezer_meta_mock() -> String {
     let app = Router::new()
         .route("/artist/{id}/albums", get(deezer_artist_albums_mock))
         .route("/album/{id}", get(deezer_album_meta_mock))
+        .route("/album/{id}/tracks", get(deezer_album_tracks_mock))
         .route("/search/artist", get(deezer_search_mock));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -4186,6 +4202,25 @@ async fn get_json_authed(app: &Router, uri: &str) -> (StatusCode, serde_json::Va
     let (status, body) = send(app, authed("GET", uri).body(Body::empty()).unwrap()).await;
     let v = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
     (status, v)
+}
+
+#[tokio::test]
+async fn deezer_album_detail_backfills_missing_isrcs() {
+    let h = harness_deezer_meta(spawn_deezer_meta_mock().await).await;
+    let (status, v) = get_json_authed(&h.app, "/deezer/album/1137915301").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // `/album/{id}` left the third track without an ISRC; the tracklist call
+    // must fill it, otherwise the hub would skip the whole album.
+    let tracks = v["tracks"].as_array().expect("tracks");
+    assert_eq!(tracks.len(), 3);
+    for track in tracks {
+        assert!(
+            track["isrc"].as_str().is_some_and(|s| !s.is_empty()),
+            "every track needs an ISRC: {track}"
+        );
+    }
+    assert_eq!(tracks[2]["isrc"], "CH7812690467");
 }
 
 #[tokio::test]
@@ -4282,8 +4317,9 @@ async fn deezer_album_maps_metadata_and_sorts_tracks() {
     assert_eq!(tracks[0]["isrc"], "CH7812690465");
     assert_eq!(tracks[0]["title"], "Kapitel 01: Die Robo-Ente (Folge 459)");
     assert_eq!(tracks[0]["durationMs"], 98_000);
-    // A track without an ISRC is kept, with `isrc: null`.
-    assert!(tracks[2]["isrc"].is_null());
+    // A track the album payload left without an ISRC is backfilled from the
+    // tracklist listing (see `deezer_album_detail_backfills_missing_isrcs`).
+    assert_eq!(tracks[2]["isrc"], "CH7812690467");
 }
 
 #[tokio::test]
