@@ -684,12 +684,36 @@ pub async fn execute_binding(
             .filter_map(|t| t.isrc.clone())
             .collect();
         let ready = readiness(cfg, isrcs).await;
+        // Album sources have no playlist fetch that would order their tracks,
+        // so order whatever is missing here. The album still cannot go on the
+        // tonie until it is downloaded — the next sync picks it up.
+        let missing: Vec<String> = albums
+            .iter()
+            .flat_map(|a| a.tracks.iter())
+            .filter_map(|t| t.isrc.clone())
+            .filter(|isrc| !ready.contains(isrc))
+            .collect();
+        if !missing.is_empty() {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let wanted: Vec<String> = missing
+                .into_iter()
+                .filter(|isrc| seen.insert(isrc.clone()))
+                .collect();
+            match crate::music_api::order_with_priority(cfg, &wanted, 5).await {
+                Ok(_) => tracing::info!(
+                    "tonies: {} Album-Tracks geordert (user {uid})",
+                    wanted.len()
+                ),
+                Err(e) => tracing::warn!("tonies album order failed for user {uid}: {e:#}"),
+            }
+        }
         let fit = super::albums::fit_albums(albums, binding.cap_seconds, |isrc| {
             ready.contains(isrc)
         });
         if fit.albums.is_empty() {
             return fail(
-                "Kein ganzes Album passt in die verbleibende Kapazität".to_string(),
+                "Kein ganzes Album ist komplett im Vault — fehlende Tracks wurden geordert,                  bitte in einigen Minuten erneut syncen"
+                    .to_string(),
             );
         }
         let desired: Vec<super::sync::DesiredTrack> = fit
