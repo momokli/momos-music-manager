@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use axum::body::Bytes;
 use axum::extract::{Form, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::{get, patch, post, put};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use music_hub::config::Config;
 use music_hub::tonies::client::{ToniesClient, ToniesError};
@@ -129,6 +129,7 @@ async fn mock_read(st: AuthState) -> String {
                 Some(code) => (code, Json(json!({}))).into_response(),
                 None => Json(json!([{
                     "id": "ct1", "name": "Story One",
+                    "imageUrl": "https://example.invalid/cover.png",
                     "secondsPresent": 3780, "secondsRemaining": 1620,
                     "chapters": [{"id": "ch1", "title": "Intro", "seconds": 92.820646}]
                 }]))
@@ -352,7 +353,7 @@ async fn connect_stores_encrypted_token_and_hides_credentials() {
         .unwrap();
     assert!(!html.contains(PASSWORD), "password leaked into HTML");
     assert!(!html.contains(REFRESH), "refresh token leaked into HTML");
-    assert!(html.contains("63 min / 90 min"), "capacity missing in HTML");
+    assert!(html.contains("63 / 90 min"), "capacity missing in HTML");
 
     // Stored secret is ciphertext; decryption round-trips.
     let enc = tonies::load_secret_enc(&app.pool, uid).await.unwrap().unwrap();
@@ -455,7 +456,7 @@ async fn accounts_are_isolated_per_user() {
         .unwrap();
     // B has no account → connect form, no capacity, no A's data.
     assert!(html_b.contains("/tonies/connect"));
-    assert!(!html_b.contains("63 min / 90 min"));
+    assert!(!html_b.contains("63 / 90 min"));
     assert!(!html_b.contains("dave@example.com"));
 
     let html_a = app
@@ -468,7 +469,7 @@ async fn accounts_are_isolated_per_user() {
         .text()
         .await
         .unwrap();
-    assert!(html_a.contains("63 min / 90 min"));
+    assert!(html_a.contains("63 / 90 min"));
     let _ = cookie_a;
 }
 
@@ -827,8 +828,16 @@ async fn tonies_page_lists_playlists_as_options_with_capacity() {
     let opt = format!("<option value=\"playlist:{pl}\">Chill Mix</option>");
     assert!(html.contains(&opt), "playlist option missing: {opt}");
     // Capacity bar mirrors the mock (3780 s present, 5400 s total).
-    assert!(html.contains("63 min / 90 min"), "capacity text missing");
+    assert!(html.contains("63 / 90 min"), "capacity text missing");
     assert!(html.contains("value=\"70\""), "capacity percent missing");
+    // The mobile card shows the Tonies cover from `imageUrl`.
+    assert!(
+        html.contains("https://example.invalid/cover.png"),
+        "cover image missing"
+    );
+    // Unbound Tonie: the card exists, the Sync button only appears once a
+    // source is bound.
+    assert!(html.contains("id=\"tonie-ct1\""), "card root missing");
 }
 
 /// Editing an existing binding re-uses the same row (no duplicate) and the page
@@ -900,6 +909,15 @@ async fn binding_edit_updates_in_place_via_web() {
         .await
         .unwrap();
     assert!(html.contains("Second"), "page should show the edited source");
+    // A bound Tonie gets the one-press sync button (refresh + run).
+    assert!(
+        html.contains("class=\"tonie-sync\""),
+        "sync button missing on a bound Tonie"
+    );
+    assert!(
+        html.contains("name=\"refresh\" value=\"playlist\""),
+        "sync button must refresh the playlist first"
+    );
 }
 
 /// User B never sees A's binding source name on their own `/tonies` page.

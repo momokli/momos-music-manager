@@ -21,7 +21,7 @@ use axum::body::Bytes;
 use axum::extract::{Form, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use music_hub::config::Config;
 use music_hub::tonies::client::ToniesClient;
@@ -608,11 +608,11 @@ async fn sync_endpoint_summarises_and_never_leaks_credentials() {
     assert!(!body.contains(REFRESH), "refresh token leaked into HTML");
     assert!(!body.contains(PASSWORD), "password leaked into HTML");
     assert!(
-        body.contains("Sync-Verlauf"),
+        body.contains("<summary>Verlauf</summary>"),
         "run log expected in the fragment"
     );
     assert!(
-        body.contains("Jetzt synchronisieren"),
+        body.contains("class=\"tonie-sync\""),
         "sync button expected"
     );
 

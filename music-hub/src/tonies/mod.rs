@@ -134,6 +134,9 @@ pub struct CreativeTonie {
     pub id: Option<String>,
     #[serde(default, alias = "name")]
     pub title: Option<String>,
+    /// Cover image URL served by the API (the mobile card grid shows it).
+    #[serde(default)]
+    pub image_url: Option<String>,
     /// Seconds already occupied on the Tonie.
     #[serde(default)]
     pub seconds_present: Option<i64>,
@@ -489,6 +492,20 @@ mod tests {
             serde_json::from_value(v).expect("fractional seconds must parse");
         assert_eq!(t.chapters.len(), 1);
         assert_eq!(t.chapters[0].seconds, Some(92.820646));
+    }
+
+    #[test]
+    fn image_url_is_read_from_the_payload() {
+        let v = serde_json::json!({
+            "id": "ct1", "name": "Story One",
+            "imageUrl": "https://example.invalid/cover.png",
+            "secondsPresent": 1, "secondsRemaining": 2
+        });
+        let t: CreativeTonie = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            t.image_url.as_deref(),
+            Some("https://example.invalid/cover.png")
+        );
     }
 
     #[test]

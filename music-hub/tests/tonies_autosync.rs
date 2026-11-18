@@ -18,7 +18,7 @@ use axum::body::Bytes;
 use axum::extract::{Form, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use music_hub::config::Config;
 use music_hub::tonies::run::{self, STATUS_OK};

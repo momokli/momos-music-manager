@@ -1,0 +1,20 @@
+{# One Kreativ-Tonie card. Included from `tonies.html` (loop var `c`) and
+   rendered standalone by the binding/save/delete/sync handlers, which swap
+   `#tonie-{id}` wholesale so capacity and cover stay in sync after a run. #}
+<article class="tonie-card" id="tonie-{{ c.id }}">
+    <div class="tonie-head">
+        {% if let Some(img) = c.image_url %}
+        <img class="tonie-cover" src="{{ img }}" alt="" loading="lazy" referrerpolicy="no-referrer" />
+        {% else %}
+        <div class="tonie-cover" aria-hidden="true">&#9834;</div>
+        {% endif %}
+        <div>
+            <h3 class="tonie-title">{{ c.title }}</h3>
+            <p class="tonie-cap">
+                {{ c.minutes_present }} / {{ c.minutes_total }} min &middot; {{ c.percent }}%
+            </p>
+        </div>
+    </div>
+    <progress class="tonie-bar" value="{{ c.percent }}" max="100"></progress>
+    {% include "_partials/tonie_binding.html" %}
+</article>

@@ -1,37 +1,29 @@
-{# Tonie source binding (#500) + sync run (#502) + multi-kind sources (#504).
-   Renders the current binding of one Kreativ-Tonie or a form to pick a source
-   (playlist / backpack / tag). Swapped in place by htmx
-   (`hx-target="#binding-{{ c.id }}"`, `hx-swap="outerHTML"`), so this file is
-   both included from `tonies.html` (loop var `c`) and rendered standalone by the
-   save/delete/sync handlers. It performs no API call itself — the sync button
-   posts to `/tonies/{id}/sync` and the run log is DB-backed.
+{# Source binding (#500), sync run (#502) and multi-kind sources (#504) of one
+   Kreativ-Tonie.
 
-   The picker is a single no-JS `<select name="source_id">`; each option carries
-   a combined `kind:id` value so ids never collide across kinds. #}
-<div id="binding-{{ c.id }}" class="hub-tonie-binding">
+   Every form swaps the *whole card* (`#tonie-{id}`, outerHTML) so the cover and
+   the capacity bar refresh after a run - the old binding-only fragment left
+   "73 / 89 min" stale. #}
+<div class="hub-tonie-binding" id="binding-{{ c.id }}">
     {% if let Some(b) = c.binding %}
-    <p class="hub-muted">
-        Quelle: <strong>{{ b.source_name }}</strong>
-        <span class="hub-badge">{{ b.kind_label() }}</span>
-        · {{ b.format }} · {{ b.mode }}
+    <p class="tonie-source">
+        <strong>{{ b.source_name }}</strong> &middot; {{ b.kind_label() }} &middot; {{ b.format }} &middot; {{ b.mode }}
     </p>
-    <form
-        hx-post="/tonies/{{ c.id }}/sync"
-        hx-target="#binding-{{ c.id }}"
-        hx-swap="outerHTML"
-        style="margin:0.4rem 0"
-    >
+    <form hx-post="/tonies/{{ c.id }}/sync" hx-target="#tonie-{{ c.id }}" hx-swap="outerHTML">
         <input type="hidden" name="tonie_name" value="{{ c.title }}" />
-        <button type="submit">Jetzt synchronisieren</button>
+        {# One press = refresh the playlist from Spotify, then sync the diff. #}
+        <input type="hidden" name="refresh" value="playlist" />
+        <button type="submit" class="tonie-sync">Sync</button>
     </form>
+
+    {% if !b.last_sync_status.is_empty() %}
+    <p class="tonie-source">Letzter Sync: {{ b.last_sync_status }} &middot; {{ b.last_sync_at }}</p>
+    {% endif %}
+
     <details>
         <summary>Bearbeiten</summary>
-        <form
-            hx-post="/tonies/{{ c.id }}/binding"
-            hx-target="#binding-{{ c.id }}"
-            hx-swap="outerHTML"
-            style="display:flex; flex-direction:column; gap:0.4rem; max-width:22rem"
-        >
+        <form hx-post="/tonies/{{ c.id }}/binding" hx-target="#tonie-{{ c.id }}" hx-swap="outerHTML"
+              style="display:flex; flex-direction:column; gap:0.4rem">
             <input type="hidden" name="tonie_name" value="{{ c.title }}" />
             <label>Quelle
                 <select name="source_id" required>
@@ -62,33 +54,30 @@
                 <button type="submit">Speichern</button>
             </div>
         </form>
-        <form
-            hx-post="/tonies/{{ c.id }}/binding/delete"
-            hx-target="#binding-{{ c.id }}"
-            hx-swap="outerHTML"
-        >
+        <form hx-post="/tonies/{{ c.id }}/binding/delete" hx-target="#tonie-{{ c.id }}" hx-swap="outerHTML">
             <input type="hidden" name="tonie_name" value="{{ c.title }}" />
             <button type="submit" class="hub-ta-cancel">Entfernen</button>
         </form>
     </details>
+
     {% if c.runs.is_empty() %}
-    <p class="hub-muted">Noch kein Sync.</p>
+    <p class="tonie-source">Noch kein Sync.</p>
     {% else %}
     <details>
-        <summary>Sync-Verlauf</summary>
+        <summary>Verlauf</summary>
         <ul class="hub-muted" style="list-style:none; padding-left:0">
             {% for r in c.runs %}
             <li>
-                <strong>{{ r.started_label() }}</strong> · {{ r.status_label() }}
-                {% if !r.duration_label().is_empty() %} · {{ r.duration_label() }}{% endif %}
-                · {{ r.chapters() }} Kapitel, {{ r.minutes() }} min
-                {% if r.added_count() > 0 %} · +{{ r.added_count() }}{% endif %}
-                {% if r.removed_count() > 0 %} · −{{ r.removed_count() }}{% endif %}
-                {% if let Some(e) = r.error %} · {{ e }}{% endif %}
+                <strong>{{ r.started_label() }}</strong> &middot; {{ r.status_label() }}
+                {% if !r.duration_label().is_empty() %} &middot; {{ r.duration_label() }}{% endif %}
+                &middot; {{ r.chapters() }} Kapitel, {{ r.minutes() }} min
+                {% if r.added_count() > 0 %} &middot; +{{ r.added_count() }}{% endif %}
+                {% if r.removed_count() > 0 %} &middot; -{{ r.removed_count() }}{% endif %}
+                {% if let Some(e) = r.error %} &middot; {{ e }}{% endif %}
                 {% if !r.skipped.is_empty() %}
                 <ul>
                     {% for s in r.skipped %}
-                    <li>{{ s.title }} — {{ s.label() }}</li>
+                    <li>{{ s.title }} - {{ s.label() }}</li>
                     {% endfor %}
                 </ul>
                 {% endif %}
@@ -102,18 +91,14 @@
         <summary>Quelle wählen</summary>
         {% if sources.is_empty() %}
         <p class="hub-muted">
-            Noch keine Quelle — erst
+            Noch keine Quelle - erst
             <a href="/me/playlists">Playlists holen</a>,
             <a href="/backpacks">Backpacks</a> oder
             <a href="/tags">Tags</a> anlegen, dann hier als Quelle wählen.
         </p>
         {% else %}
-        <form
-            hx-post="/tonies/{{ c.id }}/binding"
-            hx-target="#binding-{{ c.id }}"
-            hx-swap="outerHTML"
-            style="display:flex; flex-direction:column; gap:0.4rem; max-width:22rem"
-        >
+        <form hx-post="/tonies/{{ c.id }}/binding" hx-target="#tonie-{{ c.id }}" hx-swap="outerHTML"
+              style="display:flex; flex-direction:column; gap:0.4rem">
             <input type="hidden" name="tonie_name" value="{{ c.title }}" />
             <label>Quelle
                 <select name="source_id" required>

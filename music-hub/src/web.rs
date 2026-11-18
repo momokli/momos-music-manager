@@ -3563,6 +3563,8 @@ struct ToniesPage {
 struct ToniesCard {
     id: String,
     title: String,
+    /// Cover image URL from the Tonies API, when it has one.
+    image_url: Option<String>,
     minutes_present: i64,
     minutes_total: i64,
     percent: i64,
@@ -3746,6 +3748,7 @@ async fn tonies_page(State(st): State<AppState>, headers: HeaderMap) -> Response
                         .clone()
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| "Kreativ-Tonie".to_string()),
+                    image_url: t.image_url.clone(),
                     minutes_present: cap.minutes_present(),
                     minutes_total: cap.minutes_total(),
                     percent: cap.percent(),
@@ -3983,17 +3986,20 @@ fn binding_view(b: &crate::tonies::Binding, sources: &SourceGroups) -> BindingVi
     }
 }
 
-/// htmx fragment: the current binding (or picker) of one Tonie. DB-only, no
-/// Tonies-API call.
+/// htmx fragment: the whole card of one Tonie (cover, capacity, binding).
+///
+/// Capacity and cover come from the Tonies API so the card is correct right
+/// after a run; a failed call degrades to what we already know instead of
+/// breaking the swap.
 #[derive(Template)]
-#[template(path = "_partials/tonie_binding.html")]
-struct TonieBindingFragment {
+#[template(path = "_partials/tonie_card.html")]
+struct TonieCardFragment {
     c: ToniesCard,
     sources: SourceGroups,
 }
 
-/// Render `#binding-{tonie_id}` for the given user (used by save/delete/sync).
-async fn tonies_binding_fragment(
+/// Render `#tonie-{tonie_id}` for the given user (used by save/delete/sync).
+async fn tonies_card_fragment(
     st: &AppState,
     uid: i64,
     tonie_id: &str,
@@ -4011,13 +4017,37 @@ async fn tonies_binding_fragment(
         None => Vec::new(),
     };
     let binding = binding_row.as_ref().map(|b| binding_view(b, &sources));
-    render(&TonieBindingFragment {
+
+    let (mut minutes_present, mut minutes_total, mut percent) = (0, 0, 0);
+    let mut image_url = None;
+    let mut title = tonie_name;
+    if let Some(household) = crate::tonies::load_account(&st.pool, uid)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|a| a.household_id)
+        .filter(|h| !h.is_empty())
+        && let Ok(mut client) = crate::tonies::client_for(&st.pool, &st.cfg, uid).await
+        && let Ok(t) = client.get_creativetonie(&household, tonie_id).await
+    {
+        let cap = crate::tonies::Capacity::from_tonie(&t);
+        minutes_present = cap.minutes_present();
+        minutes_total = cap.minutes_total();
+        percent = cap.percent();
+        image_url = t.image_url.clone();
+        if let Some(n) = t.title.clone().filter(|s| !s.is_empty()) {
+            title = n;
+        }
+    }
+
+    render(&TonieCardFragment {
         c: ToniesCard {
             id: tonie_id.to_string(),
-            title: tonie_name,
-            minutes_present: 0,
-            minutes_total: 0,
-            percent: 0,
+            title,
+            image_url,
+            minutes_present,
+            minutes_total,
+            percent,
             binding,
             runs,
         },
@@ -4155,7 +4185,7 @@ async fn tonies_binding_save(
         }
     };
 
-    let resp = tonies_binding_fragment(&st, uid, &tonie_id, tonie_name).await;
+    let resp = tonies_card_fragment(&st, uid, &tonie_id, tonie_name).await;
     crate::toast::apply(resp, &msg, kind)
 }
 
@@ -4175,7 +4205,7 @@ async fn tonies_binding_delete(
         Err(e) => (format!("Fehler: {e}"), "err"),
     };
     let resp =
-        tonies_binding_fragment(&st, uid, &tonie_id, form.tonie_name.unwrap_or_default()).await;
+        tonies_card_fragment(&st, uid, &tonie_id, form.tonie_name.unwrap_or_default()).await;
     crate::toast::apply(resp, &msg, kind)
 }
 
@@ -4195,6 +4225,10 @@ async fn tonies_client_for(
 struct ToniesSyncForm {
     #[serde(default)]
     tonie_name: Option<String>,
+    /// `Some("playlist")` when the button should refresh the bound playlist
+    /// from Spotify before running (the one-press flow on `/tonies`).
+    #[serde(default)]
+    refresh: Option<String>,
 }
 
 /// `POST /tonies/{id}/sync` — run one sync for the session user's binding.
@@ -4226,15 +4260,38 @@ async fn tonies_sync(
         }
     };
 
+    // One-press flow: refresh the bound playlist from Spotify first, so the
+    // run sees the current track list instead of the last poller snapshot.
+    // A failed refresh never blocks the sync — it is named in the toast.
+    let refresh_note = match form.refresh.as_deref() {
+        Some("playlist") if binding.source_kind == crate::tonies::bindings::SOURCE_PLAYLIST => {
+            match binding.source_id {
+                Some(pid) => {
+                    match crate::worker::refresh_playlist_items(&st.pool, &st.cfg, uid, pid)
+                        .await
+                    {
+                        Ok(n) => format!(" · Playlist aktualisiert ({n} Tracks)"),
+                        Err(e) => {
+                            tracing::warn!("tonies playlist refresh failed for user {uid}: {e:#}");
+                            format!(" · Playlist nicht aktualisiert: {e}")
+                        }
+                    }
+                }
+                None => String::new(),
+            }
+        }
+        _ => String::new(),
+    };
+
     // claim_run *before* any API write: a run always leaves a log entry.
     let run_id = match crate::tonies::run::claim_run(&st.pool, binding.id).await {
         Ok(crate::tonies::run::Claim::Started(id)) => id,
         Ok(crate::tonies::run::Claim::Busy) => {
-            let resp = tonies_binding_fragment(&st, uid, &tonie_id, tonie_name).await;
+            let resp = tonies_card_fragment(&st, uid, &tonie_id, tonie_name).await;
             return crate::toast::apply(resp, "Ein Sync läuft bereits für diesen Tonie.", "err");
         }
         Ok(crate::tonies::run::Claim::RateLimited) => {
-            let resp = tonies_binding_fragment(&st, uid, &tonie_id, tonie_name).await;
+            let resp = tonies_card_fragment(&st, uid, &tonie_id, tonie_name).await;
             return crate::toast::apply(
                 resp,
                 "Bitte kurz warten — der letzte Sync ist noch nicht lange her.",
@@ -4248,12 +4305,12 @@ async fn tonies_sync(
     };
 
     let outcome = execute_sync(&st, uid, &binding).await;
-    let msg = crate::tonies::run::summary(&outcome);
+    let msg = format!("{}{refresh_note}", crate::tonies::run::summary(&outcome));
     if let Err(e) = crate::tonies::run::finish_run(&st.pool, run_id, &outcome).await {
         tracing::warn!("tonies finish_run failed for user {uid}: {e:#}");
     }
 
-    let resp = tonies_binding_fragment(&st, uid, &tonie_id, tonie_name).await;
+    let resp = tonies_card_fragment(&st, uid, &tonie_id, tonie_name).await;
     let kind = if outcome.status == crate::tonies::run::STATUS_ERROR {
         "err"
     } else {

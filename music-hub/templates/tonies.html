@@ -1,5 +1,70 @@
 {% extends "base.html" %} {% block title %}Tonies — Spelunke{% endblock %} {% block
 content %}
+<style>
+    /* Mobile first: one column, big tap targets. Columns only when there is
+       real width. */
+    .tonies-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 0.6rem;
+        margin-bottom: 0.8rem;
+    }
+    @media (min-width: 34rem) {
+        .tonies-grid {
+            grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+        }
+    }
+    .tonie-card {
+        margin: 0;
+        padding: 0.6rem;
+    }
+    .tonie-head {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+    }
+    .tonie-cover {
+        width: 3.6rem;
+        height: 3.6rem;
+        flex: 0 0 auto;
+        border-radius: 0.5rem;
+        object-fit: cover;
+        background: #161b22;
+        display: grid;
+        place-items: center;
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: var(--pico-primary);
+        border: 1px solid #30363d;
+    }
+    .tonie-title {
+        margin: 0;
+        font-size: 0.95rem;
+        line-height: 1.2;
+    }
+    .tonie-cap {
+        margin: 0.1rem 0 0 0;
+        font-size: 0.72rem;
+        opacity: 0.72;
+    }
+    .tonie-bar {
+        margin: 0.45rem 0 0.5rem 0;
+        height: 0.35rem;
+    }
+    /* The one button that matters: full width, thumb-sized. */
+    .tonie-sync {
+        width: 100%;
+        min-height: 2.75rem;
+        font-size: 0.9rem !important;
+        letter-spacing: 0.1em;
+    }
+    .tonie-source {
+        margin: 0.35rem 0 0 0;
+        font-size: 0.72rem;
+        opacity: 0.8;
+    }
+</style>
+
 <hgroup>
     <h1>Tonies</h1>
     <p class="hub-muted">
@@ -10,7 +75,7 @@ content %}
 </hgroup>
 
 {% if !message.is_empty() %}
-    <article class="hub-card">{{ message }}</article>
+<article class="hub-card">{{ message }}</article>
 {% endif %}
 
 {% if !connected %}
@@ -56,21 +121,9 @@ content %}
 {% if cards.is_empty() %}
 <p class="hub-empty">Keine Kreativ-Tonies in diesem Household gefunden.</p>
 {% else %}
-<div class="hub-backpack-grid">
+<div class="tonies-grid">
     {% for c in cards %}
-    <article class="hub-backpack-card" data-ctid="{{ c.id }}">
-        <header>
-            <h3>{{ c.title }}</h3>
-            <p class="hub-muted">{{ c.minutes_present }} min / {{ c.minutes_total }} min</p>
-            {% if let Some(b) = c.binding %}
-                {% if !b.last_sync_status.is_empty() %}
-                <p class="hub-muted">Letzter Sync: {{ b.last_sync_status }} · {{ b.last_sync_at }}</p>
-                {% endif %}
-            {% endif %}
-        </header>
-        <progress value="{{ c.percent }}" max="100"></progress>
-        {% include "_partials/tonie_binding.html" %}
-    </article>
+    {% include "_partials/tonie_card.html" %}
     {% endfor %}
 </div>
 {% endif %}
