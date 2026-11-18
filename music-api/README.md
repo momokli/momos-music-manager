@@ -207,6 +207,51 @@ a Premium/HiFi ARL — a Free ARL (`lossless: false`) silently falls back to a
 lower quality, and `DOWNLOAD_QUALITY=flac` then logs a startup warning. Responses:
 `409` when `DEEZER_ARL` is unset, `502` when the tier probe fails.
 
+### Deezer metadata (`/deezer/*`)
+
+Read-only lookups against the public Deezer API for the hub: artist release
+lists, album detail with ISRCs, and artist id resolution by name. They use the
+same `DEEZER_BASE` config as the ISRC lookup, need no ARL, and make **exactly
+one** upstream request each (no fan-out, no extra requests per album).
+
+| Method | Path                                       | Use                                                                     |
+| ------ | ------------------------------------------ | ----------------------------------------------------------------------- |
+| `GET`  | `/deezer/artist/{id}/albums?limit=&index=` | the artist's releases (`limit` default 50, max 100)                     |
+| `GET`  | `/deezer/album/{id}`                       | album metadata + its tracks (`isrc`, `title`, `durationMs`, `position`) |
+| `GET`  | `/deezer/search/artist?q=&limit=`          | artist id by name (`limit` default 10, max 100)                         |
+
+```json
+// GET /deezer/artist/15167501/albums?limit=50&index=0
+{
+  "albums": [
+    {
+      "albumId": "1137915301",
+      "title": "Folge 459: Die Robo-Ente (Das Original-Hörspiel zur TV-Serie)",
+      "releaseDate": "2026-11-13",
+      "recordType": "album",
+      "coverUrl": "https://cdn-images.dzcdn.net/images/cover/…/500x500-000000-80-0-0.jpg",
+      "nbTracks": null
+    }
+  ],
+  "total": 417,
+  "next": "https://api.deezer.com/artist/15167501/albums?limit=50&index=50"
+}
+```
+
+`nbTracks` is always `null`: Deezer's artist-albums list carries no track
+count, and the field exists so clients keep a stable shape. `coverUrl` prefers
+`cover_big`, then `cover_medium`, then `cover_xl`. `next` is Deezer's own paging
+link, passed through verbatim (may be `null`).
+
+`GET /deezer/album/{id}` adds `seconds` (the sum of every track's `duration`)
+and `tracks`, sorted by Deezer's 1-based `track_position`. Tracks without an
+ISRC are **kept** with `isrc: null` so the caller decides.
+
+Responses: `404` when Deezer has no such artist/album (Deezer reports that as an
+HTTP 200 `error` object with code 800, and a plain HTTP 404 means the same),
+`502` on transport/quota failures and unparseable payloads, `400` for a
+non-numeric id or a missing `q`.
+
 ### Per-ISRC metadata (BPM/key authority)
 
 The service is also the ISRC → {bpm, key, camelot} authority for a **range** of
@@ -466,7 +511,7 @@ still serves the track, but `sourceFormat` is `mp3-128` and there is no
 
 ```bash
 cargo test
-````
+```
 
 Unit tests for ISRC normalisation, order-status derivation, retry backoff,
 Deezer payload parsing, constant-time token compare, quality parsing, the ARL

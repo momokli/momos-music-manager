@@ -71,6 +71,13 @@ pub fn router() -> Router<Arc<AppState>> {
         // Per-ISRC metadata (BPM/key authority).
         .route("/metadata", post(post_metadata).get(get_metadata_range))
         .route("/metadata/{isrc}", get(get_metadata_one))
+        // Deezer metadata for the hub (public API, no ARL, one upstream call).
+        .route(
+            "/deezer/artist/{artist_id}/albums",
+            get(deezer_artist_albums),
+        )
+        .route("/deezer/album/{album_id}", get(deezer_album))
+        .route("/deezer/search/artist", get(deezer_search_artist))
         // Data Vault 2.0 consumer surface: resolved BPM/key by precedence.
         .route("/vault/tracks", get(get_vault_tracks))
         .route("/vault/track/{isrc}", get(get_vault_track))
@@ -482,6 +489,111 @@ async fn get_metadata_one(
             tracing::error!("get_metadata failed: {e:#}");
             error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read metadata")
         }
+    }
+}
+
+// ── Deezer metadata for the hub ──────────────────────────────────────────────
+//
+// Read-only passthroughs over the public Deezer API (no ARL, no credentials).
+// Each handler makes exactly one upstream call.
+
+/// Deezer ids are decimal in every list/detail response; anything else cannot
+/// address a Deezer object and must never reach the upstream path.
+fn deezer_numeric_id(raw: &str) -> Option<&str> {
+    let id = raw.trim();
+    (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())).then_some(id)
+}
+
+/// Map a metadata failure onto the wire: unknown objects are `404`, everything
+/// else (transport, quota, garbled payload) is `502`. The body stays short —
+/// details go to the service log, never into the response.
+fn deezer_meta_failure(what: &str, err: crate::deezer::MetaError) -> Response {
+    match err {
+        crate::deezer::MetaError::NotFound => {
+            error(StatusCode::NOT_FOUND, format!("deezer {what} not found"))
+        }
+        crate::deezer::MetaError::Upstream(detail) => {
+            tracing::warn!("deezer {what} request failed: {detail}");
+            error(StatusCode::BAD_GATEWAY, "deezer request failed")
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ArtistAlbumsQuery {
+    limit: Option<usize>,
+    index: Option<usize>,
+}
+
+/// `GET /deezer/artist/{artist_id}/albums?limit=&index=` — an artist's release
+/// list. `nbTracks` is always `null` (Deezer does not deliver it here).
+async fn deezer_artist_albums(
+    State(state): State<Arc<AppState>>,
+    Path(artist_id): Path<String>,
+    Query(q): Query<ArtistAlbumsQuery>,
+) -> Response {
+    let Some(artist_id) = deezer_numeric_id(&artist_id) else {
+        return error(StatusCode::BAD_REQUEST, "invalid artist id");
+    };
+    let limit = q
+        .limit
+        .unwrap_or(50)
+        .clamp(1, crate::deezer::METADATA_MAX_LIMIT);
+    let index = q.index.unwrap_or(0);
+
+    match crate::deezer::artist_albums(
+        &state.http,
+        &state.config.deezer_base,
+        artist_id,
+        limit,
+        index,
+    )
+    .await
+    {
+        Ok(page) => Json(page).into_response(),
+        Err(e) => deezer_meta_failure("artist", e),
+    }
+}
+
+/// `GET /deezer/album/{album_id}` — album metadata plus its tracks (ISRC,
+/// title, duration, 1-based position). Tracks without an ISRC stay in the list
+/// with `isrc: null`.
+async fn deezer_album(
+    State(state): State<Arc<AppState>>,
+    Path(album_id): Path<String>,
+) -> Response {
+    let Some(album_id) = deezer_numeric_id(&album_id) else {
+        return error(StatusCode::BAD_REQUEST, "invalid album id");
+    };
+
+    match crate::deezer::album_detail(&state.http, &state.config.deezer_base, album_id).await {
+        Ok(album) => Json(album).into_response(),
+        Err(e) => deezer_meta_failure("album", e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ArtistSearchQuery {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+/// `GET /deezer/search/artist?q=&limit=` — artist id resolution by name.
+async fn deezer_search_artist(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ArtistSearchQuery>,
+) -> Response {
+    let Some(term) = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return error(StatusCode::BAD_REQUEST, "q is required");
+    };
+    let limit = q
+        .limit
+        .unwrap_or(10)
+        .clamp(1, crate::deezer::METADATA_MAX_LIMIT);
+
+    match crate::deezer::search_artists(&state.http, &state.config.deezer_base, term, limit).await {
+        Ok(artists) => Json(json!({ "artists": artists })).into_response(),
+        Err(e) => deezer_meta_failure("artist search", e),
     }
 }
 

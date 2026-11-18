@@ -13,6 +13,10 @@ entirely (#518).
 
 ### Added
 
+- **Deezer metadata read endpoints** for the hub — `GET /deezer/artist/{id}/albums`,
+  `GET /deezer/album/{id}` and `GET /deezer/search/artist`. Each handler makes
+  exactly one upstream call; unknown ids answer `404`, transport/quota failures
+  `502`. Tracks without an ISRC are kept (`isrc: null`).
 - **Native download is the only path** (#518) — one download implementation
   (`deezer_dl`); the ISRC tag is written before the file is stored.
 - New `DOWNLOAD_QUALITY` env (`flac` | `mp3-320` | `mp3-128`, default `flac`),
