@@ -381,6 +381,16 @@ pub async fn unlisten_album(pool: &SqlitePool, user_id: i64, album_id: &str) -> 
     Ok(())
 }
 
+/// Forget every album this user has listened to ("alle zuruecksetzen").
+pub async fn reset_seen(pool: &SqlitePool, user_id: i64) -> Result<u64> {
+    let res = sqlx::query("DELETE FROM hub_tonie_albums_seen WHERE user_id = ?1")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .context("Album-Ledger konnte nicht zurueckgesetzt werden")?;
+    Ok(res.rows_affected())
+}
+
 /// Remove `user_id`'s binding for `tonie_id`. No-op when it does not exist.
 pub async fn delete_binding(pool: &SqlitePool, user_id: i64, tonie_id: &str) -> Result<()> {
     sqlx::query("DELETE FROM hub_tonie_bindings WHERE user_id = ?1 AND tonie_id = ?2")

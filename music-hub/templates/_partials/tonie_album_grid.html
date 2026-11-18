@@ -1,0 +1,28 @@
+{# One album tile of the artist catalogue. Included from `tonie_albums.html`
+   (loop var `a`); `tonie_id` comes from the including page's scope so the form
+   can post to the right Tonie. #}
+<article class="tonies-album-card">
+    {% if let Some(cover) = a.cover_url %}
+    <img class="tonies-album-cover" src="{{ cover }}" alt="" loading="lazy" referrerpolicy="no-referrer" />
+    {% else %}
+    {# No cover in the metadata: a placeholder tile, never a broken <img>. #}
+    <div class="tonies-album-cover tonies-album-cover-empty" aria-hidden="true">&#9834;</div>
+    {% endif %}
+    <p class="tonies-album-title">{{ a.title }}</p>
+    {% if !a.release_date.is_empty() %}
+    <p class="tonies-album-date">{{ a.release_date }}</p>
+    {% endif %}
+    {% if a.seen || a.in_basket %}
+    <p class="tonies-badges">
+        {% if a.seen %}<span class="tonies-badge tonies-badge-seen">gehört</span>{% endif %}
+        {% if a.in_basket %}<span class="tonies-badge">im Korb</span>{% endif %}
+    </p>
+    {% endif %}
+    {% if !a.in_basket %}
+    <form method="post" action="/tonies/{{ tonie_id }}/albums/add" hx-post="/tonies/{{ tonie_id }}/albums/add">
+        <input type="hidden" name="album_id" value="{{ a.album_id }}" />
+        <input type="hidden" name="album_title" value="{{ a.title }}" />
+        <button type="submit">In den Korb</button>
+    </form>
+    {% endif %}
+</article>

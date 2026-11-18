@@ -1,0 +1,689 @@
+//! Album picker UI (`plans/proposed/tonie-album-queue.md`, M4): the page and its
+//! POST handlers, against a mocked music-api and a mocked Tonies/KC pair — no
+//! network.
+//!
+//! Everything is user-scoped: a binding of another user must never be reachable.
+
+mod common;
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use axum::extract::{Form, Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use music_hub::config::Config;
+use music_hub::tonies;
+use serde_json::{Value, json};
+
+const REFRESH: &str = "refresh-token-xyz";
+const KEY: &str = "hub-tonies-test-secret";
+
+async fn serve(app: Router) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+// ── mocks ───────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Default)]
+struct AuthState {
+    refresh_count: Arc<Mutex<usize>>,
+}
+
+async fn token_handler(
+    State(st): State<AuthState>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if form.get("grant_type").map(String::as_str) == Some("refresh_token") {
+        *st.refresh_count.lock().unwrap() += 1;
+        return Json(json!({"access_token": "acc-refreshed", "expires_in": 300})).into_response();
+    }
+    Json(json!({
+        "access_token": "acc-login",
+        "refresh_token": REFRESH,
+        "expires_in": 300
+    }))
+    .into_response()
+}
+
+/// Keycloak + the read endpoints `/tonies` needs (one Kreativ-Tonie `ct1`).
+async fn spawn_tonies_mock() -> String {
+    let app = Router::new()
+        .route(
+            "/realms/tonies/protocol/openid-connect/token",
+            post(token_handler),
+        )
+        .route(
+            "/v2/me",
+            get(|| async { Json(json!({"email": "me@example.com", "householdId": "hh1"})) }),
+        )
+        .route(
+            "/v2/households",
+            get(|| async { Json(json!({"households": [{"id": "hh1", "name": "Home"}]})) }),
+        )
+        .route(
+            "/v2/households/{hid}/creativetonies",
+            get(|| async {
+                Json(json!([{
+                    "id": "ct1",
+                    "name": "Story One",
+                    "imageUrl": "https://example.invalid/cover.png",
+                    "secondsPresent": 3780,
+                    "secondsRemaining": 1620,
+                    "chapters": []
+                }]))
+            }),
+        )
+        .with_state(AuthState::default());
+    serve(app).await
+}
+
+fn album_summary(id: &str, title: &str, released: &str, cover: Option<&str>) -> Value {
+    json!({
+        "albumId": id,
+        "title": title,
+        "releaseDate": released,
+        "recordType": "album",
+        "coverUrl": cover
+    })
+}
+
+/// Mock `music-api`: artist albums, artist search and album detail.
+async fn spawn_music_api() -> String {
+    let albums = |Path(id): Path<String>| async move {
+        let body = if id == "15167501" {
+            json!({
+                "albums": [
+                    album_summary("459", "Folge 459", "2026-11-13", Some("https://cdn.example/459.jpg")),
+                    // No cover: the grid has to render a placeholder tile.
+                    album_summary("458", "Folge 458", "2026-11-06", None)
+                ],
+                "total": 2,
+                "next": null
+            })
+        } else {
+            json!({"albums": [], "total": 0, "next": null})
+        };
+        Json(body)
+    };
+    let search = |axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| async move {
+        let needle = q.get("q").cloned().unwrap_or_default();
+        if needle == "nothing" {
+            return Json(json!({"artists": []}));
+        }
+        Json(json!({
+            "artists": [
+                {"artistId": "15167501", "name": "PAW Patrol", "coverUrl": null},
+                {"artistId": "999", "name": "PAW Patrol Coverband", "coverUrl": null}
+            ]
+        }))
+    };
+    let album = |Path(id): Path<String>| async move {
+        Json(json!({
+            "albumId": id,
+            "title": format!("Folge {id}"),
+            "releaseDate": "2026-11-13",
+            "recordType": "album",
+            "coverUrl": "https://cdn.example/459.jpg",
+            "seconds": 200,
+            "tracks": [{"isrc": "A1", "title": "Kapitel 1", "durationMs": 200_000, "position": 1}]
+        }))
+    };
+
+    let app = Router::new()
+        .route("/deezer/artist/{id}/albums", get(albums))
+        .route("/deezer/search/artist", get(search))
+        .route("/deezer/album/{id}", get(album));
+    serve(app).await
+}
+
+// ── harness ─────────────────────────────────────────────────────────────────
+
+/// Boot the web app against a mocked Tonies/KC pair and a mocked music-api.
+/// `token` = `None` simulates a missing `MUSIC_API_TOKEN`.
+async fn boot(token: Option<&str>) -> common::TestApp {
+    let tonies_base = spawn_tonies_mock().await;
+    let music_base = spawn_music_api().await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite:{}/hub.db", dir.path().display());
+    let mut cfg = Config::for_test(url.clone());
+    cfg.database_url = url;
+    cfg.tonies_auth_base = tonies_base.clone();
+    cfg.tonies_api_base = tonies_base;
+    cfg.tonies_secret_key = Some(KEY.to_string());
+    cfg.music_api_base = music_base;
+    cfg.music_api_token = token.map(str::to_string);
+    common::spawn_with(dir, cfg).await
+}
+
+/// A logged-in user with a connected Tonies account.
+async fn user(app: &common::TestApp, slug: &str) -> (i64, String) {
+    let (uid, cookie) = app.user_with_password(slug, "pw").await;
+    tonies::save_account(
+        &app.pool,
+        uid,
+        Some("hh1"),
+        Some("me@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
+    (uid, cookie)
+}
+
+/// Bind `ct1` to the album source of Deezer artist `artist_id`.
+async fn bind_albums(app: &common::TestApp, uid: i64, artist_id: Option<i64>, mode: &str) {
+    tonies::upsert_binding(
+        &app.pool,
+        uid,
+        "ct1",
+        Some("Story One"),
+        "albums",
+        artist_id,
+        "mp3-128",
+        "manual",
+    )
+    .await
+    .unwrap();
+    tonies::set_binding_album_mode(&app.pool, uid, "ct1", mode)
+        .await
+        .unwrap();
+}
+
+async fn page(app: &common::TestApp, cookie: &str, path: &str) -> String {
+    let resp = app
+        .client()
+        .get(app.url(path))
+        .header("cookie", cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "GET {path}");
+    resp.text().await.unwrap()
+}
+
+fn toast_kind(resp: &axum::http::HeaderMap) -> String {
+    resp.get("hx-trigger")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string()
+}
+
+async fn send_post(
+    app: &common::TestApp,
+    cookie: &str,
+    path: &str,
+    form: &[(&str, &str)],
+) -> reqwest::Response {
+    app.client()
+        .post(app.url(path))
+        .header("cookie", cookie)
+        .form(&form.to_vec())
+        .send()
+        .await
+        .unwrap()
+}
+
+// ── tests ───────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn page_requires_session() {
+    let app = boot(Some("tok")).await;
+    let resp = app
+        .client()
+        .get(app.url("/tonies/ct1/albums"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+}
+
+#[tokio::test]
+async fn page_renders_without_music_api_token() {
+    let app = boot(None).await;
+    let (uid, cookie) = user(&app, "alb-notok").await;
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+
+    // No token: a hint instead of a 500, and the rest of the page still renders.
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    assert!(html.contains("MUSIC_API_TOKEN"), "hint expected: {html}");
+    assert!(html.contains("Album-Modus"));
+    assert!(html.contains("id=\"tonies-albums\""));
+    // Guard against a half-rendered template (unexpanded block or missing form).
+    assert!(!html.contains("{{ "), "unexpanded template block");
+    assert!(html.contains("hx-post=\"/tonies/ct1/albums/mode\""));
+    assert!(html.contains("Noch keine Alben im Korb."));
+}
+
+#[tokio::test]
+async fn unchecked_page_offers_search_and_nothing_else() {
+    let app = boot(Some("tok")).await;
+    let (_uid, cookie) = user(&app, "alb-empty").await;
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    assert!(html.contains("Noch kein Deezer-Künstler"), "empty state");
+    assert!(
+        html.contains("Erst einen Künstler verknüpfen."),
+        "grid hint"
+    );
+    assert!(html.contains("Noch keine Alben im Korb."));
+    assert!(html.contains("Noch kein Album abgespielt."));
+}
+
+#[tokio::test]
+async fn artist_search_lists_hits() {
+    let app = boot(Some("tok")).await;
+    let (_uid, cookie) = user(&app, "alb-search").await;
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums?q=paul").await;
+    assert!(html.contains("PAW Patrol"), "hit expected: {html}");
+    assert!(html.contains("Als Quelle setzen"));
+    assert!(html.contains("value=\"15167501\""));
+}
+
+#[tokio::test]
+async fn search_without_hits_reports_it() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-nohit").await;
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums?q=nothing").await;
+    assert!(html.contains("Keine Treffer für"), "no-hit hint missing");
+    assert!(!html.contains("Als Quelle setzen"), "no hit, no button");
+}
+
+#[tokio::test]
+async fn set_artist_binds_the_album_source() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-set").await;
+
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/artist",
+        &[("artist_id", "15167501"), ("artist_name", "PAW Patrol")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let headers = resp.headers().clone();
+    assert!(
+        toast_kind(&headers).contains("\"kind\":\"ok\""),
+        "toast: {:?}",
+        toast_kind(&headers)
+    );
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Folge 459"), "grid after binding: {body}");
+
+    let b = tonies::get_binding(&app.pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.source_kind, "albums");
+    assert_eq!(b.source_id, Some(15167501));
+    assert_eq!(b.format, "mp3-128", "defaults to mp3-128");
+    assert_eq!(b.mode, "manual", "defaults to manual");
+}
+
+#[tokio::test]
+async fn set_artist_rejects_a_non_numeric_id() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-badid").await;
+
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/artist",
+        &[("artist_id", "paw-patrol")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(toast_kind(resp.headers()).contains("\"kind\":\"err\""));
+    assert!(
+        tonies::get_binding(&app.pool, uid, "ct1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn mode_button_sets_album_mode() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-mode").await;
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/mode",
+        &[("album_mode", "oldest")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(toast_kind(resp.headers()).contains("\"kind\":\"ok\""));
+    assert_eq!(
+        tonies::get_binding(&app.pool, uid, "ct1")
+            .await
+            .unwrap()
+            .unwrap()
+            .album_mode,
+        "oldest"
+    );
+
+    // An unknown mode is rejected, the stored one survives.
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/mode",
+        &[("album_mode", "random")],
+    )
+    .await;
+    assert!(toast_kind(resp.headers()).contains("\"kind\":\"err\""));
+    assert_eq!(
+        tonies::get_binding(&app.pool, uid, "ct1")
+            .await
+            .unwrap()
+            .unwrap()
+            .album_mode,
+        "oldest"
+    );
+}
+
+#[tokio::test]
+async fn add_writes_the_basket_row() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-add").await;
+    bind_albums(&app, uid, Some(15167501), "basket").await;
+
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/add",
+        &[("album_id", "459"), ("album_title", "Folge 459")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(toast_kind(resp.headers()).contains("\"kind\":\"ok\""));
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Folge 459"), "basket entry rendered");
+
+    let binding_id = tonies::get_binding(&app.pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let items = tonies::list_album_items(&app.pool, binding_id)
+        .await
+        .unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].album_id, "459");
+    assert_eq!(items[0].album_title, "Folge 459");
+    assert_eq!(items[0].position, 0);
+
+    // Adding twice is refused, not duplicated.
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/add",
+        &[("album_id", "459"), ("album_title", "Folge 459")],
+    )
+    .await;
+    assert!(toast_kind(resp.headers()).contains("\"kind\":\"err\""));
+    assert_eq!(
+        tonies::list_album_items(&app.pool, binding_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn move_and_remove_keep_the_order() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-order").await;
+    bind_albums(&app, uid, Some(15167501), "basket").await;
+    let binding_id = tonies::get_binding(&app.pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    tonies::set_album_items(
+        &app.pool,
+        binding_id,
+        &[
+            ("459".to_string(), "Folge 459".to_string(), 200),
+            ("458".to_string(), "Folge 458".to_string(), 200),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/move",
+        &[("album_id", "458"), ("direction", "up")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ids: Vec<String> = tonies::list_album_items(&app.pool, binding_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.album_id)
+        .collect();
+    assert_eq!(ids, vec!["458", "459"]);
+
+    // Already on top: nothing moves.
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/move",
+        &[("album_id", "458"), ("direction", "up")],
+    )
+    .await;
+    assert!(toast_kind(resp.headers()).contains("\"kind\":\"err\""));
+
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/remove",
+        &[("album_id", "458")],
+    )
+    .await;
+    assert!(toast_kind(resp.headers()).contains("\"kind\":\"ok\""));
+    let ids: Vec<String> = tonies::list_album_items(&app.pool, binding_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.album_id)
+        .collect();
+    assert_eq!(ids, vec!["459"]);
+}
+
+#[tokio::test]
+async fn unlisten_drops_the_ledger_entry() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-unlisten").await;
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+    tonies::mark_seen(
+        &app.pool,
+        uid,
+        &[tonies::AlbumPlan {
+            album_id: "459".to_string(),
+            title: "Folge 459".to_string(),
+            ..Default::default()
+        }],
+    )
+    .await
+    .unwrap();
+    assert!(!tonies::seen_ids(&app.pool, uid).await.unwrap().is_empty());
+
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/unlisten",
+        &[("album_id", "459")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(toast_kind(resp.headers()).contains("\"kind\":\"ok\""));
+    assert!(
+        tonies::seen_ids(&app.pool, uid).await.unwrap().is_empty(),
+        "ledger entry must be gone"
+    );
+}
+
+#[tokio::test]
+async fn reset_clears_the_ledger_of_the_caller_only() {
+    let app = boot(Some("tok")).await;
+    let (a, ca) = user(&app, "alb-reset-a").await;
+    let (b, _cb) = user(&app, "alb-reset-b").await;
+    bind_albums(&app, a, Some(15167501), "newest").await;
+    for uid in [a, b] {
+        tonies::mark_seen(
+            &app.pool,
+            uid,
+            &[tonies::AlbumPlan {
+                album_id: "459".to_string(),
+                title: "Folge 459".to_string(),
+                ..Default::default()
+            }],
+        )
+        .await
+        .unwrap();
+    }
+
+    let resp = send_post(&app, &ca, "/tonies/ct1/albums/reset", &[]).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(toast_kind(resp.headers()).contains("\"kind\":\"ok\""));
+    assert!(tonies::seen_ids(&app.pool, a).await.unwrap().is_empty());
+    assert!(
+        !tonies::seen_ids(&app.pool, b).await.unwrap().is_empty(),
+        "another user's ledger must survive"
+    );
+}
+
+#[tokio::test]
+async fn grid_marks_listened_albums_and_placeholders_missing_covers() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-grid").await;
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+    tonies::mark_seen(
+        &app.pool,
+        uid,
+        &[tonies::AlbumPlan {
+            album_id: "459".to_string(),
+            title: "Folge 459".to_string(),
+            ..Default::default()
+        }],
+    )
+    .await
+    .unwrap();
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    assert!(html.contains("gehört"), "seen marker missing");
+    // Album 458 has no cover in the mock -> placeholder tile, never a broken img.
+    assert!(html.contains("tonies-album-cover-empty"));
+}
+
+#[tokio::test]
+async fn unresolved_basket_entry_stays_visible() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-unresolved").await;
+    bind_albums(&app, uid, Some(15167501), "basket").await;
+    let binding_id = tonies::get_binding(&app.pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    // Not in the artist catalogue, not in the album cache.
+    tonies::set_album_items(
+        &app.pool,
+        binding_id,
+        &[("gone-42".to_string(), "Verschwundene Folge".to_string(), 0)],
+    )
+    .await
+    .unwrap();
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    assert!(html.contains("Verschwundene Folge"), "entry stays visible");
+    assert!(html.contains("nicht auflösbar"), "entry is flagged");
+}
+
+#[tokio::test]
+async fn cached_album_is_not_flagged_unresolved() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-cached").await;
+    bind_albums(&app, uid, Some(15167501), "basket").await;
+    let binding_id = tonies::get_binding(&app.pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    sqlx::query(
+        "INSERT INTO hub_deezer_albums
+             (album_id, artist_id, title, release_date, record_type, cover_url, seconds,
+              tracks_json, fetched_at)
+         VALUES ('777', '1', 'Alte Folge', '2020-01-01', 'album', NULL, 200, '[]', ?1)",
+    )
+    .bind("2026-11-18T00:00:00+00:00")
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    tonies::set_album_items(
+        &app.pool,
+        binding_id,
+        &[("777".to_string(), "Alte Folge".to_string(), 200)],
+    )
+    .await
+    .unwrap();
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    assert!(html.contains("Alte Folge"));
+    assert!(!html.contains("nicht auflösbar"), "cached album resolves");
+}
+
+#[tokio::test]
+async fn card_shows_album_mode_and_picker_link() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-card").await;
+    bind_albums(&app, uid, Some(15167501), "oldest").await;
+
+    let html = page(&app, &cookie, "/tonies").await;
+    assert!(html.contains("Alben wählen"), "picker link missing: {html}");
+    assert!(html.contains("/tonies/ct1/albums"));
+    assert!(html.contains("Aelteste zuerst"), "album mode label missing");
+    // The playlist-only track order is not shown for album bindings.
+    assert!(!html.contains("Playlist-Reihenfolge"));
+}
+
+#[tokio::test]
+async fn posts_require_session_and_a_binding() {
+    let app = boot(Some("tok")).await;
+    // No session.
+    let resp = send_post(&app, "", "/tonies/ct1/albums/add", &[("album_id", "1")]).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Session, but no binding for this Tonie -> 404 (never another user's).
+    let (_uid, cookie) = user(&app, "alb-nobind").await;
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ctX/albums/add",
+        &[("album_id", "1")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+

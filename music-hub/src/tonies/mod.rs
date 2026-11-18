@@ -17,7 +17,7 @@ pub use albums::{AlbumFit, AlbumPlan, fit_albums, mark_seen, resolve, seen_ids};
 pub use bindings::{
     AlbumItem, Binding, SOURCE_ALBUMS, SOURCE_BACKPACK, SOURCE_PLAYLIST, SOURCE_TAG,
     delete_binding, get_binding, list_album_items, list_bindings, list_seen_albums,
-    order_by_label, set_album_items, set_binding_album_mode, set_binding_order,
+    order_by_label, reset_seen, set_album_items, set_binding_album_mode, set_binding_order,
     source_kind_label, unlisten_album, upsert_binding, valid_album_mode, valid_format,
     valid_mode, valid_order_by, valid_source_kind,
 };

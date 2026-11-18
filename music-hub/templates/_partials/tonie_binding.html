@@ -7,7 +7,7 @@
 <div class="hub-tonie-binding" id="binding-{{ c.id }}">
     {% if let Some(b) = c.binding %}
     <p class="tonie-source">
-        <strong>{{ b.source_name }}</strong> &middot; {{ b.kind_label() }} &middot; {{ b.format }} &middot; {{ b.mode }}{% if b.source_kind == "playlist" %} &middot; {{ b.order_label() }}{% endif %}
+        <strong>{{ b.source_name }}</strong> &middot; {{ b.kind_label() }} &middot; {{ b.format }} &middot; {{ b.mode }}{% if b.source_kind == "playlist" %} &middot; {{ b.order_label() }}{% endif %}{% if b.source_kind == "albums" %} &middot; {{ b.album_label() }}{% endif %}
     </p>
     <form hx-post="/tonies/{{ c.id }}/sync" hx-target="#tonie-{{ c.id }}" hx-swap="outerHTML">
         <input type="hidden" name="tonie_name" value="{{ c.title }}" />
@@ -15,6 +15,10 @@
         <input type="hidden" name="refresh" value="playlist" />
         <button type="submit" class="tonie-sync">Sync</button>
     </form>
+
+    {% if b.source_kind == "albums" %}
+    <p class="tonie-source"><a class="tonie-albums-link" href="/tonies/{{ c.id }}/albums">Alben wählen</a></p>
+    {% endif %}
 
     {% if !b.last_sync_status.is_empty() %}
     <p class="tonie-source">Letzter Sync: {{ b.last_sync_status }} &middot; {{ b.last_sync_at }}</p>
