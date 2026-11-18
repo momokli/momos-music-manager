@@ -115,8 +115,41 @@ async fn create_order(
         return error(StatusCode::BAD_REQUEST, "no ISRCs in order");
     }
 
+    // `toys` exists so a tonie order never drags FLAC or BPM analysis in.
+    let intent = req
+        .intent
+        .as_deref()
+        .unwrap_or("library")
+        .trim()
+        .to_lowercase();
+    if intent != "library" && intent != "toys" {
+        return error(StatusCode::BAD_REQUEST, "intent must be library or toys");
+    }
+    // Defaults per intent: a tonie never needs more than 128k, the library
+    // keeps the configured quality.
+    let default_tier = if intent == "toys" {
+        "mp3-128"
+    } else {
+        state.config.download_quality.tier()
+    };
+    let target = match req.target.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(raw) => match crate::deezer_dl::Quality::from_tier(raw) {
+            Some(q) => q.tier().to_string(),
+            None => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "target must be flac, mp3-320 or mp3-128",
+                )
+            }
+        },
+        None => default_tier.to_string(),
+    };
+
     let order_id = uuid::Uuid::new_v4().to_string();
-    if let Err(e) = db::create_order(&state.pool, &order_id, &isrcs, req.priority).await {
+    if let Err(e) =
+        db::create_order(&state.pool, &order_id, &isrcs, req.priority, &intent, Some(&target))
+            .await
+    {
         tracing::error!("create_order failed: {e:#}");
         return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to create order");
     }

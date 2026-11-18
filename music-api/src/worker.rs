@@ -492,7 +492,13 @@ async fn run_native_download(state: &Arc<AppState>, track: &Track) -> Result<()>
         },
     };
 
-    let wanted = cfg.download_quality;
+    // Per-track wish from the order (`toys` -> mp3-128), else the global
+    // default. An unknown value falls back instead of failing the download.
+    let wanted = track
+        .wanted_quality
+        .as_deref()
+        .and_then(crate::deezer_dl::Quality::from_tier)
+        .unwrap_or(cfg.download_quality);
     let started = std::time::Instant::now();
 
     let (bytes, used) = if let Some(fake) = state.native_fake.as_ref() {
@@ -588,7 +594,12 @@ async fn finalize_native(
         "info",
         format!("{isrc}: ready (native, {label}, {secs:.1}s)"),
     );
-    enqueue_transcode(state, isrc).await;
+    // Derive lower tiers only when there is something to derive and the
+    // track is for the library: a tonie order stops at 128k, and a 128k
+    // primary has no lower tier left.
+    if used != Quality::Mp3_128 && track.intent != "toys" {
+        enqueue_transcode(state, isrc).await;
+    }
     Ok(())
 }
 
