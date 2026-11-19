@@ -32,22 +32,14 @@ pub fn known_view(path: &str) -> Option<&'static str> {
     })
 }
 
-/// Strip the flash param (`msg`) from a raw query. Returns `(cleaned, had_msg)`.
-pub fn clean_query(raw: &str) -> (String, bool) {
-    let mut kept: Vec<&str> = Vec::new();
-    let mut had_msg = false;
-    for kv in raw.split('&') {
-        if kv.is_empty() {
-            continue;
-        }
-        let key = kv.split('=').next().unwrap_or("");
-        if key == "msg" {
-            had_msg = true;
-        } else {
-            kept.push(kv);
-        }
-    }
-    (kept.join("&"), had_msg)
+/// Normalise a raw query string, dropping empty segments. The flash is no
+/// longer carried in the query (it rides the `hub_flash` cookie now), so there
+/// is no special case left here.
+pub fn clean_query(raw: &str) -> String {
+    raw.split('&')
+        .filter(|kv| !kv.is_empty())
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 /// The remembered query for a view, if any.
@@ -90,16 +82,13 @@ pub async fn middleware(State(st): State<AppState>, req: Request, next: Next) ->
         if let Some(view) = known_view(&path) {
             let headers = req.headers().clone();
             if let Some((uid, _)) = crate::web::current_user(&st, &headers).await {
-                let (cleaned, had_msg) = clean_query(&raw);
+                let cleaned = clean_query(&raw);
                 if cleaned.is_empty() {
-                    // No explicit filters: restore the remembered ones (but don't
-                    // swallow a flash message).
-                    if !had_msg {
-                        if let Some(prev) = remembered(&st.pool, uid, view).await {
-                            if !prev.is_empty() {
-                                let target = format!("{path}?{prev}");
-                                return Redirect::to(&target).into_response();
-                            }
+                    // No explicit filters: restore the remembered ones.
+                    if let Some(prev) = remembered(&st.pool, uid, view).await {
+                        if !prev.is_empty() {
+                            let target = format!("{path}?{prev}");
+                            return Redirect::to(&target).into_response();
                         }
                     }
                 } else {

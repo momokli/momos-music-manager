@@ -61,6 +61,10 @@ pub fn app(state: AppState) -> Router {
     router(state.clone())
         .merge(crate::web::router(state.clone()))
         .merge(crate::pages::router(state.clone()))
+        // Flash is the inner layer: the view-state middleware runs first and may
+        // short-circuit with a redirect, which must NOT clear the flash cookie
+        // (the browser re-sends it on the followed navigation).
+        .layer(axum::middleware::from_fn(crate::flash::middleware))
         .layer(axum::middleware::from_fn_with_state(
             state,
             crate::viewstate::middleware,

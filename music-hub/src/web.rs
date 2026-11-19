@@ -350,7 +350,6 @@ struct Creds {
 
 #[derive(Deserialize)]
 struct Flash {
-    msg: Option<String>,
     /// Recommendation scope (`mine` | `all`); unknown values fall back to `all`.
     #[serde(default)]
     scope: Option<String>,
@@ -402,11 +401,7 @@ fn filter_clause(filter: &str) -> &'static str {
     }
 }
 
-async fn index(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Query(flash): Query<Flash>,
-) -> Response {
+async fn index(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "dashboard").await else {
         return Redirect::to("/login").into_response();
     };
@@ -433,7 +428,7 @@ async fn index(
 
     render(&DashboardPage {
         nav,
-        flash: flash.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         connected,
         spotify_label,
         playlists_count,
@@ -447,7 +442,6 @@ async fn index(
 async fn playlists_page(
     State(st): State<AppState>,
     headers: HeaderMap,
-    Query(flash): Query<Flash>,
     Query(pf): Query<PlaylistFilterQuery>,
     RawQuery(raw): RawQuery,
 ) -> Response {
@@ -482,7 +476,7 @@ async fn playlists_page(
     let s_last = crate::table::sort_head(rawq, "last", "Letzte Änderung", &sort, &dir);
     render(&PlaylistsPage {
         nav,
-        flash: flash.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         filter: filter.to_string(),
         q,
         owner_options,
@@ -749,8 +743,7 @@ async fn fetch_playlists_handler(
                 "{} Playlists geholt ({} eigene, {} gefolgt)",
                 f.total, f.owned, f.followed
             );
-            Redirect::to(&format!("/me/playlists?msg={}", urlencoding::encode(&msg)))
-                .into_response()
+            crate::flash::redirect("/me/playlists", &msg, "ok")
         }
         Err(e) => error_page(&format!("Playlists holen fehlgeschlagen: {e}")),
     }
@@ -859,10 +852,11 @@ async fn sync_html(
     if headers.get("hx-request").is_some() {
         Html("<span class=\"hub-badge hub-badge-ok\">synchronisiert ✓</span>").into_response()
     } else {
-        Redirect::to(
-            "/me/playlists?msg=Synchronisation+eingericht+%E2%80%94+l%C3%A4uft+im+Hintergrund",
+        crate::flash::redirect(
+            "/me/playlists",
+            "Synchronisation eingericht — läuft im Hintergrund",
+            "ok",
         )
-        .into_response()
     }
 }
 
@@ -1293,7 +1287,7 @@ async fn track_page(
         &st,
         nav,
         id,
-        flash.msg.unwrap_or_default(),
+        crate::flash::from_headers(&headers),
         crate::recommend::RecScope::parse(flash.scope.as_deref()),
         flash.scope.is_some(),
         flash.tag_scope.as_deref(),
@@ -2969,11 +2963,7 @@ fn parse_curate(f: &CurateForm) -> ParsedCurate {
     }
 }
 
-async fn curate_page(
-    State(st): State<AppState>,
-    Query(flash): Query<Flash>,
-    headers: HeaderMap,
-) -> Response {
+async fn curate_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "curate").await else {
         return Redirect::to("/login").into_response();
     };
@@ -3020,7 +3010,7 @@ async fn curate_page(
     let spotify_ready = crate::curate::has_write_scope(&st.pool, nav.id).await;
     render(&CuratePage {
         nav,
-        flash: flash.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         rows,
         modes: mode_opts("manual"),
         tags: tag_opts(&tags, None),
@@ -3103,7 +3093,6 @@ async fn curate_update(
 async fn curate_detail(
     State(st): State<AppState>,
     Path(id): Path<i64>,
-    Query(flash): Query<Flash>,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "curate").await else {
@@ -3171,7 +3160,7 @@ async fn curate_detail(
     let tags = crate::tags::list_user_tags(&st.pool, nav.id).await;
     render(&CurateDetailPage {
         nav,
-        flash: flash.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         id: cp.id,
         name: cp.name.clone(),
         description: cp.description.clone(),
@@ -3222,7 +3211,7 @@ async fn curate_push(
             format!("Push-Fehler: {e}")
         }
     };
-    Redirect::to(&format!("/curate/{id}?msg={}", urlencoding::encode(&msg))).into_response()
+    crate::flash::redirect(&format!("/curate/{id}"), &msg, "ok")
 }
 
 async fn curate_delete(
@@ -3341,17 +3330,13 @@ async fn track_fetch(
         .ok()
         .flatten();
     let Some(isrc) = isrc.filter(|s| !s.is_empty()) else {
-        return Redirect::to(&format!(
-            "/track/{id}?msg={}",
-            urlencoding::encode("kein ISRC vorhanden")
-        ))
-        .into_response();
+        return crate::flash::redirect(&format!("/track/{id}"), "kein ISRC vorhanden", "ok");
     };
     let msg = match crate::music_api::order(&st.cfg, std::slice::from_ref(&isrc)).await {
         Ok(order) => format!("Bestellt ({order}) — music-api lädt"),
         Err(e) => format!("Fehler: {e}"),
     };
-    Redirect::to(&format!("/track/{id}?msg={}", urlencoding::encode(&msg))).into_response()
+    crate::flash::redirect(&format!("/track/{id}"), &msg, "ok")
 }
 
 async fn login_form(State(st): State<AppState>) -> Response {
