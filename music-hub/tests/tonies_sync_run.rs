@@ -1494,3 +1494,81 @@ async fn album_run_makes_no_spotify_requests() {
         sp.hits.lock().unwrap()
     );
 }
+
+/// #619: an album that does not fit is skipped as a unit — and that skip must
+/// reach the *persisted* run log, not only the in-memory outcome. This drives
+/// the real `execute_binding` album branch, so it exercises the
+/// `fit.skipped` → run-log wiring the fix added (the unit tests call
+/// `merge_album_skips` directly and bypass that wiring).
+#[tokio::test]
+async fn album_skip_lands_in_the_persisted_run_log() {
+    let (base, m) = mock_all().await;
+    // Three 200 s albums; a 500 s cap fits two, so the third is CapReached.
+    *m.albums.lock().unwrap() = vec![
+        album("459", "Folge 459", "2026-11-13", &["A1", "A2"]),
+        album("458", "Folge 458", "2026-11-06", &["B1", "B2"]),
+        album("457", "Folge 457", "2026-10-30", &["C1", "C2"]),
+    ];
+    *m.ready.lock().unwrap() = ["A1", "A2", "B1", "B2", "C1", "C2"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let (sp_base, _sp) = mock_spotify_never_called().await;
+    let cfg = cfg_album_run(&base, &sp_base);
+    let (_dir, pool, uid) = album_run_db().await;
+
+    // Persist the binding so the run-log row hangs on a real binding_id.
+    let bid: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_tonie_bindings
+             (user_id, tonie_id, tonie_name, source_kind, source_id, format, cap_seconds,
+              mode, order_by, album_mode, dirty_since, created_at, updated_at)
+         VALUES (?1, 'ct1', 'Story', 'albums', 15167501, 'mp3-128', 500,
+                 'manual', 'playlist', 'newest', NULL,
+                 '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+         RETURNING id",
+    )
+    .bind(uid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let mut b = album_binding("newest", Some(15167501), 500);
+    b.id = bid;
+    // Mirror the auto-sync driver: claim → execute → finish is what actually
+    // persists the run-log row.
+    let run::Claim::Started(run_id) = run::claim_run(&pool, bid).await.unwrap() else {
+        panic!("expected Started");
+    };
+    let outcome = music_hub::tonies::execute_binding(&pool, &cfg, uid, &b).await;
+    run::finish_run(&pool, run_id, &outcome).await.unwrap();
+    assert_eq!(outcome.status, run::STATUS_OK, "error: {:?}", outcome.error);
+
+    // The in-memory outcome carries the album skip with its reason…
+    assert_eq!(
+        outcome.skipped.len(),
+        1,
+        "one album skip expected: {:?}",
+        outcome.skipped
+    );
+    assert_eq!(outcome.skipped[0].title, "Folge 457");
+    assert_eq!(
+        outcome.skipped[0].reason,
+        music_hub::tonies::SkipReason::CapReached
+    );
+    assert_eq!(outcome.skipped[0].isrc, None);
+
+    // …and it is persisted in the run log, so the history page can show it.
+    let rows = run::list_syncs(&pool, bid, 5).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let skipped = &rows[0].skipped;
+    assert_eq!(
+        skipped.len(),
+        1,
+        "the album skip must be persisted: {:?}",
+        skipped
+    );
+    assert_eq!(skipped[0].title, "Folge 457");
+    assert_eq!(skipped[0].reason, "cap_reached");
+    assert_eq!(skipped[0].isrc, None);
+}
