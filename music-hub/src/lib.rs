@@ -33,6 +33,7 @@ pub mod device_settings;
 pub mod devices;
 pub mod digging;
 pub mod features;
+pub mod flash;
 pub mod freqblog;
 pub mod genres;
 pub mod history;
