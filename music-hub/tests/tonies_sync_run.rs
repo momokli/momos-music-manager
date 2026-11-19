@@ -279,6 +279,7 @@ fn binding() -> Binding {
         tonie_name: Some("Story".into()),
         source_kind: "playlist".into(),
         source_id: Some(7),
+        source_name: None,
         format: "mp3-128".into(),
         cap_seconds: 5400,
         mode: "manual".into(),
@@ -625,6 +626,7 @@ async fn sync_endpoint_summarises_and_never_leaks_credentials() {
         Some("Story"),
         "playlist",
         Some(pl),
+        None,
         "mp3-128",
         "manual",
     )
@@ -739,6 +741,7 @@ async fn sync_endpoint_is_owner_scoped() {
         Some("Story"),
         "playlist",
         Some(pl),
+        None,
         "mp3-128",
         "manual",
     )
@@ -873,6 +876,7 @@ async fn busy_sync_returns_busy_toast() {
         Some("Story"),
         "playlist",
         Some(pl),
+        None,
         "mp3-128",
         "manual",
     )
@@ -960,6 +964,7 @@ async fn execute_binding_reports_missing_source_and_keeps_binding() {
         Some("Story"),
         "playlist",
         Some(999_999),
+        None,
         "mp3-128",
         "manual",
     )
@@ -1027,6 +1032,7 @@ async fn execute_binding_rejects_foreign_source_and_keeps_binding() {
         Some("Story"),
         "playlist",
         Some(foreign_playlist),
+        None,
         "mp3-128",
         "manual",
     )
@@ -1109,6 +1115,7 @@ async fn execute_binding_with_backpack_source_syncs() {
         Some("Story"),
         "backpack",
         Some(bp),
+        None,
         "mp3-128",
         "manual",
     )
@@ -1196,6 +1203,7 @@ fn album_binding(album_mode: &str, artist: Option<i64>, cap_seconds: i64) -> Bin
         tonie_name: Some("Story".into()),
         source_kind: "albums".into(),
         source_id: artist,
+        source_name: None,
         format: "mp3-128".into(),
         cap_seconds,
         mode: "manual".into(),

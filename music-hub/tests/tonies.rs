@@ -560,12 +560,28 @@ async fn binding_store_is_user_scoped() {
     let pl_b = insert_playlist(&app.pool, b, "pl-b", "B-Liste").await;
 
     tonies::upsert_binding(
-        &app.pool, a, "ct1", Some("Story"), "playlist", Some(pl_a), "mp3-320", "auto",
+        &app.pool,
+        a,
+        "ct1",
+        Some("Story"),
+        "playlist",
+        Some(pl_a),
+        None,
+        "mp3-320",
+        "auto",
     )
     .await
     .unwrap();
     tonies::upsert_binding(
-        &app.pool, b, "ct1", Some("B Story"), "playlist", Some(pl_b), "mp3-128", "manual",
+        &app.pool,
+        b,
+        "ct1",
+        Some("B Story"),
+        "playlist",
+        Some(pl_b),
+        None,
+        "mp3-128",
+        "manual",
     )
     .await
     .unwrap();
@@ -597,10 +613,10 @@ async fn binding_upsert_updates_in_place() {
     let (u, _) = app.user_with_password("bind-u", "pw").await;
     let p1 = insert_playlist(&app.pool, u, "p1", "One").await;
     let p2 = insert_playlist(&app.pool, u, "p2", "Two").await;
-    tonies::upsert_binding(&app.pool, u, "ct1", None, "playlist", Some(p1), "mp3-128", "manual")
+    tonies::upsert_binding(&app.pool, u, "ct1", None, "playlist", Some(p1), None, "mp3-128", "manual")
         .await
         .unwrap();
-    tonies::upsert_binding(&app.pool, u, "ct1", None, "playlist", Some(p2), "mp3-320", "auto")
+    tonies::upsert_binding(&app.pool, u, "ct1", None, "playlist", Some(p2), None, "mp3-320", "auto")
         .await
         .unwrap();
     let l = tonies::list_bindings(&app.pool, u).await.unwrap();
@@ -720,7 +736,7 @@ async fn binding_delete_is_user_scoped() {
         .await
         .unwrap();
     let pl = insert_playlist(&app.pool, a, "a-2", "A List").await;
-    tonies::upsert_binding(&app.pool, a, "ct1", None, "playlist", Some(pl), "mp3-128", "manual")
+    tonies::upsert_binding(&app.pool, a, "ct1", None, "playlist", Some(pl), None, "mp3-128", "manual")
         .await
         .unwrap();
 
@@ -935,7 +951,15 @@ async fn binding_is_not_visible_across_users() {
         .unwrap();
     let pl_a = insert_playlist(&app.pool, a, "vis-a", "A Secret List").await;
     tonies::upsert_binding(
-        &app.pool, a, "ct1", Some("Story One"), "playlist", Some(pl_a), "mp3-320", "auto",
+        &app.pool,
+        a,
+        "ct1",
+        Some("Story One"),
+        "playlist",
+        Some(pl_a),
+        None,
+        "mp3-320",
+        "auto",
     )
     .await
     .unwrap();
@@ -979,7 +1003,7 @@ async fn binding_delete_removes_own_row_with_toast() {
         .await
         .unwrap();
     let pl = insert_playlist(&app.pool, uid, "d-1", "To Delete").await;
-    tonies::upsert_binding(&app.pool, uid, "ct1", None, "playlist", Some(pl), "mp3-128", "manual")
+    tonies::upsert_binding(&app.pool, uid, "ct1", None, "playlist", Some(pl), None, "mp3-128", "manual")
         .await
         .unwrap();
 

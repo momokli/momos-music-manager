@@ -199,6 +199,7 @@ async fn bind_albums(app: &common::TestApp, uid: i64, artist_id: Option<i64>, mo
         Some("Story One"),
         "albums",
         artist_id,
+        None,
         "mp3-128",
         "manual",
     )
@@ -341,6 +342,57 @@ async fn set_artist_binds_the_album_source() {
     assert_eq!(b.source_id, Some(15167501));
     assert_eq!(b.format, "mp3-128", "defaults to mp3-128");
     assert_eq!(b.mode, "manual", "defaults to manual");
+}
+
+/// #620: setting the artist persists the name on the binding and the page shows
+/// it instead of the bare `Deezer-Artist #<id>`.
+#[tokio::test]
+async fn set_artist_persists_the_artist_name() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-artname").await;
+
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/artist",
+        &[("artist_id", "15167501"), ("artist_name", "PAW Patrol")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(toast_kind(resp.headers()).contains("\"kind\":\"ok\""));
+
+    let b = tonies::get_binding(&app.pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.source_name.as_deref(), Some("PAW Patrol"));
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    assert!(html.contains("PAW Patrol"), "name rendered: {html}");
+    assert!(
+        !html.contains("Deezer-Artist #"),
+        "the id fallback must not appear once the name is known: {html}"
+    );
+}
+
+/// #620: a binding without a name (e.g. a row from before the migration) still
+/// renders, falling back to the id.
+#[tokio::test]
+async fn binding_without_name_falls_back_to_the_id() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-fallback").await;
+    // `bind_albums` seeds the binding with `source_name = None`.
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    assert!(
+        html.contains("Verknüpft: Deezer-Artist"),
+        "linked hint expected: {html}"
+    );
+    assert!(
+        html.contains("#15167501"),
+        "id fallback expected (name is unknown): {html}"
+    );
 }
 
 #[tokio::test]

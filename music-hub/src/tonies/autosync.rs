@@ -110,6 +110,7 @@ fn row_to_binding(r: sqlx::sqlite::SqliteRow) -> Binding {
         tonie_name: r.get("tonie_name"),
         source_kind: r.get("source_kind"),
         source_id: r.get("source_id"),
+        source_name: r.get("source_name"),
         format: r.get("format"),
         cap_seconds: r.get("cap_seconds"),
         mode: r.get("mode"),
@@ -132,7 +133,7 @@ pub async fn due_bindings(
     let quiet_cutoff = (now - chrono::Duration::seconds(d.quiet_secs.max(0))).to_rfc3339();
     let interval_cutoff = (now - chrono::Duration::seconds(d.min_interval_secs.max(0))).to_rfc3339();
     let rows = sqlx::query(
-        "SELECT id, tonie_id, tonie_name, source_kind, source_id, format,
+        "SELECT id, tonie_id, tonie_name, source_kind, source_id, source_name, format,
                 cap_seconds, mode, order_by, album_mode, dirty_since, last_sync_at, last_sync_status
            FROM hub_tonie_bindings
           WHERE mode = 'auto'
