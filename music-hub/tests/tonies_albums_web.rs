@@ -110,17 +110,29 @@ fn album_summary_secs(
     v
 }
 
-/// Mock `music-api`: artist albums, artist search and album detail.
-async fn spawn_music_api() -> String {
-    spawn_music_api_counted(true).await.0
+/// How the mocked artist list carries album lengths (#621 primary source).
+#[derive(Clone, Copy)]
+enum ListSeconds {
+    /// Every album carries its length → no detail call needed at all.
+    All,
+    /// No album carries a length → a cold list, full detail fallback.
+    None,
+    /// Only the first album carries a length → the per-tile skip must fire for
+    /// that tile while the other still falls back to a detail call.
+    FirstOnly,
 }
 
-/// Mock `music-api` that counts `/deezer/album/{id}` (detail) calls. When
-/// `list_seconds` is set, the artist list carries each album's length (the #621
-/// primary path, so the grid needs no detail call); otherwise the list is cold
-/// and the hub falls back to the album detail.
+/// Mock `music-api`: artist albums, artist search and album detail.
+async fn spawn_music_api() -> String {
+    spawn_music_api_counted(ListSeconds::All).await.0
+}
+
+/// Mock `music-api` that counts `/deezer/album/{id}` (detail) calls. `secs`
+/// controls whether the artist list carries each album's length (the #621
+/// primary path, so the grid needs no detail call); a cold list makes the hub
+/// fall back to the album detail.
 async fn spawn_music_api_counted(
-    list_seconds: bool,
+    secs: ListSeconds,
 ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -140,28 +152,27 @@ async fn spawn_music_api_counted(
 
     let albums = move |Path(id): Path<String>| async move {
         let body = if id == "15167501" {
-            let (a459, a458) = if list_seconds {
-                (
-                    album_summary_secs(
-                        "459",
-                        "Folge 459",
-                        "2026-11-13",
-                        Some("https://cdn.example/459.jpg"),
-                        200,
-                    ),
-                    album_summary_secs("458", "Folge 458", "2026-11-06", None, 200),
-                )
-            } else {
-                (
-                    album_summary(
-                        "459",
-                        "Folge 459",
-                        "2026-11-13",
-                        Some("https://cdn.example/459.jpg"),
-                    ),
-                    // No cover: the grid has to render a placeholder tile.
-                    album_summary("458", "Folge 458", "2026-11-06", None),
-                )
+            let a459 = match secs {
+                ListSeconds::All | ListSeconds::FirstOnly => album_summary_secs(
+                    "459",
+                    "Folge 459",
+                    "2026-11-13",
+                    Some("https://cdn.example/459.jpg"),
+                    200,
+                ),
+                ListSeconds::None => album_summary(
+                    "459",
+                    "Folge 459",
+                    "2026-11-13",
+                    Some("https://cdn.example/459.jpg"),
+                ),
+            };
+            // `458` has no cover: the grid has to render a placeholder tile.
+            let a458 = match secs {
+                ListSeconds::All => album_summary_secs("458", "Folge 458", "2026-11-06", None, 200),
+                ListSeconds::None | ListSeconds::FirstOnly => {
+                    album_summary("458", "Folge 458", "2026-11-06", None)
+                }
             };
             json!({
                 "albums": [a459, a458],
@@ -770,7 +781,7 @@ async fn grid_tile_shows_cover_and_length_and_marks_the_cart() {
 async fn catalogued_albums_need_no_detail_call() {
     use std::sync::atomic::Ordering;
 
-    let (music_base, hits) = spawn_music_api_counted(true).await;
+    let (music_base, hits) = spawn_music_api_counted(ListSeconds::All).await;
     let app = boot_with_music(Some("tok"), music_base).await;
     let (uid, cookie) = user(&app, "alb-nocall").await;
     bind_albums(&app, uid, Some(15167501), "newest").await;
@@ -793,7 +804,7 @@ async fn catalogued_albums_need_no_detail_call() {
 async fn cold_list_falls_back_to_the_detail_batch() {
     use std::sync::atomic::Ordering;
 
-    let (music_base, hits) = spawn_music_api_counted(false).await;
+    let (music_base, hits) = spawn_music_api_counted(ListSeconds::None).await;
     let app = boot_with_music(Some("tok"), music_base).await;
     let (uid, cookie) = user(&app, "alb-cold").await;
     bind_albums(&app, uid, Some(15167501), "newest").await;
@@ -804,6 +815,29 @@ async fn cold_list_falls_back_to_the_detail_batch() {
         hits.load(Ordering::SeqCst),
         2,
         "one detail call for each of the two length-less tiles"
+    );
+}
+
+/// #621 per-tile skip: when only some tiles carry a length from the list, the
+/// detail fallback fires **only** for the tiles that lack one — not for the
+/// whole page. Proves the skip is per tile, not per batch/page.
+#[tokio::test]
+async fn mixed_list_only_dials_the_length_less_tiles() {
+    use std::sync::atomic::Ordering;
+
+    let (music_base, hits) = spawn_music_api_counted(ListSeconds::FirstOnly).await;
+    let app = boot_with_music(Some("tok"), music_base).await;
+    let (uid, cookie) = user(&app, "alb-mixed").await;
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    // Both tiles show a length: 459 from the list, 458 from the detail fallback.
+    assert!(grid_tile(&html, "Folge 459").contains("3 min"));
+    assert!(grid_tile(&html, "Folge 458").contains("3 min"));
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "only the length-less tile (458) triggers a detail call"
     );
 }
 
