@@ -1,5 +1,6 @@
 //! SQLite storage: schema + queries.
 
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqlx::{Pool, Sqlite};
@@ -1123,6 +1124,46 @@ pub async fn catalogue_album_put(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Album lengths (`catalogue_albums.seconds`) for many albums in **one** query.
+///
+/// The artist album list carries no length at all, so the handler decorates the
+/// page's `albums[].seconds` from here — a single indexed `IN (…)` lookup beats
+/// a per-album `catalogue_album_get` (N+1) on a grid of 50 tiles.
+///
+/// Only albums with a stored, non-null `seconds` are returned. The freshness
+/// window mirrors `catalogue_album_get` (`CATALOGUE_ALBUM_TTL`): an album's
+/// tracklist output is what ages, but we keep the length hint on the exact same
+/// freshness contract so both readers agree. Older rows are simply absent — the
+/// field is a best-effort hint and must never block a request.
+pub async fn catalogue_album_seconds_batch(
+    pool: &Pool<Sqlite>,
+    ids: &[String],
+) -> anyhow::Result<HashMap<String, i64>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let cutoff = now() - CATALOGUE_ALBUM_TTL;
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT album_id, seconds FROM catalogue_albums 
+         WHERE seconds IS NOT NULL AND fetched_at >= ",
+    );
+    qb.push_bind(cutoff);
+    qb.push(" AND album_id IN (");
+    let mut sep = qb.separated(", ");
+    for id in ids {
+        sep.push_bind(id.clone());
+    }
+    qb.push(")");
+    let rows = qb.build().fetch_all(pool).await?;
+    let mut out = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let album_id: String = sqlx::Row::get(&row, "album_id");
+        let seconds: i64 = sqlx::Row::get(&row, "seconds");
+        out.insert(album_id, seconds);
+    }
+    Ok(out)
 }
 
 /// An artist search result, when fresh.

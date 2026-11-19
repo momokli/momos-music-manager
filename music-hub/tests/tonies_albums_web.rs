@@ -96,16 +96,86 @@ fn album_summary(id: &str, title: &str, released: &str, cover: Option<&str>) -> 
     })
 }
 
+/// Like `album_summary`, but with a known length — the primary source #621
+/// added to the artist list.
+fn album_summary_secs(
+    id: &str,
+    title: &str,
+    released: &str,
+    cover: Option<&str>,
+    seconds: i64,
+) -> Value {
+    let mut v = album_summary(id, title, released, cover);
+    v["seconds"] = json!(seconds);
+    v
+}
+
+/// How the mocked artist list carries album lengths (#621 primary source).
+#[derive(Clone, Copy)]
+enum ListSeconds {
+    /// Every album carries its length → no detail call needed at all.
+    All,
+    /// No album carries a length → a cold list, full detail fallback.
+    None,
+    /// Only the first album carries a length → the per-tile skip must fire for
+    /// that tile while the other still falls back to a detail call.
+    FirstOnly,
+}
+
 /// Mock `music-api`: artist albums, artist search and album detail.
 async fn spawn_music_api() -> String {
-    let albums = |Path(id): Path<String>| async move {
+    spawn_music_api_counted(ListSeconds::All).await.0
+}
+
+/// Mock `music-api` that counts `/deezer/album/{id}` (detail) calls. `secs`
+/// controls whether the artist list carries each album's length (the #621
+/// primary path, so the grid needs no detail call); a cold list makes the hub
+/// fall back to the album detail.
+async fn spawn_music_api_counted(
+    secs: ListSeconds,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let hits: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+
+    async fn bump(
+        State(hits): State<Arc<AtomicUsize>>,
+        req: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> Response {
+        if req.uri().path().starts_with("/deezer/album/") {
+            hits.fetch_add(1, Ordering::SeqCst);
+        }
+        next.run(req).await
+    }
+
+    let albums = move |Path(id): Path<String>| async move {
         let body = if id == "15167501" {
-            json!({
-                "albums": [
-                    album_summary("459", "Folge 459", "2026-11-13", Some("https://cdn.example/459.jpg")),
-                    // No cover: the grid has to render a placeholder tile.
+            let a459 = match secs {
+                ListSeconds::All | ListSeconds::FirstOnly => album_summary_secs(
+                    "459",
+                    "Folge 459",
+                    "2026-11-13",
+                    Some("https://cdn.example/459.jpg"),
+                    200,
+                ),
+                ListSeconds::None => album_summary(
+                    "459",
+                    "Folge 459",
+                    "2026-11-13",
+                    Some("https://cdn.example/459.jpg"),
+                ),
+            };
+            // `458` has no cover: the grid has to render a placeholder tile.
+            let a458 = match secs {
+                ListSeconds::All => album_summary_secs("458", "Folge 458", "2026-11-06", None, 200),
+                ListSeconds::None | ListSeconds::FirstOnly => {
                     album_summary("458", "Folge 458", "2026-11-06", None)
-                ],
+                }
+            };
+            json!({
+                "albums": [a459, a458],
                 "total": 2,
                 "next": null
             })
@@ -150,8 +220,13 @@ async fn spawn_music_api() -> String {
     let app = Router::new()
         .route("/deezer/artist/{id}/albums", get(albums))
         .route("/deezer/search/artist", get(search))
-        .route("/deezer/album/{id}", get(album));
-    serve(app).await
+        .route("/deezer/album/{id}", get(album))
+        .with_state(())
+        .layer(axum::middleware::from_fn_with_state(
+            counter,
+            bump,
+        ));
+    (serve(app).await, hits)
 }
 
 // ── harness ─────────────────────────────────────────────────────────────────
@@ -159,8 +234,12 @@ async fn spawn_music_api() -> String {
 /// Boot the web app against a mocked Tonies/KC pair and a mocked music-api.
 /// `token` = `None` simulates a missing `MUSIC_API_TOKEN`.
 async fn boot(token: Option<&str>) -> common::TestApp {
+    boot_with_music(token, spawn_music_api().await).await
+}
+
+/// Boot against a pre-built (possibly counted) music-api mock base URL.
+async fn boot_with_music(token: Option<&str>, music_base: String) -> common::TestApp {
     let tonies_base = spawn_tonies_mock().await;
-    let music_base = spawn_music_api().await;
 
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite:{}/hub.db", dir.path().display());
@@ -694,6 +773,72 @@ async fn grid_tile_shows_cover_and_length_and_marks_the_cart() {
     // tonie's free minutes.
     let row = cart_row(&body, "459");
     assert!(row.contains("3 min"), "length in the cart row: {row}");
+}
+
+/// #621: the artist list carries each length, so a fully catalogued artist
+/// costs **no** `/deezer/album/{id}` detail call for the tiles.
+#[tokio::test]
+async fn catalogued_albums_need_no_detail_call() {
+    use std::sync::atomic::Ordering;
+
+    let (music_base, hits) = spawn_music_api_counted(ListSeconds::All).await;
+    let app = boot_with_music(Some("tok"), music_base).await;
+    let (uid, cookie) = user(&app, "alb-nocall").await;
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    assert!(
+        grid_tile(&html, "Folge 459").contains("3 min"),
+        "length comes from the list"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "a catalogued artist must trigger no /deezer/album call"
+    );
+}
+
+/// #621 fallback: a cold list (no `seconds`) still resolves each tile's length
+/// via the album detail — one call per tile that lacks a length, batched.
+#[tokio::test]
+async fn cold_list_falls_back_to_the_detail_batch() {
+    use std::sync::atomic::Ordering;
+
+    let (music_base, hits) = spawn_music_api_counted(ListSeconds::None).await;
+    let app = boot_with_music(Some("tok"), music_base).await;
+    let (uid, cookie) = user(&app, "alb-cold").await;
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    assert!(grid_tile(&html, "Folge 459").contains("3 min"));
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "one detail call for each of the two length-less tiles"
+    );
+}
+
+/// #621 per-tile skip: when only some tiles carry a length from the list, the
+/// detail fallback fires **only** for the tiles that lack one — not for the
+/// whole page. Proves the skip is per tile, not per batch/page.
+#[tokio::test]
+async fn mixed_list_only_dials_the_length_less_tiles() {
+    use std::sync::atomic::Ordering;
+
+    let (music_base, hits) = spawn_music_api_counted(ListSeconds::FirstOnly).await;
+    let app = boot_with_music(Some("tok"), music_base).await;
+    let (uid, cookie) = user(&app, "alb-mixed").await;
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    // Both tiles show a length: 459 from the list, 458 from the detail fallback.
+    assert!(grid_tile(&html, "Folge 459").contains("3 min"));
+    assert!(grid_tile(&html, "Folge 458").contains("3 min"));
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "only the length-less tile (458) triggers a detail call"
+    );
 }
 
 #[tokio::test]

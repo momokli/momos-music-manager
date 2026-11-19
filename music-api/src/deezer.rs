@@ -235,6 +235,11 @@ impl std::error::Error for MetaError {}
 /// `nb_tracks` is always `null`: Deezer's `/artist/{id}/albums` does not carry a
 /// track count, and the field stays in the contract so clients keep a stable
 /// shape.
+///
+/// `seconds` is **not** part of Deezer's payload either: it is filled by the
+/// handler from the own catalogue (`catalogue_albums.seconds`) after the page is
+/// fetched or read from cache. Deezer's album list carries no length, so this
+/// stays `None` for albums that are not (yet) in the catalogue.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlbumSummary {
@@ -245,6 +250,8 @@ pub struct AlbumSummary {
     #[serde(default)]
     pub cover_url: Option<String>,
     pub nb_tracks: Option<i64>,
+    #[serde(default)]
+    pub seconds: Option<i64>,
 }
 
 /// `GET /deezer/artist/{id}/albums` response.
@@ -429,6 +436,9 @@ pub fn map_artist_albums(body: &serde_json::Value) -> Result<ArtistAlbumPage, Me
                 record_type: non_blank(album.record_type.clone()),
                 cover_url: cover_url(album),
                 nb_tracks: None,
+                // Deezer's list has no length; the handler fills this from the
+                // own catalogue (Story 3).
+                seconds: None,
             })
         })
         .collect::<Result<Vec<_>, MetaError>>()?;

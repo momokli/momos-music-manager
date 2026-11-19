@@ -4469,6 +4469,8 @@ async fn deezer_artist_albums_maps_the_page_and_forwards_paging() {
     );
     // Deezer does not deliver a track count here → always null.
     assert!(album["nbTracks"].is_null());
+    // Cold catalogue: no length was stored yet → null (`seconds` is a hint).
+    assert!(album["seconds"].is_null(), "cold catalogue must be null");
     assert_eq!(
         v["next"],
         "https://api.deezer.com/artist/15167501/albums?limit=50&index=50"
@@ -4480,6 +4482,56 @@ async fn deezer_artist_albums_maps_the_page_and_forwards_paging() {
     assert_eq!(
         v["next"],
         "https://api.deezer.com/artist/15167501/albums?limit=50&index=50"
+    );
+}
+
+/// #621: once an album is in the own catalogue (its detail was fetched), the
+/// artist list must carry its length — filled from `catalogue_albums.seconds`,
+/// not from another Deezer call.
+#[tokio::test]
+async fn deezer_artist_albums_carry_the_catalogued_duration() {
+    let h = harness_deezer_meta(spawn_deezer_meta_mock().await).await;
+
+    // Catalogue the album first (this is what fills `catalogue_albums.seconds`).
+    let (status, album) = get_json_authed(&h.app, "/deezer/album/1137915301").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(album["seconds"], 168);
+
+    // Now the list resolves the same album's length from the catalogue.
+    let (status, v) = get_json_authed(&h.app, "/deezer/artist/15167501/albums").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        v["albums"][0]["seconds"], 168,
+        "catalogued album's length in the list"
+    );
+}
+
+/// #621: the length must also be filled on the page-cache path — and the cached
+/// page must not carry a baked-in `seconds` (stale protection).
+#[tokio::test]
+async fn deezer_artist_albums_cache_hit_still_carries_seconds() {
+    let h = harness_deezer_meta(spawn_deezer_meta_mock().await).await;
+
+    // Catalogue the album, then prime the page cache with the (raw) list.
+    let _ = get_json_authed(&h.app, "/deezer/album/1137915301").await;
+    let _ = get_json_authed(&h.app, "/deezer/artist/15167501/albums").await;
+
+    // Second list call: served from the page cache, still decorated.
+    let (status, v) = get_json_authed(&h.app, "/deezer/artist/15167501/albums").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        v["albums"][0]["seconds"], 168,
+        "cache hit must still carry the length"
+    );
+
+    // The cached page itself stays raw: no `seconds` baked into the payload.
+    let cached = db::catalogue_page_get(&h.state.pool, "15167501", 0)
+        .await
+        .unwrap()
+        .expect("page cached");
+    assert!(
+        cached["albums"][0]["seconds"].is_null(),
+        "page cache must not burn in seconds: {cached}"
     );
 }
 
