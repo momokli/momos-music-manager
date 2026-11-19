@@ -679,6 +679,46 @@ async fn unlisten_drops_the_ledger_entry() {
 }
 
 #[tokio::test]
+async fn unlisten_unknown_album_reports_info_and_keeps_the_ledger() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-unlisten-unknown").await;
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+    tonies::mark_seen(
+        &app.pool,
+        uid,
+        &[tonies::AlbumPlan {
+            album_id: "459".to_string(),
+            title: "Folge 459".to_string(),
+            ..Default::default()
+        }],
+    )
+    .await
+    .unwrap();
+
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/unlisten",
+        &[("album_id", "does-not-exist")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let toast = toast_kind(resp.headers());
+    assert!(
+        !toast.contains("\"kind\":\"ok\""),
+        "unknown album must not report success: {toast}"
+    );
+    assert!(
+        toast.contains("\"kind\":\"info\""),
+        "unknown album must report neutral info: {toast}"
+    );
+    assert!(
+        !tonies::seen_ids(&app.pool, uid).await.unwrap().is_empty(),
+        "ledger must be unchanged"
+    );
+}
+
+#[tokio::test]
 async fn reset_clears_the_ledger_of_the_caller_only() {
     let app = boot(Some("tok")).await;
     let (a, ca) = user(&app, "alb-reset-a").await;

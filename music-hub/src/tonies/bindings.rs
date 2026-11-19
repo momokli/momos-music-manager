@@ -380,14 +380,17 @@ pub async fn list_seen_albums(
 }
 
 /// Drop one album from the listened ledger ("unlistened").
-pub async fn unlisten_album(pool: &SqlitePool, user_id: i64, album_id: &str) -> Result<()> {
-    sqlx::query("DELETE FROM hub_tonie_albums_seen WHERE user_id = ?1 AND album_id = ?2")
+///
+/// Returns the number of dropped rows: `0` means the album was not in the
+/// ledger, so callers must not report success.
+pub async fn unlisten_album(pool: &SqlitePool, user_id: i64, album_id: &str) -> Result<u64> {
+    let res = sqlx::query("DELETE FROM hub_tonie_albums_seen WHERE user_id = ?1 AND album_id = ?2")
         .bind(user_id)
         .bind(album_id)
         .execute(pool)
         .await
         .context("Album konnte nicht zurueckgesetzt werden")?;
-    Ok(())
+    Ok(res.rows_affected())
 }
 
 /// Forget every album this user has listened to ("alle zuruecksetzen").

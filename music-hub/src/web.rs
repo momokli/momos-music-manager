@@ -5111,7 +5111,8 @@ async fn tonie_albums_unlisten(
         ("Kein Album gewählt.".to_string(), "err")
     } else {
         match crate::tonies::unlisten_album(&st.pool, uid, &album_id).await {
-            Ok(()) => ("Album wieder auf der Liste".to_string(), "ok"),
+            Ok(0) => ("Album war nicht in der Liste".to_string(), "info"),
+            Ok(_) => ("Album wieder auf der Liste".to_string(), "ok"),
             Err(e) => (format!("Fehler: {e}"), "err"),
         }
     };

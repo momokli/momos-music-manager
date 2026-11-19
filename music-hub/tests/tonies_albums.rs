@@ -225,11 +225,29 @@ async fn listened_albums_are_skipped_and_unlisten_brings_them_back() {
         .unwrap();
     assert_eq!(ids(&after), vec!["458", "459"]);
 
-    tonies::unlisten_album(&pool, uid, "457").await.unwrap();
+    let dropped = tonies::unlisten_album(&pool, uid, "457").await.unwrap();
+    assert_eq!(dropped, 1, "known album must drop exactly one row");
     let back = tonies::resolve(&pool, &cfg, uid, &binding(&pool, uid).await)
         .await
         .unwrap();
     assert_eq!(ids(&back), vec!["457", "458", "459"]);
+}
+
+#[tokio::test]
+async fn unlisten_unknown_album_is_a_noop() {
+    let (_d, pool, _cfg, _mock, uid) = setup().await;
+    insert_binding(&pool, uid, 15167501, "unknown").await;
+
+    let before = tonies::seen_ids(&pool, uid).await.unwrap();
+    let dropped = tonies::unlisten_album(&pool, uid, "does-not-exist")
+        .await
+        .unwrap();
+    assert_eq!(dropped, 0, "unknown album must drop zero rows");
+    assert_eq!(
+        tonies::seen_ids(&pool, uid).await.unwrap(),
+        before,
+        "ledger must be unchanged"
+    );
 }
 
 #[tokio::test]
