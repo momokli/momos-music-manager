@@ -577,7 +577,11 @@ async fn deezer_artist_albums(
     // Catalogue first: the tonie picker re-renders often and Deezer is rate
     // limited. A cache problem must never break the request.
     match crate::db::catalogue_page_get(&state.pool, &artist_id, index as i64).await {
-        Ok(Some(cached)) => return Json(cached).into_response(),
+        Ok(Some(cached)) => {
+            // The cached page is *raw* (no baked-in lengths): decorate it here
+            // so the length is re-read from the own catalogue on every call.
+            return Json(with_album_seconds(&state, &cached).await).into_response();
+        }
         Ok(None) => {}
         Err(e) => tracing::warn!("catalogue page read failed: {e:#}"),
     }
@@ -592,6 +596,8 @@ async fn deezer_artist_albums(
     .await
     {
         Ok(page) => {
+            // Cache the raw page — never the decorated one. `seconds` is a live
+            // hint that must not go stale inside the page cache.
             if let Ok(payload) = serde_json::to_value(&page) {
                 if let Err(e) =
                     crate::db::catalogue_page_put(&state.pool, &artist_id, index as i64, &payload)
@@ -599,11 +605,60 @@ async fn deezer_artist_albums(
                 {
                     tracing::warn!("catalogue page write failed: {e:#}");
                 }
+                return Json(with_album_seconds(&state, &payload).await).into_response();
             }
             Json(page).into_response()
         }
         Err(e) => deezer_meta_failure("artist", e),
     }
+}
+
+/// Decorate an artist-albums page with the album lengths from the own
+/// catalogue.
+///
+/// `seconds` is filled from `catalogue_albums.seconds` in **one** batch query
+/// per call — on both the cache-hit and the fresh path. The page cache itself
+/// stays undecorated (see the handler), so an aged length can never be baked
+/// into `catalogue_album_pages.payload`; it is re-read on every request.
+///
+/// A catalogue problem merely logs and leaves `seconds: null`: the length is a
+/// best-effort hint and must never turn a page request into a 5xx.
+async fn with_album_seconds(state: &Arc<AppState>, page: &serde_json::Value) -> serde_json::Value {
+    let mut page = page.clone();
+    let ids: Vec<String> = page
+        .get("albums")
+        .and_then(|v| v.as_array())
+        .map(|albums| {
+            albums
+                .iter()
+                .filter_map(|a| a.get("albumId").and_then(|v| v.as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if ids.is_empty() {
+        return page;
+    }
+    let seconds = match crate::db::catalogue_album_seconds_batch(&state.pool, &ids).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("catalogue album seconds read failed: {e:#}");
+            return page;
+        }
+    };
+    if seconds.is_empty() {
+        return page;
+    }
+    if let Some(albums) = page.get_mut("albums").and_then(|v| v.as_array_mut()) {
+        for album in albums {
+            if let Some(id) = album.get("albumId").and_then(|v| v.as_str()) {
+                if let Some(sec) = seconds.get(id) {
+                    album["seconds"] = serde_json::json!(*sec);
+                }
+            }
+        }
+    }
+    page
 }
 
 /// `GET /deezer/album/{album_id}` — album metadata plus its tracks (ISRC,
