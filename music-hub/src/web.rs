@@ -4602,13 +4602,20 @@ async fn tonie_albums_render(
                 catalog_loaded = true;
                 for a in page.albums {
                     catalog.insert(a.album_id.clone());
+                    // #621: the list carries the length from music-api's own
+                    // catalogue — the primary source. A missing `seconds` stays
+                    // empty and is only resolved via the detail fallback below.
+                    let duration = a
+                        .seconds
+                        .map(crate::tonies::format_duration)
+                        .unwrap_or_default();
                     tiles.push(AlbumTile {
                         seen: seen_set.contains(&a.album_id),
                         in_basket: basket_ids.contains(&a.album_id),
                         album_id: a.album_id,
                         title: a.title,
                         release_date: a.release_date.unwrap_or_default(),
-                        duration: String::new(),
+                        duration,
                         cover_url: a.cover_url,
                     });
                 }
@@ -4616,12 +4623,15 @@ async fn tonie_albums_render(
             Err(e) => notes.push(format!("Alben nicht ladbar: {e}")),
         }
     }
-    // The tiles need their length from the album detail; an album without one
-    // keeps the empty `duration`.
+    // Primary source is the list (`seconds`, above). Only tiles that came back
+    // without a length are resolved via the album detail — a fully catalogued
+    // artist triggers no detail call at all.
     let durations = album_durations(&st.cfg, &tiles).await;
     for tile in &mut tiles {
-        if let Some(seconds) = durations.get(&tile.album_id) {
-            tile.duration = crate::tonies::format_duration(*seconds);
+        if tile.duration.is_empty() {
+            if let Some(seconds) = durations.get(&tile.album_id) {
+                tile.duration = crate::tonies::format_duration(*seconds);
+            }
         }
     }
 
@@ -4712,12 +4722,14 @@ async fn album_meta_from_api(
 /// round trips.
 const ALBUM_DURATION_BATCH: usize = 8;
 
-/// `album_id -> seconds` for the grid tiles.
+/// `album_id -> seconds` for the grid tiles still missing a length.
 ///
-/// The artist album list carries no length at all, so the album detail is the
-/// only source (music-api owns the catalogue cache). Albums that cannot be
-/// resolved are simply absent from the map — the tile then renders no length,
-/// and a page render never fails because of a lookup.
+/// The artist album list now carries `seconds` (from music-api's catalogue) and
+/// is the primary source; this is the **fallback** for tiles the list left
+/// empty. Only those tiles trigger an album-detail call, so a fully catalogued
+/// artist costs zero detail calls. Albums that cannot be resolved are simply
+/// absent from the map — the tile then renders no length, and a page render
+/// never fails because of a lookup.
 async fn album_durations(
     cfg: &crate::config::Config,
     tiles: &[AlbumTile],
@@ -4726,6 +4738,10 @@ async fn album_durations(
     for chunk in tiles.chunks(ALBUM_DURATION_BATCH) {
         let mut set = tokio::task::JoinSet::new();
         for tile in chunk {
+            // Already known from the list → no detail call.
+            if !tile.duration.is_empty() {
+                continue;
+            }
             let cfg = cfg.clone();
             let album_id = tile.album_id.clone();
             set.spawn(async move {

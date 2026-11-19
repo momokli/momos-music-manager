@@ -10,6 +10,11 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Album-Dauer aus der Artist-Liste** (#621) — die Album-Kacheln lesen die
+  Länge primär aus `seconds` der Artist-Album-Liste (music-api-Katalog); ein
+  Detail-Call (`GET /deezer/album/{id}`) bleibt nur noch Fallback für Alben ohne
+  `seconds`. Ein vollständig katalogisierter Artist löst damit **keinen**
+  Detail-Call mehr aus.
 - feat: **Tag hygiene — rename, merge similar tags, suggestions** (#456) — a tag
   detail page (`/tag/{id}`) now surfaces owner-only **suggestions** for similar
   own tags (`tags::similar_tags`; ranked by normalised-equal > small edit
