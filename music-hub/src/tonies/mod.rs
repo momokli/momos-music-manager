@@ -220,6 +220,28 @@ impl Capacity {
     }
 }
 
+/// Compact German album length for the picker UI.
+///
+/// Rounded to whole minutes: `3 min` below an hour, then hours (`1 h 29`), so a
+/// tile stays narrow. Anything unknown (`0`, negative, or a length that rounds
+/// to zero) becomes the empty string, so a tile renders no length instead of
+/// `0 min`.
+pub fn format_duration(seconds: i64) -> String {
+    let minutes = (seconds.max(0) + 30) / 60;
+    if minutes <= 0 {
+        return String::new();
+    }
+    if minutes < 60 {
+        return format!("{minutes} min");
+    }
+    let (hours, rest) = (minutes / 60, minutes % 60);
+    if rest == 0 {
+        format!("{hours} h")
+    } else {
+        format!("{hours} h {rest:02}")
+    }
+}
+
 // ── account store ───────────────────────────────────────────────────────────
 
 /// A decrypted view of one `hub_tonies_accounts` row (no secret inside).
@@ -525,5 +547,38 @@ mod tests {
         assert_eq!(c.minutes_present(), 63);
         assert_eq!(c.minutes_total(), 90);
         assert_eq!(c.percent(), 70);
+    }
+
+    #[test]
+    fn unknown_length_renders_nothing() {
+        // `0` is what the hub stores when music-api does not know the album, and
+        // a tile must never claim `0 min`.
+        assert_eq!(format_duration(0), "");
+        assert_eq!(format_duration(-5), "");
+        // Under half a minute there is nothing a minute format could say.
+        assert_eq!(format_duration(20), "");
+    }
+
+    #[test]
+    fn lengths_below_an_hour_are_minutes() {
+        assert_eq!(format_duration(200), "3 min"); // the integration mock
+        assert_eq!(format_duration(60), "1 min");
+        assert_eq!(format_duration(3540), "59 min");
+        // 59.5 min rounds over the hour boundary, so it switches unit.
+        assert_eq!(format_duration(3570), "1 h");
+        // Rounds to whole minutes instead of truncating away half of them.
+        assert_eq!(format_duration(3300), "55 min"); // 55.0
+        assert_eq!(format_duration(90), "2 min"); // 1.5 -> 2
+    }
+
+    #[test]
+    fn lengths_from_an_hour_use_hours() {
+        assert_eq!(format_duration(5280), "1 h 28"); // 88 min
+        assert_eq!(format_duration(5385), "1 h 30"); // 89.75 min
+        assert_eq!(format_duration(3600), "1 h");
+        assert_eq!(format_duration(7200), "2 h");
+        assert_eq!(format_duration(6300), "1 h 45");
+        // Zero-padded minutes keep the column width stable.
+        assert_eq!(format_duration(3665), "1 h 01");
     }
 }

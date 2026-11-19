@@ -600,6 +600,50 @@ async fn grid_marks_listened_albums_and_placeholders_missing_covers() {
     assert!(html.contains("tonies-album-cover-empty"));
 }
 
+/// M4 acceptance (`plans/proposed/tonie-album-queue.md`): a tile shows the cover
+/// and the album length, and a selection made by `POST …/albums/add` survives the
+/// re-render.
+#[tokio::test]
+async fn grid_tile_shows_cover_and_length_and_marks_the_cart() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-tile").await;
+    bind_albums(&app, uid, Some(15167501), "basket").await;
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    let tile = grid_tile(&html, "Folge 459");
+    assert!(
+        tile.contains("src=\"https://cdn.example/459.jpg\""),
+        "cover URL in an img src: {tile}"
+    );
+    // The mock's album detail says 200 s -> "3 min".
+    assert!(tile.contains("3 min"), "length in the tile: {tile}");
+    assert!(!tile.contains("im Korb"), "not in the cart yet: {tile}");
+
+    // Exactly the request the tile's button sends.
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/add",
+        &[("album_id", "459"), ("album_title", "Folge 459")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.unwrap();
+
+    let tile = grid_tile(&body, "Folge 459");
+    assert!(tile.contains("im Korb"), "selection after the save: {tile}");
+    assert!(
+        !tile.contains("In den Korb"),
+        "the add button is gone: {tile}"
+    );
+    assert!(tile.contains("3 min"), "length stays: {tile}");
+
+    // The cart row carries the length too: the user compares it against the
+    // tonie's free minutes.
+    let row = cart_row(&body, "459");
+    assert!(row.contains("3 min"), "length in the cart row: {row}");
+}
+
 #[tokio::test]
 async fn unresolved_basket_entry_stays_visible() {
     let app = boot(Some("tok")).await;
@@ -618,6 +662,9 @@ async fn unresolved_basket_entry_stays_visible() {
     let html = page(&app, &cookie, "/tonies/ct1/albums").await;
     assert!(html.contains("Verschwundene Folge"), "entry stays visible");
     assert!(html.contains("nicht auflösbar"), "entry is flagged");
+    // The seeded entry has `seconds = 0`: an unknown length renders nothing,
+    // never "0 min".
+    assert!(!html.contains("0 min"), "unknown length must stay silent");
 }
 
 #[tokio::test]
@@ -733,4 +780,36 @@ fn album_item(album_id: &str, title: &str, seconds: i64) -> AlbumItem {
         seconds,
         position: 0,
     }
+}
+
+/// The `<article>` grid tile of the album titled `title`.
+///
+/// A title alone is ambiguous — the cart list shows it too — so the slice is
+/// taken from the album grid only.
+fn grid_tile(html: &str, title: &str) -> String {
+    let start = html
+        .find("class=\"tonies-album-grid\"")
+        .expect("album grid rendered");
+    let end = html[start..].find("</section>").expect("grid closed") + start;
+    for block in html[start..end].split("<article").skip(1) {
+        let block = block.split("</article>").next().unwrap_or_default();
+        if block.contains(title) {
+            return block.to_string();
+        }
+    }
+    panic!("no grid tile for {title}");
+}
+
+/// The `<li data-album>` cart row of `album_id` (the cart is the one list with
+/// `data-cart`; the page renders three lists).
+fn cart_row(html: &str, album_id: &str) -> String {
+    let cart = html.find("data-cart").expect("cart list rendered");
+    let needle = format!("data-album=\"{album_id}\"");
+    let at = html[cart..]
+        .find(&needle)
+        .unwrap_or_else(|| panic!("no cart row for {album_id}"))
+        + cart;
+    let start = html[..at].rfind("<li").expect("cart row start");
+    let end = at + html[at..].find("</li>").expect("cart row end");
+    html[start..end].to_string()
 }
