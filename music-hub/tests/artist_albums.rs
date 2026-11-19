@@ -158,6 +158,7 @@ async fn bind(app: &common::TestApp, uid: i64, tonie_id: &str, name: &str) {
         Some(name),
         tonies::bindings::SOURCE_ALBUMS,
         Some(1),
+        None,
         tonies::bindings::FORMAT_MP3_128,
         tonies::bindings::MODE_MANUAL,
     )

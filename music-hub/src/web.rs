@@ -4224,6 +4224,7 @@ async fn tonies_binding_save(
                             tn,
                             &source_kind,
                             Some(sid),
+                            None,
                             &format,
                             &mode,
                         )
@@ -4424,6 +4425,9 @@ struct TonieAlbumsPage {
     tonie_name: String,
     /// Bound Deezer artist id (`""` when none is linked).
     artist_id: String,
+    /// Display name of the bound artist (`None` when unknown, e.g. rows from
+    /// before migration 064); the template then falls back to the id.
+    artist_name: Option<String>,
     /// The three album-mode buttons (pre-styled so the template needs no
     /// conditional inside an HTML tag), in display order.
     modes: Vec<ModeButton>,
@@ -4549,6 +4553,11 @@ async fn tonie_albums_render(
         .and_then(|b| b.source_id)
         .map(|id| id.to_string())
         .unwrap_or_default();
+    let artist_name = binding
+        .as_ref()
+        .and_then(|b| b.source_name.clone())
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty());
 
     let mut notes: Vec<String> = Vec::new();
     if st
@@ -4674,6 +4683,7 @@ async fn tonie_albums_render(
         tonie_id: tonie_id.to_string(),
         tonie_name,
         artist_id,
+        artist_name,
         mode_label,
         modes,
         q: q.to_string(),
@@ -4774,7 +4784,8 @@ async fn tonie_albums_toast(
 struct TonieAlbumArtistForm {
     #[serde(default)]
     artist_id: String,
-    /// Only used for the toast — the name is not persisted (no column).
+    /// The Deezer artist name, persisted as the binding's `source_name` so the
+    /// UI can show it instead of the bare id.
     #[serde(default)]
     artist_name: Option<String>,
 }
@@ -4816,13 +4827,12 @@ async fn tonie_albums_set_artist(
     };
     let uid = nav.id;
     let raw = form.artist_id.trim().to_string();
-    let label = form
+    let artist_name = form
         .artist_name
         .as_deref()
         .map(str::trim)
-        .filter(|n| !n.is_empty())
-        .unwrap_or(&raw)
-        .to_string();
+        .filter(|n| !n.is_empty());
+    let label = artist_name.unwrap_or(&raw).to_string();
     let Ok(artist_id) = raw.parse::<i64>() else {
         return tonie_albums_toast(&st, nav, &tonie_id, "Ungültige Deezer-Artist-ID.", "err").await;
     };
@@ -4850,6 +4860,7 @@ async fn tonie_albums_set_artist(
         tonie_name.as_deref(),
         crate::tonies::bindings::SOURCE_ALBUMS,
         Some(artist_id),
+        artist_name,
         &format,
         &mode,
     )

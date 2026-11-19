@@ -172,7 +172,7 @@ the toast header still fires. #}
         </p>
         {% else %}
         <p class="tonies-hint">
-            Verknüpft: Deezer-Artist <strong>#{{ artist_id }}</strong>
+            Verknüpft: Deezer-Artist {% if let Some(name) = artist_name %}<strong>{{ name }}</strong>{% else %}<strong>#{{ artist_id }}</strong>{% endif %}
         </p>
         {% endif %}
         <form method="get" action="/tonies/{{ tonie_id }}/albums" class="tonies-row">

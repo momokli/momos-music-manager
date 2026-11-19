@@ -51,6 +51,7 @@ async fn bind(app: &common::TestApp, uid: i64, tonie_id: &str, name: &str) -> i6
         Some(name),
         "albums",
         Some(15167501),
+        None,
         "mp3-128",
         "manual",
     )
