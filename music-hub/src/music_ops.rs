@@ -4,7 +4,7 @@
 
 use askama::Template;
 use axum::Router;
-use axum::extract::{Form, Path, Query, State};
+use axum::extract::{Form, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -63,13 +63,8 @@ fn action_response(headers: &HeaderMap, msg: &str, kind: &str, fallback: &str) -
     if htmx(headers) {
         (StatusCode::NO_CONTENT, toast_header(msg, kind)).into_response()
     } else {
-        Redirect::to(&format!("{fallback}?msg={}", urlencoding::encode(msg))).into_response()
+        crate::flash::redirect(fallback, msg, kind)
     }
-}
-
-#[derive(Deserialize, Default)]
-struct Msg {
-    msg: Option<String>,
 }
 
 #[derive(Template)]
@@ -84,7 +79,7 @@ struct OpsPage {
     errors: i64,
 }
 
-async fn page(State(st): State<AppState>, Query(m): Query<Msg>, headers: HeaderMap) -> Response {
+async fn page(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "music-api").await else {
         return Redirect::to("/login").into_response();
     };
@@ -97,7 +92,7 @@ async fn page(State(st): State<AppState>, Query(m): Query<Msg>, headers: HeaderM
     let summary = crate::music_api::cache_summary(&st.pool).await;
     render(&OpsPage {
         nav,
-        flash: m.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         configured: st.cfg.music_api_token.is_some(),
         tracks_with_isrc,
         ready: summary.ready as i64,

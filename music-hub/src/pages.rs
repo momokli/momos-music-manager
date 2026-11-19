@@ -439,7 +439,6 @@ struct PlaylistTableFilter {
     q: Option<String>,
     sort: Option<String>,
     dir: Option<String>,
-    msg: Option<String>,
 }
 
 async fn playlist_page(
@@ -543,7 +542,7 @@ async fn playlist_page(
     let s_title = crate::table::sort_head(rawq, "title", "Titel", &sort, &dir);
     render(&PlaylistPage {
         nav,
-        flash: pf.msg.clone().unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         id,
         name: name.unwrap_or_default(),
         owner: owner.unwrap_or_default(),
@@ -1204,8 +1203,6 @@ struct DownloadsQuery {
     sort: Option<String>,
     #[serde(default)]
     dir: Option<String>,
-    #[serde(default)]
-    msg: Option<String>,
 }
 
 /// Normalized, validated filter state for the downloads table.
@@ -1608,7 +1605,7 @@ async fn downloads_page(
 
     render(&DownloadsPage {
         nav,
-        flash: q.msg.clone().unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         music_api,
         total: s.total,
         ready: s.ready,
@@ -1798,11 +1795,9 @@ async fn playlist_tag(
     match crate::tags::create_from_playlist(&st.pool, user_id, id).await {
         // Jump straight to the freshly created (or existing) tag.
         Ok(tag_id) => Redirect::to(&format!("/tag/{tag_id}")).into_response(),
-        Err(e) => Redirect::to(&format!(
-            "/playlist/{id}?msg={}",
-            urlencoding::encode(&format!("Tag anlegen fehlgeschlagen: {e}"))
-        ))
-        .into_response(),
+        Err(e) => {
+            crate::flash::redirect(&format!("/playlist/{id}"), &format!("Tag anlegen fehlgeschlagen: {e}"), "ok")
+        }
     }
 }
 
@@ -1834,8 +1829,6 @@ struct CompareQuery {
     tag: Option<String>,
     /// Engine tag scope `own` | `collective` (#267); absent = stored setting.
     tag_scope: Option<String>,
-    /// Flash message (success/error) shown after a redirect.
-    msg: Option<String>,
 }
 
 /// The overlap filters that must be carried across the picker/scope links,
@@ -2734,7 +2727,7 @@ async fn overlap_page(
 
     render(&OverlapPage {
         nav,
-        flash: q.msg.clone().unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         picker,
         scopes,
         columns,
@@ -4102,7 +4095,6 @@ async fn status_panel(State(st): State<AppState>, headers: HeaderMap) -> Respons
 
 #[derive(Deserialize, Default)]
 struct AdminMsg {
-    msg: Option<String>,
     /// Optional table filter/sort (shared by pages that reuse this query struct).
     q: Option<String>,
     sort: Option<String>,
@@ -4293,7 +4285,7 @@ async fn admin_page(
 
     render(&AdminPage {
         nav,
-        flash: msg.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         fields,
         registration_open,
         q,
@@ -4362,7 +4354,7 @@ async fn admin_save(
     } else {
         format!("Fehler: {}", errors.join("; "))
     };
-    Redirect::to(&format!("/admin?msg={}", urlencoding::encode(&msg))).into_response()
+    crate::flash::redirect("/admin", &msg, "ok")
 }
 
 // ── tags (resolved playlist layer) ──────────────────────────────────────────
@@ -4966,13 +4958,9 @@ struct BackpacksPage {
 
 /// GET `/backpacks` (#332): read-only overview of the caller's backpacks, each
 /// with its source count, live track count (unclamped resolve) and labelled
-/// sources. No session -> `/login`. Reads the optional `?msg=` flash set by the
-/// mutating handlers (#328).
-async fn backpacks_page(
-    State(st): State<AppState>,
-    Query(msg): Query<AdminMsg>,
-    headers: HeaderMap,
-) -> Response {
+/// sources. No session -> `/login`. Reads the flash set by the mutating
+/// handlers (#328) from the `hub_flash` cookie.
+async fn backpacks_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "backpacks").await else {
         return Redirect::to("/login").into_response();
     };
@@ -5015,7 +5003,7 @@ async fn backpacks_page(
 
     render(&BackpacksPage {
         nav,
-        flash: msg.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         cards,
     })
 }
@@ -5045,7 +5033,7 @@ struct BackpackRenameForm {
 
 /// POST `/backpacks/create` (#328): create a backpack for the caller, then
 /// redirect back to `/backpacks`. Errors (empty/duplicate name) become a
-/// `?msg=`-flash, never a 500.
+/// flash, never a 500.
 async fn backpack_create(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -5061,7 +5049,7 @@ async fn backpack_create(
 }
 
 /// POST `/backpacks/{id}/rename` (#328): rename one of the caller's backpacks.
-/// Foreign/missing targets and empty/duplicate names become a `?msg=`-flash.
+/// Foreign/missing targets and empty/duplicate names become a flash.
 async fn backpack_rename(
     State(st): State<AppState>,
     Path(id): Path<i64>,
@@ -5078,7 +5066,7 @@ async fn backpack_rename(
 }
 
 /// POST `/backpacks/{id}/delete` (#328): delete one of the caller's backpacks
-/// (items go via CASCADE). Foreign/missing targets become a `?msg=`-flash.
+/// (items go via CASCADE). Foreign/missing targets become a flash.
 async fn backpack_delete(
     State(st): State<AppState>,
     Path(id): Path<i64>,
@@ -5240,7 +5228,6 @@ struct TagSearchQuery {
     tags: Option<String>,
     /// Optional seed track ids (comma-separated): their tags become the query.
     seed: Option<String>,
-    msg: Option<String>,
 }
 
 struct TagSearchRow {
@@ -5320,7 +5307,7 @@ async fn tag_search_page(
     }
     render(&TagSearchPage {
         nav,
-        flash: q.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         tags_input,
         seed_input,
         count: results.len(),
@@ -5740,7 +5727,7 @@ async fn tag_detail_page(
     };
     render(&TagDetailPage {
         nav,
-        flash: msg.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         id: d.id,
         name: d.name,
         owner: d.owner,
@@ -5798,8 +5785,7 @@ struct UpdateNameForm {
 }
 
 fn flash_redirect(to: &str, msg: String) -> Response {
-    let sep = if to.contains('?') { '&' } else { '?' };
-    Redirect::to(&format!("{to}{sep}msg={}", urlencoding::encode(&msg))).into_response()
+    crate::flash::redirect(to, &msg, "ok")
 }
 
 async fn tag_rename(
@@ -6325,7 +6311,7 @@ async fn collective_page(
     let rawq = raw.as_deref().unwrap_or("");
     render(&CollectivePage {
         nav,
-        flash: msg.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         id: d.id,
         name: d.name,
         icon: d.icon,
@@ -6352,14 +6338,8 @@ struct SettingsPage {
     tag_scope_collective_selected: bool,
 }
 
-#[derive(Deserialize, Default)]
-struct SettingsQuery {
-    msg: Option<String>,
-}
-
 async fn settings_page(
     State(st): State<AppState>,
-    Query(q): Query<SettingsQuery>,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "settings").await else {
@@ -6371,7 +6351,7 @@ async fn settings_page(
 
     render(&SettingsPage {
         nav,
-        flash: q.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         tag_scope: tag_scope.as_str().to_string(),
         tag_scope_own_selected: tag_scope == crate::scope::TagScope::Own,
         tag_scope_collective_selected: tag_scope == crate::scope::TagScope::Collective,
@@ -6394,7 +6374,7 @@ async fn settings_save(
         return Redirect::to("/login").into_response();
     };
     let Some(raw) = f.tag_scope else {
-        return Redirect::to("/settings?msg=Keine+Auswahl").into_response();
+        return crate::flash::redirect("/settings", "Keine Auswahl", "ok");
     };
     match crate::user_settings::set_validated(
         &st.pool,
@@ -6404,11 +6384,8 @@ async fn settings_save(
     )
     .await
     {
-        Ok(_) => Redirect::to("/settings?msg=Gespeichert").into_response(),
-        Err(e) => {
-            let enc = urlencoding::encode(&format!("Fehler: {e}")).to_string();
-            Redirect::to(&format!("/settings?msg={enc}")).into_response()
-        }
+        Ok(_) => crate::flash::redirect("/settings", "Gespeichert", "ok"),
+        Err(e) => crate::flash::redirect("/settings", &format!("Fehler: {e}"), "ok"),
     }
 }
 
@@ -6453,7 +6430,6 @@ struct ImportPlaylistRow {
 
 #[derive(Deserialize, Default)]
 struct ImportQuery {
-    msg: Option<String>,
     service: Option<String>,
 }
 
@@ -6504,7 +6480,7 @@ async fn import_page(
     let playlists = import_playlists(&st, nav.id).await;
     render(&ImportPage {
         nav,
-        flash: q.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         services: service_options(&service),
         url: String::new(),
         playlists,

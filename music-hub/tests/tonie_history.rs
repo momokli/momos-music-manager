@@ -131,6 +131,17 @@ fn toast(headers: &axum::http::HeaderMap) -> String {
         .to_string()
 }
 
+/// The `hub_flash` Set-Cookie value (empty when none was set).
+fn flash_cookie(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("hub_flash="))
+        .unwrap_or("")
+        .to_string()
+}
+
 /// A user with one figure (`ct1`), two logged runs and one listened album.
 async fn seeded(app: &common::TestApp, slug: &str) -> (i64, String, i64) {
     let (uid, cookie) = app.user_with_password(slug, "pw").await;
@@ -300,9 +311,11 @@ async fn unlisten_drops_exactly_one_ledger_row() {
         .to_str()
         .unwrap()
         .to_string();
+    assert_eq!(location, "/tonies/history", "PRG back to the page: {location}");
     assert!(
-        location.starts_with("/tonies/history?msg="),
-        "PRG back to the page: {location}"
+        flash_cookie(&headers).starts_with("hub_flash=ok:"),
+        "flash cookie: {}",
+        flash_cookie(&headers)
     );
     assert!(
         toast(&headers).contains("\"kind\":\"ok\""),
@@ -360,15 +373,12 @@ async fn reset_clears_only_my_ledger() {
     let resp = send_post(&app, Some(&my_cookie), "/tonies/history/reset", &[]).await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let headers = resp.headers().clone();
-    assert!(
-        headers
-            .get("location")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .starts_with("/tonies/history?msg="),
+    assert_eq!(
+        headers.get("location").unwrap().to_str().unwrap(),
+        "/tonies/history",
         "PRG back to the page"
     );
+    assert!(flash_cookie(&headers).starts_with("hub_flash=ok:"));
     assert!(toast(&headers).contains("\"kind\":\"ok\""));
 
     assert!(seen_ids(&app, mine).await.is_empty(), "my ledger is empty");

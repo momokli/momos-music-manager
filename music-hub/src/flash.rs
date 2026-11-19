@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn set_cookie_carries_flags() {
         let c = set_cookie("ok", "Gespeichert");
-        assert!(c.starts_with("hub_flash=ok%3A"), "{c}");
+        assert!(c.starts_with("hub_flash=ok:"), "{c}");
         assert!(c.contains("Path=/"));
         assert!(c.contains("HttpOnly"));
         assert!(c.contains("SameSite=Lax"));

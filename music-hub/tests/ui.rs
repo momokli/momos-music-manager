@@ -1142,7 +1142,14 @@ async fn playlist_prioritize_flashes_when_unconfigured() {
         loc.starts_with(&format!("/playlist/{}", app.seed.pl_alice)),
         "should redirect to the playlist page: {loc}"
     );
-    assert!(loc.contains("msg="), "should carry a flash message: {loc}");
+    let flash = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("hub_flash="))
+        .unwrap_or_default();
+    assert!(flash.starts_with("hub_flash="), "should carry a flash cookie: {loc}");
 }
 
 #[tokio::test]
