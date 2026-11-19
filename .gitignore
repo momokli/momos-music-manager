@@ -30,3 +30,9 @@ legacy/mmm/scripts/keys/
 # Orchestrator-Scratch (Runner): Progress-/Handoff-Dateien gehören in den Checkout,
 # nicht in die Historie. Die Stage-Agenten lesen sie über `cwd`, nicht über git.
 /progress-*.md
+
+# Dev-Screenshot-Umgebung (scripts/dev/screenshot.sh)
+scripts/dev/.playwright/
+# Nur der Ausgabeordner im Repo-Root ist Wegwerf-Material; die Beleg-Shots
+# unter scripts/dev/screenshots/ gehoeren ins Repo.
+/screenshots/
