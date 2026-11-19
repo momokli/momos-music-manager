@@ -118,3 +118,94 @@ async fn reload_without_flash_cookie_shows_no_toast() {
         "no toast on a plain reload"
     );
 }
+
+/// Umlauts / punctuation survive the ASCII cookie round-trip and render in the
+/// flash block on the follow-up GET.
+#[tokio::test]
+async fn umlaut_flash_cookie_round_trips_and_renders() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+    let msg = "Grüße — läuft …";
+    let value = music_hub::flash::encode("ok", msg);
+    assert!(value.is_ascii(), "cookie value must be ASCII: {value}");
+    assert!(value.starts_with("ok:"), "kind prefix: {value}");
+
+    let page = app
+        .client()
+        .get(app.url("/music-api"))
+        .header("Cookie", format!("{cookie}; hub_flash={value}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let clear = first_flash(&page);
+    assert!(clear.starts_with("hub_flash=;"), "cookie cleared: {clear}");
+    assert!(clear.contains("Max-Age=0"), "cleared immediately: {clear}");
+    let body = page.text().await.unwrap();
+    assert!(body.contains("id=\"hub-flash-init\""), "flash block rendered");
+    assert!(
+        body.contains(&format!("data-msg=\"{msg}\"")),
+        "umlaut flash text rendered verbatim"
+    );
+}
+
+/// A double reload shows the toast exactly once: the first GET consumes and
+/// clears the cookie, the second carries no flash cookie and stays quiet.
+#[tokio::test]
+async fn double_reload_shows_toast_once() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+    let value = music_hub::flash::encode("ok", "Doppel-Reload");
+
+    let first = app
+        .client()
+        .get(app.url("/music-api"))
+        .header("Cookie", format!("{cookie}; hub_flash={value}"))
+        .send()
+        .await
+        .unwrap();
+    assert!(first_flash(&first).contains("Max-Age=0"), "first clears");
+    let first_body = first.text().await.unwrap();
+    assert!(first_body.contains("id=\"hub-flash-init\""), "first shows toast");
+    assert!(first_body.contains("data-msg=\"Doppel-Reload\""));
+
+    // Browser sends only the session cookie now (flash cookie was cleared).
+    let second = app
+        .client()
+        .get(app.url("/music-api"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        flash_cookies(&second).is_empty(),
+        "second reload sets no clear cookie"
+    );
+    let second_body = second.text().await.unwrap();
+    assert!(
+        !second_body.contains("id=\"hub-flash-init\""),
+        "second reload shows no toast"
+    );
+}
+
+/// A request without any flash cookie neither renders a toast nor emits a
+/// `hub_flash` Set-Cookie (no spurious clear header).
+#[tokio::test]
+async fn request_without_cookie_sets_no_clear_header() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let page = app
+        .client()
+        .get(app.url("/music-api"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    assert!(
+        flash_cookies(&page).is_empty(),
+        "no hub_flash Set-Cookie without a flash cookie"
+    );
+}
+
