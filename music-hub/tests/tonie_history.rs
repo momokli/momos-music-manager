@@ -51,6 +51,7 @@ async fn bind(app: &common::TestApp, uid: i64, tonie_id: &str, name: &str) -> i6
         Some(name),
         "albums",
         Some(15167501),
+        None,
         "mp3-128",
         "manual",
     )
@@ -126,6 +127,17 @@ fn toast(headers: &axum::http::HeaderMap) -> String {
     headers
         .get("hx-trigger")
         .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// The `hub_flash` Set-Cookie value (empty when none was set).
+fn flash_cookie(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("hub_flash="))
         .unwrap_or("")
         .to_string()
 }
@@ -299,9 +311,11 @@ async fn unlisten_drops_exactly_one_ledger_row() {
         .to_str()
         .unwrap()
         .to_string();
+    assert_eq!(location, "/tonies/history", "PRG back to the page: {location}");
     assert!(
-        location.starts_with("/tonies/history?msg="),
-        "PRG back to the page: {location}"
+        flash_cookie(&headers).starts_with("hub_flash=ok:"),
+        "flash cookie: {}",
+        flash_cookie(&headers)
     );
     assert!(
         toast(&headers).contains("\"kind\":\"ok\""),
@@ -359,15 +373,12 @@ async fn reset_clears_only_my_ledger() {
     let resp = send_post(&app, Some(&my_cookie), "/tonies/history/reset", &[]).await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let headers = resp.headers().clone();
-    assert!(
-        headers
-            .get("location")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .starts_with("/tonies/history?msg="),
+    assert_eq!(
+        headers.get("location").unwrap().to_str().unwrap(),
+        "/tonies/history",
         "PRG back to the page"
     );
+    assert!(flash_cookie(&headers).starts_with("hub_flash=ok:"));
     assert!(toast(&headers).contains("\"kind\":\"ok\""));
 
     assert!(seen_ids(&app, mine).await.is_empty(), "my ledger is empty");

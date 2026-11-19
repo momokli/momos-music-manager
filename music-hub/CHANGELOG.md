@@ -72,6 +72,55 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   für „no data"), und zeigte deshalb „—", während die Track-Page den Vault-Wert hatte. Beide
   lesen jetzt denselben `resolved`-Block über `music_api::resolved_audio`.
 
+## [0.32.0] — 2026-11-19
+
+**hub-tonies-followup** — Tonie-Alben bleiben nach dem Umbau benutzbar und erklärbar:
+Dauern und Korb-Zustand im Album-Grid, kontextbewusste Reihenfolge für playlist-gebundene
+Figuren, sichtbare Album-Skips im Run-Log, Artist-Name an der Bindung und ein
+geräteübergreifender Flash-Toast.
+
+### Added
+
+- feat: **Album-Grid zeigt Dauern, Auswahl überlebt den Save** (#617) — jede Album-Kachel
+  zeigt die (deutsch formatierte) Dauer, die Korb-Zeile liest `hub_tonie_cart_items.seconds`,
+  und nach `POST /tonies/{tonie_id}/albums/add` trägt die Kachel ein `im Korb`-Merkmal.
+  Unbekannte Dauer wird nie als `0 min` gerendert.
+- feat: **Playlist-gebundene Tonies mit Tonie-Kontext ordnen** (#624) — ein neuer reiner
+  Planer `order_plan_for_tonie` (`tonies::sync`) berücksichtigt die Restzeit auf der Figur
+  und bereits vorhandene Kapitel und ordert nur die **fehlenden**, passenden ISRCs in
+  Tonie-Reihenfolge (`intent="toys"`, `target=mp3-128`, `priority=5`); der Album-Pfad bleibt
+  unverändert, kein Spotify-Request im Pfad.
+- test: **Tonie-Album-Run end-to-end** (#618) — `tests/tonies_sync_run.rs` deckt den
+  Album-Zweig von `execute_binding` ab: Korb-Reihenfolge wird Kapitel-Reihenfolge, das
+  Ledger (`hub_tonie_albums_seen`) überspringt bekannte Alben, kein Spotify-Request.
+
+### Changed
+
+- **Album-Dauer aus der Artist-Liste** (#621) — die Album-Kacheln lesen die Länge primär
+  aus `seconds` der Artist-Album-Liste (music-api-Katalog); der Detail-Call
+  (`GET /deezer/album/{id}`) bleibt nur noch Fallback für Alben ohne `seconds`. Ein
+  vollständig katalogisierter Artist löst damit **keinen** Detail-Call mehr aus.
+- **Flash-Meldungen für Full-Page-POSTs** (#622) — Aktionen, die eine ganze Seite per
+  PRG-Redirect neu laden (Tonie-Sync/-Upload/-Reset, Backpack-, Tag-, Einstellungen- und
+  Kellner-Formulare, `/admin`, `/curate`, `/track`), verloren ihre Meldung, weil `HX-Trigger`
+  nur htmx erreicht. Die Meldung reist jetzt in einem kurzlebigen `hub_flash`-Cookie
+  (`HttpOnly`, `SameSite=Lax`, `Max-Age=30`, ASCII-codiert): der `POST` setzt es im `303`,
+  eine neue Middleware injiziert es beim nächsten Rendern als `x-hub-flash-*`-Header und
+  löscht es einmalig; ein doppeltes Reload zeigt den Toast genau einmal. Der `?msg=`-Behelf
+  entfällt, htmx-Aktionen behalten ihren `HX-Trigger`-Toast.
+
+### Fixed
+
+- fix: **Album-Skips landen im Run-Log** (#619) — `fit_albums(...).skipped`
+  (`AlbumNotReady`, `CapReached`) wird nicht mehr verworfen, sondern mit Grund in
+  `hub_tonie_syncs.skipped_json` geschrieben (gleiche Form wie Track-Skips).
+- fix: **Artist-Name an der Album-Bindung speichern** (#620) — additive Migration `064`
+  (`hub_tonie_bindings.source_name`, nullable); `POST /tonies/{id}/albums/artist` schreibt
+  den Namen mit, die Album-Seite fällt ohne Namen auf `Deezer-Artist #<id>` zurück.
+- fix: **unlisten mit unbekannter Album-ID meldet keinen Erfolg** (#623) —
+  `tonies::bindings::unlisten_album` liefert jetzt `rows_affected`; `Ok(0)` meldet neutral
+  „Album war nicht in der Liste" statt fälschlich `ok`.
+
 ## [0.31.0] — 2026-11-17
 
 **hub-tonies** — Aus dem Hub heraus einen Kreativ-Tonie bespielen: eine Spotify-Playlist

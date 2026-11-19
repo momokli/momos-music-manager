@@ -65,6 +65,9 @@ struct Mock {
     /// When true a `POST …/chapters` also appends to `chapters`, so a second
     /// run sees the state the first one produced (like the real API).
     apply_posts: Arc<Mutex<bool>>,
+    /// Seconds already present on the Kreativ-Tonie (#624). Reported by
+    /// `get_tonie` as `secondsPresent` (and `secondsRemaining` = total − present).
+    seconds_present: Arc<Mutex<i64>>,
 }
 
 fn mock_state(base: String) -> Mock {
@@ -82,6 +85,7 @@ fn mock_state(base: String) -> Mock {
         albums: Arc::new(Mutex::new(Vec::new())),
         orders: Arc::new(Mutex::new(Vec::new())),
         apply_posts: Arc::new(Mutex::new(false)),
+        seconds_present: Arc::new(Mutex::new(0)),
     }
 }
 
@@ -120,7 +124,14 @@ async fn get_tonie(
             c
         })
         .collect();
-    Json(json!({ "id": "ct1", "chapters": chapters }))
+    let present = *m.seconds_present.lock().unwrap();
+    let remaining = (5400 - present).max(0);
+    Json(json!({
+        "id": "ct1",
+        "chapters": chapters,
+        "secondsPresent": present,
+        "secondsRemaining": remaining,
+    }))
 }
 
 async fn file_handler(State(m): State<Mock>) -> Json<Value> {
@@ -279,6 +290,7 @@ fn binding() -> Binding {
         tonie_name: Some("Story".into()),
         source_kind: "playlist".into(),
         source_id: Some(7),
+        source_name: None,
         format: "mp3-128".into(),
         cap_seconds: 5400,
         mode: "manual".into(),
@@ -625,6 +637,7 @@ async fn sync_endpoint_summarises_and_never_leaks_credentials() {
         Some("Story"),
         "playlist",
         Some(pl),
+        None,
         "mp3-128",
         "manual",
     )
@@ -739,6 +752,7 @@ async fn sync_endpoint_is_owner_scoped() {
         Some("Story"),
         "playlist",
         Some(pl),
+        None,
         "mp3-128",
         "manual",
     )
@@ -873,6 +887,7 @@ async fn busy_sync_returns_busy_toast() {
         Some("Story"),
         "playlist",
         Some(pl),
+        None,
         "mp3-128",
         "manual",
     )
@@ -960,6 +975,7 @@ async fn execute_binding_reports_missing_source_and_keeps_binding() {
         Some("Story"),
         "playlist",
         Some(999_999),
+        None,
         "mp3-128",
         "manual",
     )
@@ -1027,6 +1043,7 @@ async fn execute_binding_rejects_foreign_source_and_keeps_binding() {
         Some("Story"),
         "playlist",
         Some(foreign_playlist),
+        None,
         "mp3-128",
         "manual",
     )
@@ -1109,6 +1126,7 @@ async fn execute_binding_with_backpack_source_syncs() {
         Some("Story"),
         "backpack",
         Some(bp),
+        None,
         "mp3-128",
         "manual",
     )
@@ -1124,6 +1142,147 @@ async fn execute_binding_with_backpack_source_syncs() {
     let outcome = music_hub::tonies::execute_binding(&app.pool, &cfg, uid, &b).await;
     assert_eq!(outcome.status, run::STATUS_OK, "error: {:?}", outcome.error);
     assert_eq!(outcome.added, 1);
+}
+
+/// #624: a playlist-bound Tonie orders its *missing* tracks against the Tonie's
+/// remaining time, in Tonie order — and never touches Spotify. Album paths keep
+/// their own ordering; this is the playlist-only contextual order.
+#[tokio::test]
+async fn playlist_binding_orders_missing_tracks_within_remaining_time() {
+    let (base, m) = mock_all().await;
+    let (sp_base, sp) = mock_spotify_never_called().await;
+    let cfg = cfg_album_run(&base, &sp_base);
+    let (_dir, pool, uid) = album_run_db().await;
+
+    // Only "keep" is already in the vault; everything else must be ordered.
+    *m.ready.lock().unwrap() = ["keep"].iter().map(|s| s.to_string()).collect();
+    // 100 s still free on the Tonie (cap 5400 − present 5300).
+    *m.seconds_present.lock().unwrap() = 5300;
+
+    let pl = insert_playlist(&pool, uid, "pl-order", "Order Mix").await;
+    // Tonie order: keep(ready, 60s) → new1(30s) → new2(80s) → new3(30s).
+    let specs: [(&str, &str, &str, i64); 4] = [
+        ("s0", "keep", "Keep", 60_000),
+        ("s1", "new1", "New1", 30_000),
+        ("s2", "new2", "New2", 80_000),
+        ("s3", "new3", "New3", 30_000),
+    ];
+    for (i, (sid, isrc, title, ms)) in specs.iter().enumerate() {
+        let t = insert_track(&pool, sid, Some(isrc), title, *ms).await;
+        sqlx::query(
+            "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
+        )
+        .bind(pl)
+        .bind(t)
+        .bind(i as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    music_hub::tonies::upsert_binding(
+        &pool,
+        uid,
+        "ct1",
+        Some("Story"),
+        "playlist",
+        Some(pl),
+        None,
+        "mp3-128",
+        "manual",
+    )
+    .await
+    .unwrap();
+    let b = music_hub::tonies::get_binding(&pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.source_kind, "playlist");
+
+    let _outcome = music_hub::tonies::execute_binding(&pool, &cfg, uid, &b).await;
+
+    let orders = m.orders.lock().unwrap().clone();
+    assert_eq!(orders.len(), 1, "exactly one order expected: {orders:?}");
+    let body = &orders[0];
+    assert_eq!(body["priority"], json!(5));
+    assert_eq!(body["intent"], json!("toys"));
+    assert_eq!(body["target"], json!("mp3-128"));
+    let isrcs: Vec<String> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["isrc"].as_str().unwrap_or_default().to_string())
+        .collect();
+    // remaining 100: keep(60, ready) spends 60 → 40 left; new1(30) fits and is
+    // missing → ordered; new2(80) would overflow → break (new3 never reached).
+    assert_eq!(
+        isrcs,
+        vec!["new1"],
+        "only the missing, fitting ISRC in Tonie order"
+    );
+
+    assert!(
+        sp.hits.lock().unwrap().is_empty(),
+        "the playlist path must never touch Spotify: {:?}",
+        sp.hits.lock().unwrap()
+    );
+}
+
+/// #624 negative case: when every desired track is already in the vault there
+/// is nothing to order — no `/orders` call at all.
+#[tokio::test]
+async fn playlist_binding_orders_nothing_when_all_ready() {
+    let (base, m) = mock_all().await;
+    let (sp_base, sp) = mock_spotify_never_called().await;
+    let cfg = cfg_album_run(&base, &sp_base);
+    let (_dir, pool, uid) = album_run_db().await;
+
+    *m.ready.lock().unwrap() = ["a", "b"].iter().map(|s| s.to_string()).collect();
+    *m.seconds_present.lock().unwrap() = 5300;
+
+    let pl = insert_playlist(&pool, uid, "pl-ready", "Ready Mix").await;
+    for (i, (sid, isrc, title)) in [("r0", "a", "A"), ("r1", "b", "B")]
+        .iter()
+        .enumerate()
+    {
+        let t = insert_track(&pool, sid, Some(isrc), title, 30_000).await;
+        sqlx::query(
+            "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
+        )
+        .bind(pl)
+        .bind(t)
+        .bind(i as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    music_hub::tonies::upsert_binding(
+        &pool,
+        uid,
+        "ct1",
+        Some("Story"),
+        "playlist",
+        Some(pl),
+        None,
+        "mp3-128",
+        "manual",
+    )
+    .await
+    .unwrap();
+    let b = music_hub::tonies::get_binding(&pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let _outcome = music_hub::tonies::execute_binding(&pool, &cfg, uid, &b).await;
+
+    assert!(
+        m.orders.lock().unwrap().is_empty(),
+        "all-ready playlist must order nothing: {:?}",
+        m.orders.lock().unwrap()
+    );
+    assert!(sp.hits.lock().unwrap().is_empty());
 }
 
 // ── tests: album sources end-to-end (cart → resolver → run → chapters) ──────
@@ -1196,6 +1355,7 @@ fn album_binding(album_mode: &str, artist: Option<i64>, cap_seconds: i64) -> Bin
         tonie_name: Some("Story".into()),
         source_kind: "albums".into(),
         source_id: artist,
+        source_name: None,
         format: "mp3-128".into(),
         cap_seconds,
         mode: "manual".into(),
@@ -1493,4 +1653,82 @@ async fn album_run_makes_no_spotify_requests() {
         "an album run must never touch Spotify: {:?}",
         sp.hits.lock().unwrap()
     );
+}
+
+/// #619: an album that does not fit is skipped as a unit — and that skip must
+/// reach the *persisted* run log, not only the in-memory outcome. This drives
+/// the real `execute_binding` album branch, so it exercises the
+/// `fit.skipped` → run-log wiring the fix added (the unit tests call
+/// `merge_album_skips` directly and bypass that wiring).
+#[tokio::test]
+async fn album_skip_lands_in_the_persisted_run_log() {
+    let (base, m) = mock_all().await;
+    // Three 200 s albums; a 500 s cap fits two, so the third is CapReached.
+    *m.albums.lock().unwrap() = vec![
+        album("459", "Folge 459", "2026-11-13", &["A1", "A2"]),
+        album("458", "Folge 458", "2026-11-06", &["B1", "B2"]),
+        album("457", "Folge 457", "2026-10-30", &["C1", "C2"]),
+    ];
+    *m.ready.lock().unwrap() = ["A1", "A2", "B1", "B2", "C1", "C2"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let (sp_base, _sp) = mock_spotify_never_called().await;
+    let cfg = cfg_album_run(&base, &sp_base);
+    let (_dir, pool, uid) = album_run_db().await;
+
+    // Persist the binding so the run-log row hangs on a real binding_id.
+    let bid: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_tonie_bindings
+             (user_id, tonie_id, tonie_name, source_kind, source_id, format, cap_seconds,
+              mode, order_by, album_mode, dirty_since, created_at, updated_at)
+         VALUES (?1, 'ct1', 'Story', 'albums', 15167501, 'mp3-128', 500,
+                 'manual', 'playlist', 'newest', NULL,
+                 '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+         RETURNING id",
+    )
+    .bind(uid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let mut b = album_binding("newest", Some(15167501), 500);
+    b.id = bid;
+    // Mirror the auto-sync driver: claim → execute → finish is what actually
+    // persists the run-log row.
+    let run::Claim::Started(run_id) = run::claim_run(&pool, bid).await.unwrap() else {
+        panic!("expected Started");
+    };
+    let outcome = music_hub::tonies::execute_binding(&pool, &cfg, uid, &b).await;
+    run::finish_run(&pool, run_id, &outcome).await.unwrap();
+    assert_eq!(outcome.status, run::STATUS_OK, "error: {:?}", outcome.error);
+
+    // The in-memory outcome carries the album skip with its reason…
+    assert_eq!(
+        outcome.skipped.len(),
+        1,
+        "one album skip expected: {:?}",
+        outcome.skipped
+    );
+    assert_eq!(outcome.skipped[0].title, "Folge 457");
+    assert_eq!(
+        outcome.skipped[0].reason,
+        music_hub::tonies::SkipReason::CapReached
+    );
+    assert_eq!(outcome.skipped[0].isrc, None);
+
+    // …and it is persisted in the run log, so the history page can show it.
+    let rows = run::list_syncs(&pool, bid, 5).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let skipped = &rows[0].skipped;
+    assert_eq!(
+        skipped.len(),
+        1,
+        "the album skip must be persisted: {:?}",
+        skipped
+    );
+    assert_eq!(skipped[0].title, "Folge 457");
+    assert_eq!(skipped[0].reason, "cap_reached");
+    assert_eq!(skipped[0].isrc, None);
 }

@@ -227,6 +227,17 @@ fn location(resp: &reqwest::Response) -> String {
         .to_string()
 }
 
+/// The `hub_flash` Set-Cookie value (empty when none was set).
+fn flash_cookie(resp: &reqwest::Response) -> String {
+    resp.headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("hub_flash="))
+        .unwrap_or_default()
+        .to_string()
+}
+
 #[tokio::test]
 async fn http_create_then_duplicate_flash() {
     let app = common::spawn().await;
@@ -257,7 +268,8 @@ async fn http_create_then_duplicate_flash() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-    assert!(location(&resp).starts_with("/backpacks?msg="), "flash on duplicate");
+    assert_eq!(location(&resp), "/backpacks");
+    assert!(flash_cookie(&resp).starts_with("hub_flash=ok:"), "flash on duplicate");
 
     let body = get_backpacks(&app, &cookie).await;
     assert_eq!(count_cards(&body), 1, "no second entry after duplicate");
@@ -294,7 +306,8 @@ async fn http_rename_and_foreign_noop() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-    assert!(location(&resp).starts_with("/backpacks?msg="), "flash on foreign rename");
+    assert_eq!(location(&resp), "/backpacks");
+    assert!(flash_cookie(&resp).starts_with("hub_flash=ok:"), "flash on foreign rename");
     let body = get_backpacks(&app, &alice_cookie).await;
     assert!(body.contains("New") && !body.contains("Stolen"), "foreign rename had no effect");
 
@@ -318,7 +331,8 @@ async fn http_delete_removes_only_own() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-    assert!(location(&resp).starts_with("/backpacks?msg="), "flash on foreign delete");
+    assert_eq!(location(&resp), "/backpacks");
+    assert!(flash_cookie(&resp).starts_with("hub_flash=ok:"), "flash on foreign delete");
     let bob_body = get_backpacks(&app, &bob_cookie).await;
     assert!(bob_body.contains("Survivor"), "foreign backpack survives");
 
@@ -403,7 +417,8 @@ async fn http_toggle_active_and_foreign_flash() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-    assert!(location(&resp).starts_with("/backpacks?msg="), "flash on foreign toggle");
+    assert_eq!(location(&resp), "/backpacks");
+    assert!(flash_cookie(&resp).starts_with("hub_flash=ok:"), "flash on foreign toggle");
     assert_eq!(
         backpacks::active_backpack(&app.pool, alice_id).await.unwrap().map(|b| b.id),
         Some(bp1),

@@ -94,6 +94,10 @@ pub struct DeezerAlbumSummary {
     pub release_date: Option<String>,
     pub record_type: Option<String>,
     pub cover_url: Option<String>,
+    /// Album length in seconds, filled by music-api from its catalogue when the
+    /// album is known. Absent (or `null`) for a cold catalogue.
+    #[serde(default)]
+    pub seconds: Option<i64>,
 }
 
 /// One page of an artist's albums.

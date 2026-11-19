@@ -669,7 +669,7 @@ pub async fn execute_binding(
     // everything else fits tracks from the hub tables.
     let album_source = binding.source_kind == super::bindings::SOURCE_ALBUMS;
     let mut used_albums: Vec<super::albums::AlbumPlan> = Vec::new();
-    let skipped_albums: Vec<super::sync::SkippedTrack> = Vec::new();
+    let mut skipped_albums: Vec<super::sync::SkippedTrack> = Vec::new();
     let (desired, ready) = if album_source {
         let albums = match super::albums::resolve(pool, cfg, uid, binding).await {
             Ok(a) => a,
@@ -733,6 +733,9 @@ pub async fn execute_binding(
             .flat_map(|a| a.tracks.iter().cloned())
             .collect();
         used_albums = fit.albums;
+        // Album-level skips (AlbumNotReady / CapReached) must reach the run log
+        // just like the track skips below.
+        skipped_albums = fit.skipped;
         (desired, ready)
     } else {
         let desired = match super::sync::desired_for_source(
@@ -757,6 +760,40 @@ pub async fn execute_binding(
         let isrcs: Vec<String> =
             desired.iter().filter_map(|t| t.isrc.clone()).collect();
         let ready = readiness(cfg, isrcs).await;
+
+        // #624: a playlist-bound Tonie orders its *missing* tracks here,
+        // honouring the Tonie's current fill level (remaining = cap - present),
+        // so the newest fitting tracks land first. Only playlists: album sources
+        // have their own ordering path above, backpack/tag stay untouched. The
+        // extra state GET is read-only; no Spotify request is involved.
+        if binding.source_kind == super::bindings::SOURCE_PLAYLIST
+            && let Ok(t) = client.get_creativetonie(&household, &binding.tonie_id).await
+        {
+            let present = super::Capacity::from_tonie(&t).present;
+            let plan = super::sync::order_plan_for_tonie(&desired, binding.cap_seconds, present, |isrc| {
+                ready.contains(isrc)
+            });
+            if !plan.is_empty() {
+                match crate::music_api::order_with_priority_intent(
+                    cfg,
+                    &plan,
+                    5,
+                    "toys",
+                    Some(&binding.format),
+                )
+                .await
+                {
+                    Ok(_) => tracing::info!(
+                        "tonies: {} Playlist-Tracks geordert (user {uid})",
+                        plan.len()
+                    ),
+                    Err(e) => {
+                        tracing::warn!("tonies playlist order failed for user {uid}: {e:#}")
+                    }
+                }
+            }
+        }
+
         (desired, ready)
     };
 
@@ -784,9 +821,7 @@ pub async fn execute_binding(
 
     if album_source {
         // Album-level skips belong in the same run log as the track skips.
-        let mut all = skipped_albums;
-        all.extend(outcome.skipped);
-        outcome.skipped = all;
+        merge_album_skips(skipped_albums, &mut outcome);
         // Listened ledger: only a run that actually matches the tonie or
         // changed it counts as "heard".
         if matches!(outcome.status.as_str(), STATUS_OK | STATUS_NOOP)
@@ -799,6 +834,17 @@ pub async fn execute_binding(
 }
 
 /// One-line, credential-free summary for the htmx toast.
+/// Prepend album-level skips (from [`super::albums::fit_albums`]) to the track
+/// skips already recorded on `outcome`, so both appear in the same run log.
+fn merge_album_skips(
+    skipped_albums: Vec<super::sync::SkippedTrack>,
+    outcome: &mut RunOutcome,
+) {
+    let mut all = skipped_albums;
+    all.extend(std::mem::take(&mut outcome.skipped));
+    outcome.skipped = all;
+}
+
 pub fn summary(o: &RunOutcome) -> String {
     let mut msg = format!("{} Kapitel, {} min", o.chapters_after, o.seconds / 60);
     match o.status.as_str() {
@@ -962,6 +1008,64 @@ mod tests {
         assert_eq!(reason_str(SkipReason::CapReached), "cap_reached");
         assert_eq!(reason_label("cap_reached"), "passten nicht mehr");
         assert_eq!(reason_label("unknown"), "übersprungen");
+    }
+
+    fn album_plan(title: &str, seconds: i64, isrcs: &[&str]) -> crate::tonies::albums::AlbumPlan {
+        crate::tonies::albums::AlbumPlan {
+            album_id: title.to_lowercase(),
+            title: title.to_string(),
+            seconds,
+            tracks: isrcs
+                .iter()
+                .map(|i| crate::tonies::sync::DesiredTrack {
+                    isrc: Some(i.to_string()),
+                    title: format!("{title}-{i}"),
+                    duration_ms: 1000,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn album_cap_reached_lands_in_the_run_log() {
+        // One 20-min album with only 10 min of cap left -> skipped as a unit.
+        let fit = crate::tonies::albums::fit_albums(
+            vec![album_plan("Ganzes Album", 1200, &["x"])],
+            600,
+            |_| true,
+        );
+        assert!(fit.albums.is_empty());
+
+        let mut out = outcome(STATUS_OK, vec![]);
+        merge_album_skips(fit.skipped, &mut out);
+
+        assert_eq!(out.skipped.len(), 1);
+        assert_eq!(out.skipped[0].reason, SkipReason::CapReached);
+        assert_eq!(out.skipped[0].isrc, None);
+        let json = out.skipped_json();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0].title, "Ganzes Album");
+        assert_eq!(json[0].reason, "cap_reached");
+    }
+
+    #[test]
+    fn album_not_ready_lands_in_the_run_log() {
+        // A track of the album is not in the vault -> album skipped as a unit.
+        let fit = crate::tonies::albums::fit_albums(
+            vec![album_plan("Halb da", 600, &["missing"])],
+            5400,
+            |_| false,
+        );
+        assert!(fit.albums.is_empty());
+
+        let mut out = outcome(STATUS_OK, vec![]);
+        merge_album_skips(fit.skipped, &mut out);
+
+        assert_eq!(out.skipped.len(), 1);
+        assert_eq!(out.skipped[0].reason, SkipReason::AlbumNotReady);
+        assert_eq!(out.skipped[0].isrc, None);
+        assert_eq!(out.skipped_json()[0].reason, "album_not_ready");
     }
 
     #[tokio::test]

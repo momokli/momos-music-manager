@@ -211,6 +211,24 @@ async fn source_id_has_no_foreign_key() {
 }
 
 #[tokio::test]
+async fn source_name_column_defaults_to_null() {
+    // #620: additive `source_name` column for the album-binding artist name.
+    // A row inserted without it (the helper sets only the mandatory columns)
+    // must read back as NULL — no backfill, the UI then falls back to the id.
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let pl = insert_playlist(&pool, user, "pl-1").await;
+    insert_binding(&pool, user, "ct1", pl).await.expect("insert");
+
+    let name: Option<String> =
+        sqlx::query_scalar("SELECT source_name FROM hub_tonie_bindings WHERE tonie_id = 'ct1'")
+            .fetch_one(&pool)
+            .await
+            .expect("row");
+    assert_eq!(name, None, "source_name must default to NULL");
+}
+
+#[tokio::test]
 async fn fk_enforcement_is_active() {
     // Control for the rebuild test below: prove the test connection really
     // enforces foreign keys, so "the sync row survives the rebuild" is a

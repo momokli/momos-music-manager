@@ -49,7 +49,7 @@ fn action_response(headers: &HeaderMap, msg: &str, kind: &str, fallback: &str) -
     if htmx(headers) {
         (StatusCode::NO_CONTENT, toast_header(msg, kind)).into_response()
     } else {
-        Redirect::to(&format!("{fallback}?msg={}", urlencoding::encode(msg))).into_response()
+        crate::flash::redirect(fallback, msg, kind)
     }
 }
 

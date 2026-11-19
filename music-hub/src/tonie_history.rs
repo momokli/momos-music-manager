@@ -12,7 +12,7 @@
 
 use askama::Template;
 use axum::Router;
-use axum::extract::{Form, Query, State};
+use axum::extract::{Form, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -79,13 +79,6 @@ impl From<SeenAlbum> for SeenRow {
     }
 }
 
-/// `?msg=` — the flash text a POST hands back through the PRG redirect.
-#[derive(Deserialize, Default)]
-struct HistoryQuery {
-    #[serde(default)]
-    msg: Option<String>,
-}
-
 #[derive(Template)]
 #[template(path = "tonie_history.html")]
 struct TonieHistoryPage {
@@ -97,11 +90,7 @@ struct TonieHistoryPage {
 
 // ── handlers ────────────────────────────────────────────────────────────────
 
-async fn history_page(
-    State(st): State<AppState>,
-    Query(q): Query<HistoryQuery>,
-    headers: HeaderMap,
-) -> Response {
+async fn history_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "tonies").await else {
         return Redirect::to("/login").into_response();
     };
@@ -126,7 +115,7 @@ async fn history_page(
 
     render(&TonieHistoryPage {
         nav,
-        flash: q.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         figures,
         seen,
     })
@@ -146,7 +135,8 @@ async fn unlisten_post(
         ("Kein Album angegeben.".to_string(), "err")
     } else {
         match crate::tonies::unlisten_album(&st.pool, nav.id, album_id).await {
-            Ok(()) => ("Album wieder auf der Liste".to_string(), "ok"),
+            Ok(0) => ("Album war nicht in der Liste".to_string(), "info"),
+            Ok(_) => ("Album wieder auf der Liste".to_string(), "ok"),
             Err(e) => (format!("Fehler: {e}"), "err"),
         }
     };
@@ -171,11 +161,10 @@ struct UnlistenForm {
     album_id: String,
 }
 
-/// PRG: the toast rides on the 303 as `HX-Trigger`, the same text as `?msg=`
-/// so a plain (non-htmx) form submit still shows it after the redirect.
+/// PRG: the toast rides on the 303 as `HX-Trigger` (for htmx) and as a
+/// `hub_flash` cookie (for a plain form submit) so both paths show it once.
 fn back_to_history(msg: &str, kind: &str) -> Response {
-    let resp =
-        Redirect::to(&format!("/tonies/history?msg={}", urlencoding::encode(msg))).into_response();
+    let resp = crate::flash::redirect("/tonies/history", msg, kind);
     crate::toast::apply(resp, msg, kind)
 }
 

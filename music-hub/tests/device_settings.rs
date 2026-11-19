@@ -453,7 +453,15 @@ async fn kellner_form_rejects_invalid_format() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    assert!(loc.starts_with("/kellner?msg="), "flash redirect: {loc}");
+    assert_eq!(loc, "/kellner", "flash redirect: {loc}");
+    let flash = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("hub_flash="))
+        .unwrap_or_default();
+    assert!(flash.starts_with("hub_flash="), "flash cookie set: {loc}");
 
     let (_, v) = get(&app, Some(&cookie), did).await;
     assert_eq!(v["preferred_format"], "flac", "nothing written");

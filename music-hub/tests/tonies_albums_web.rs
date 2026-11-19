@@ -96,16 +96,86 @@ fn album_summary(id: &str, title: &str, released: &str, cover: Option<&str>) -> 
     })
 }
 
+/// Like `album_summary`, but with a known length — the primary source #621
+/// added to the artist list.
+fn album_summary_secs(
+    id: &str,
+    title: &str,
+    released: &str,
+    cover: Option<&str>,
+    seconds: i64,
+) -> Value {
+    let mut v = album_summary(id, title, released, cover);
+    v["seconds"] = json!(seconds);
+    v
+}
+
+/// How the mocked artist list carries album lengths (#621 primary source).
+#[derive(Clone, Copy)]
+enum ListSeconds {
+    /// Every album carries its length → no detail call needed at all.
+    All,
+    /// No album carries a length → a cold list, full detail fallback.
+    None,
+    /// Only the first album carries a length → the per-tile skip must fire for
+    /// that tile while the other still falls back to a detail call.
+    FirstOnly,
+}
+
 /// Mock `music-api`: artist albums, artist search and album detail.
 async fn spawn_music_api() -> String {
-    let albums = |Path(id): Path<String>| async move {
+    spawn_music_api_counted(ListSeconds::All).await.0
+}
+
+/// Mock `music-api` that counts `/deezer/album/{id}` (detail) calls. `secs`
+/// controls whether the artist list carries each album's length (the #621
+/// primary path, so the grid needs no detail call); a cold list makes the hub
+/// fall back to the album detail.
+async fn spawn_music_api_counted(
+    secs: ListSeconds,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let hits: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+
+    async fn bump(
+        State(hits): State<Arc<AtomicUsize>>,
+        req: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> Response {
+        if req.uri().path().starts_with("/deezer/album/") {
+            hits.fetch_add(1, Ordering::SeqCst);
+        }
+        next.run(req).await
+    }
+
+    let albums = move |Path(id): Path<String>| async move {
         let body = if id == "15167501" {
-            json!({
-                "albums": [
-                    album_summary("459", "Folge 459", "2026-11-13", Some("https://cdn.example/459.jpg")),
-                    // No cover: the grid has to render a placeholder tile.
+            let a459 = match secs {
+                ListSeconds::All | ListSeconds::FirstOnly => album_summary_secs(
+                    "459",
+                    "Folge 459",
+                    "2026-11-13",
+                    Some("https://cdn.example/459.jpg"),
+                    200,
+                ),
+                ListSeconds::None => album_summary(
+                    "459",
+                    "Folge 459",
+                    "2026-11-13",
+                    Some("https://cdn.example/459.jpg"),
+                ),
+            };
+            // `458` has no cover: the grid has to render a placeholder tile.
+            let a458 = match secs {
+                ListSeconds::All => album_summary_secs("458", "Folge 458", "2026-11-06", None, 200),
+                ListSeconds::None | ListSeconds::FirstOnly => {
                     album_summary("458", "Folge 458", "2026-11-06", None)
-                ],
+                }
+            };
+            json!({
+                "albums": [a459, a458],
                 "total": 2,
                 "next": null
             })
@@ -150,8 +220,13 @@ async fn spawn_music_api() -> String {
     let app = Router::new()
         .route("/deezer/artist/{id}/albums", get(albums))
         .route("/deezer/search/artist", get(search))
-        .route("/deezer/album/{id}", get(album));
-    serve(app).await
+        .route("/deezer/album/{id}", get(album))
+        .with_state(())
+        .layer(axum::middleware::from_fn_with_state(
+            counter,
+            bump,
+        ));
+    (serve(app).await, hits)
 }
 
 // ── harness ─────────────────────────────────────────────────────────────────
@@ -159,8 +234,12 @@ async fn spawn_music_api() -> String {
 /// Boot the web app against a mocked Tonies/KC pair and a mocked music-api.
 /// `token` = `None` simulates a missing `MUSIC_API_TOKEN`.
 async fn boot(token: Option<&str>) -> common::TestApp {
+    boot_with_music(token, spawn_music_api().await).await
+}
+
+/// Boot against a pre-built (possibly counted) music-api mock base URL.
+async fn boot_with_music(token: Option<&str>, music_base: String) -> common::TestApp {
     let tonies_base = spawn_tonies_mock().await;
-    let music_base = spawn_music_api().await;
 
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite:{}/hub.db", dir.path().display());
@@ -199,6 +278,7 @@ async fn bind_albums(app: &common::TestApp, uid: i64, artist_id: Option<i64>, mo
         Some("Story One"),
         "albums",
         artist_id,
+        None,
         "mp3-128",
         "manual",
     )
@@ -341,6 +421,57 @@ async fn set_artist_binds_the_album_source() {
     assert_eq!(b.source_id, Some(15167501));
     assert_eq!(b.format, "mp3-128", "defaults to mp3-128");
     assert_eq!(b.mode, "manual", "defaults to manual");
+}
+
+/// #620: setting the artist persists the name on the binding and the page shows
+/// it instead of the bare `Deezer-Artist #<id>`.
+#[tokio::test]
+async fn set_artist_persists_the_artist_name() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-artname").await;
+
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/artist",
+        &[("artist_id", "15167501"), ("artist_name", "PAW Patrol")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(toast_kind(resp.headers()).contains("\"kind\":\"ok\""));
+
+    let b = tonies::get_binding(&app.pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.source_name.as_deref(), Some("PAW Patrol"));
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    assert!(html.contains("PAW Patrol"), "name rendered: {html}");
+    assert!(
+        !html.contains("Deezer-Artist #"),
+        "the id fallback must not appear once the name is known: {html}"
+    );
+}
+
+/// #620: a binding without a name (e.g. a row from before the migration) still
+/// renders, falling back to the id.
+#[tokio::test]
+async fn binding_without_name_falls_back_to_the_id() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-fallback").await;
+    // `bind_albums` seeds the binding with `source_name = None`.
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    assert!(
+        html.contains("Verknüpft: Deezer-Artist"),
+        "linked hint expected: {html}"
+    );
+    assert!(
+        html.contains("#15167501"),
+        "id fallback expected (name is unknown): {html}"
+    );
 }
 
 #[tokio::test]
@@ -548,6 +679,46 @@ async fn unlisten_drops_the_ledger_entry() {
 }
 
 #[tokio::test]
+async fn unlisten_unknown_album_reports_info_and_keeps_the_ledger() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-unlisten-unknown").await;
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+    tonies::mark_seen(
+        &app.pool,
+        uid,
+        &[tonies::AlbumPlan {
+            album_id: "459".to_string(),
+            title: "Folge 459".to_string(),
+            ..Default::default()
+        }],
+    )
+    .await
+    .unwrap();
+
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/unlisten",
+        &[("album_id", "does-not-exist")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let toast = toast_kind(resp.headers());
+    assert!(
+        !toast.contains("\"kind\":\"ok\""),
+        "unknown album must not report success: {toast}"
+    );
+    assert!(
+        toast.contains("\"kind\":\"info\""),
+        "unknown album must report neutral info: {toast}"
+    );
+    assert!(
+        !tonies::seen_ids(&app.pool, uid).await.unwrap().is_empty(),
+        "ledger must be unchanged"
+    );
+}
+
+#[tokio::test]
 async fn reset_clears_the_ledger_of_the_caller_only() {
     let app = boot(Some("tok")).await;
     let (a, ca) = user(&app, "alb-reset-a").await;
@@ -600,6 +771,116 @@ async fn grid_marks_listened_albums_and_placeholders_missing_covers() {
     assert!(html.contains("tonies-album-cover-empty"));
 }
 
+/// M4 acceptance (`plans/proposed/tonie-album-queue.md`): a tile shows the cover
+/// and the album length, and a selection made by `POST …/albums/add` survives the
+/// re-render.
+#[tokio::test]
+async fn grid_tile_shows_cover_and_length_and_marks_the_cart() {
+    let app = boot(Some("tok")).await;
+    let (uid, cookie) = user(&app, "alb-tile").await;
+    bind_albums(&app, uid, Some(15167501), "basket").await;
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    let tile = grid_tile(&html, "Folge 459");
+    assert!(
+        tile.contains("src=\"https://cdn.example/459.jpg\""),
+        "cover URL in an img src: {tile}"
+    );
+    // The mock's album detail says 200 s -> "3 min".
+    assert!(tile.contains("3 min"), "length in the tile: {tile}");
+    assert!(!tile.contains("im Korb"), "not in the cart yet: {tile}");
+
+    // Exactly the request the tile's button sends.
+    let resp = send_post(
+        &app,
+        &cookie,
+        "/tonies/ct1/albums/add",
+        &[("album_id", "459"), ("album_title", "Folge 459")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.unwrap();
+
+    let tile = grid_tile(&body, "Folge 459");
+    assert!(tile.contains("im Korb"), "selection after the save: {tile}");
+    assert!(
+        !tile.contains("In den Korb"),
+        "the add button is gone: {tile}"
+    );
+    assert!(tile.contains("3 min"), "length stays: {tile}");
+
+    // The cart row carries the length too: the user compares it against the
+    // tonie's free minutes.
+    let row = cart_row(&body, "459");
+    assert!(row.contains("3 min"), "length in the cart row: {row}");
+}
+
+/// #621: the artist list carries each length, so a fully catalogued artist
+/// costs **no** `/deezer/album/{id}` detail call for the tiles.
+#[tokio::test]
+async fn catalogued_albums_need_no_detail_call() {
+    use std::sync::atomic::Ordering;
+
+    let (music_base, hits) = spawn_music_api_counted(ListSeconds::All).await;
+    let app = boot_with_music(Some("tok"), music_base).await;
+    let (uid, cookie) = user(&app, "alb-nocall").await;
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    assert!(
+        grid_tile(&html, "Folge 459").contains("3 min"),
+        "length comes from the list"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "a catalogued artist must trigger no /deezer/album call"
+    );
+}
+
+/// #621 fallback: a cold list (no `seconds`) still resolves each tile's length
+/// via the album detail — one call per tile that lacks a length, batched.
+#[tokio::test]
+async fn cold_list_falls_back_to_the_detail_batch() {
+    use std::sync::atomic::Ordering;
+
+    let (music_base, hits) = spawn_music_api_counted(ListSeconds::None).await;
+    let app = boot_with_music(Some("tok"), music_base).await;
+    let (uid, cookie) = user(&app, "alb-cold").await;
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    assert!(grid_tile(&html, "Folge 459").contains("3 min"));
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "one detail call for each of the two length-less tiles"
+    );
+}
+
+/// #621 per-tile skip: when only some tiles carry a length from the list, the
+/// detail fallback fires **only** for the tiles that lack one — not for the
+/// whole page. Proves the skip is per tile, not per batch/page.
+#[tokio::test]
+async fn mixed_list_only_dials_the_length_less_tiles() {
+    use std::sync::atomic::Ordering;
+
+    let (music_base, hits) = spawn_music_api_counted(ListSeconds::FirstOnly).await;
+    let app = boot_with_music(Some("tok"), music_base).await;
+    let (uid, cookie) = user(&app, "alb-mixed").await;
+    bind_albums(&app, uid, Some(15167501), "newest").await;
+
+    let html = page(&app, &cookie, "/tonies/ct1/albums").await;
+    // Both tiles show a length: 459 from the list, 458 from the detail fallback.
+    assert!(grid_tile(&html, "Folge 459").contains("3 min"));
+    assert!(grid_tile(&html, "Folge 458").contains("3 min"));
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "only the length-less tile (458) triggers a detail call"
+    );
+}
+
 #[tokio::test]
 async fn unresolved_basket_entry_stays_visible() {
     let app = boot(Some("tok")).await;
@@ -618,6 +899,9 @@ async fn unresolved_basket_entry_stays_visible() {
     let html = page(&app, &cookie, "/tonies/ct1/albums").await;
     assert!(html.contains("Verschwundene Folge"), "entry stays visible");
     assert!(html.contains("nicht auflösbar"), "entry is flagged");
+    // The seeded entry has `seconds = 0`: an unknown length renders nothing,
+    // never "0 min".
+    assert!(!html.contains("0 min"), "unknown length must stay silent");
 }
 
 #[tokio::test]
@@ -733,4 +1017,36 @@ fn album_item(album_id: &str, title: &str, seconds: i64) -> AlbumItem {
         seconds,
         position: 0,
     }
+}
+
+/// The `<article>` grid tile of the album titled `title`.
+///
+/// A title alone is ambiguous — the cart list shows it too — so the slice is
+/// taken from the album grid only.
+fn grid_tile(html: &str, title: &str) -> String {
+    let start = html
+        .find("class=\"tonies-album-grid\"")
+        .expect("album grid rendered");
+    let end = html[start..].find("</section>").expect("grid closed") + start;
+    for block in html[start..end].split("<article").skip(1) {
+        let block = block.split("</article>").next().unwrap_or_default();
+        if block.contains(title) {
+            return block.to_string();
+        }
+    }
+    panic!("no grid tile for {title}");
+}
+
+/// The `<li data-album>` cart row of `album_id` (the cart is the one list with
+/// `data-cart`; the page renders three lists).
+fn cart_row(html: &str, album_id: &str) -> String {
+    let cart = html.find("data-cart").expect("cart list rendered");
+    let needle = format!("data-album=\"{album_id}\"");
+    let at = html[cart..]
+        .find(&needle)
+        .unwrap_or_else(|| panic!("no cart row for {album_id}"))
+        + cart;
+    let start = html[..at].rfind("<li").expect("cart row start");
+    let end = at + html[at..].find("</li>").expect("cart row end");
+    html[start..end].to_string()
 }

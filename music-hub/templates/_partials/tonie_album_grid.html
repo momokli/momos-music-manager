@@ -12,6 +12,11 @@
     {% if !a.release_date.is_empty() %}
     <p class="tonies-album-date">{{ a.release_date }}</p>
     {% endif %}
+    {# Length comes from the album detail (the artist list carries none); an
+       unknown length renders nothing rather than "0 min". #}
+    {% if !a.duration.is_empty() %}
+    <p class="tonies-album-len">{{ a.duration }}</p>
+    {% endif %}
     {% if a.seen || a.in_basket %}
     <p class="tonies-badges">
         {% if a.seen %}<span class="tonies-badge tonies-badge-seen">gehört</span>{% endif %}

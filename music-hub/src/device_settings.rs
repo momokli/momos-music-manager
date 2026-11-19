@@ -25,7 +25,7 @@
 //! or unknown `device_id` is indistinguishable and yields a `404` (no existence
 //! leak). The JSON/HTML shapes never contain `token_hash` or any token material.
 
-use axum::extract::{Path, Query, RawForm, State};
+use axum::extract::{Path, RawForm, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -364,11 +364,6 @@ async fn validate_body(
 
 // ── HTTP: HTML page + form POST ─────────────────────────────────────────────
 
-#[derive(Deserialize, Default)]
-struct PageQuery {
-    msg: Option<String>,
-}
-
 /// One format option in the `<select>`, with its selection state.
 struct FormatOption {
     value: &'static str,
@@ -412,17 +407,12 @@ fn render<T: Template>(tpl: &T) -> Response {
 }
 
 fn flash_redirect(to: &str, msg: String) -> Response {
-    let sep = if to.contains('?') { '&' } else { '?' };
-    Redirect::to(&format!("{to}{sep}msg={}", urlencoding::encode(&msg))).into_response()
+    crate::flash::redirect(to, &msg, "ok")
 }
 
 /// `GET /kellner` — the Kellner settings page: every device of the caller with
 /// editable format / template / active backpacks.
-async fn page(
-    State(st): State<AppState>,
-    Query(q): Query<PageQuery>,
-    headers: HeaderMap,
-) -> Response {
+async fn page(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "kellner").await else {
         return Redirect::to("/login").into_response();
     };
@@ -476,7 +466,7 @@ async fn page(
 
     render(&KellnerPage {
         nav,
-        flash: q.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         cards,
     })
 }
@@ -508,7 +498,7 @@ fn first<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
 }
 
 /// `POST /kellner/{id}/settings` — the plain HTML form. Validates like the JSON
-/// PUT and redirects back to `/kellner?msg=…` on error (or success).
+/// PUT and redirects back to `/kellner` (with a flash cookie) on error or success.
 async fn form_submit(
     State(st): State<AppState>,
     Path(id): Path<i64>,

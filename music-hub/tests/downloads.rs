@@ -425,5 +425,12 @@ async fn order_all_redirects_with_flash_when_unconfigured() {
         loc.starts_with("/downloads"),
         "should redirect to /downloads"
     );
-    assert!(loc.contains("msg="), "should carry a flash message");
+    let flash = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("hub_flash="))
+        .unwrap_or_default();
+    assert!(flash.starts_with("hub_flash="), "should carry a flash cookie");
 }

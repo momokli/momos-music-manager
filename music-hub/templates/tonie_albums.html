@@ -83,6 +83,11 @@ block content %}
         font-size: 0.68rem;
         opacity: 0.7;
     }
+    .tonies-album-len {
+        margin: 0;
+        font-size: 0.68rem;
+        opacity: 0.7;
+    }
     .tonies-badges {
         margin: 0;
         display: flex;
@@ -167,7 +172,7 @@ the toast header still fires. #}
         </p>
         {% else %}
         <p class="tonies-hint">
-            Verknüpft: Deezer-Artist <strong>#{{ artist_id }}</strong>
+            Verknüpft: Deezer-Artist {% if let Some(name) = artist_name %}<strong>{{ name }}</strong>{% else %}<strong>#{{ artist_id }}</strong>{% endif %}
         </p>
         {% endif %}
         <form method="get" action="/tonies/{{ tonie_id }}/albums" class="tonies-row">
@@ -256,6 +261,9 @@ the toast header still fires. #}
             <li class="tonies-drop" draggable="true" data-album="{{ b.album_id }}">
                 <span class="tonies-drag" aria-hidden="true">&#8942;&#8942;</span>
                 <span>{{ b.title }}</span>
+                {% if !b.duration.is_empty() %}
+                <span class="tonies-hint">{{ b.duration }}</span>
+                {% endif %}
                 {% if b.unresolved %}
                 <span class="tonies-badge tonies-badge-err">nicht auflösbar</span>
                 {% endif %}

@@ -8,6 +8,14 @@ Versioning: per-component tag line `api-v<x.y.z>` (see
 
 ## [Unreleased]
 
+### Added
+
+- **Album length in the artist album list** (#621) — `GET /deezer/artist/{id}/albums`
+  now carries `seconds` per album, filled from the own catalogue
+  (`catalogue_albums.seconds`) in one batched query. `null` while the album is
+  not catalogued, and never baked into the page cache (the hint is re-read per
+  request, so it cannot go stale).
+
 ## [0.7.0] - 2026-11-19
 
 Native Deezer download is the only path — the deemix sidecar is removed

@@ -350,7 +350,6 @@ struct Creds {
 
 #[derive(Deserialize)]
 struct Flash {
-    msg: Option<String>,
     /// Recommendation scope (`mine` | `all`); unknown values fall back to `all`.
     #[serde(default)]
     scope: Option<String>,
@@ -402,11 +401,7 @@ fn filter_clause(filter: &str) -> &'static str {
     }
 }
 
-async fn index(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Query(flash): Query<Flash>,
-) -> Response {
+async fn index(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "dashboard").await else {
         return Redirect::to("/login").into_response();
     };
@@ -433,7 +428,7 @@ async fn index(
 
     render(&DashboardPage {
         nav,
-        flash: flash.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         connected,
         spotify_label,
         playlists_count,
@@ -447,7 +442,6 @@ async fn index(
 async fn playlists_page(
     State(st): State<AppState>,
     headers: HeaderMap,
-    Query(flash): Query<Flash>,
     Query(pf): Query<PlaylistFilterQuery>,
     RawQuery(raw): RawQuery,
 ) -> Response {
@@ -482,7 +476,7 @@ async fn playlists_page(
     let s_last = crate::table::sort_head(rawq, "last", "Letzte Änderung", &sort, &dir);
     render(&PlaylistsPage {
         nav,
-        flash: flash.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         filter: filter.to_string(),
         q,
         owner_options,
@@ -749,8 +743,7 @@ async fn fetch_playlists_handler(
                 "{} Playlists geholt ({} eigene, {} gefolgt)",
                 f.total, f.owned, f.followed
             );
-            Redirect::to(&format!("/me/playlists?msg={}", urlencoding::encode(&msg)))
-                .into_response()
+            crate::flash::redirect("/me/playlists", &msg, "ok")
         }
         Err(e) => error_page(&format!("Playlists holen fehlgeschlagen: {e}")),
     }
@@ -859,10 +852,11 @@ async fn sync_html(
     if headers.get("hx-request").is_some() {
         Html("<span class=\"hub-badge hub-badge-ok\">synchronisiert ✓</span>").into_response()
     } else {
-        Redirect::to(
-            "/me/playlists?msg=Synchronisation+eingericht+%E2%80%94+l%C3%A4uft+im+Hintergrund",
+        crate::flash::redirect(
+            "/me/playlists",
+            "Synchronisation eingericht — läuft im Hintergrund",
+            "ok",
         )
-        .into_response()
     }
 }
 
@@ -1293,7 +1287,7 @@ async fn track_page(
         &st,
         nav,
         id,
-        flash.msg.unwrap_or_default(),
+        crate::flash::from_headers(&headers),
         crate::recommend::RecScope::parse(flash.scope.as_deref()),
         flash.scope.is_some(),
         flash.tag_scope.as_deref(),
@@ -2969,11 +2963,7 @@ fn parse_curate(f: &CurateForm) -> ParsedCurate {
     }
 }
 
-async fn curate_page(
-    State(st): State<AppState>,
-    Query(flash): Query<Flash>,
-    headers: HeaderMap,
-) -> Response {
+async fn curate_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "curate").await else {
         return Redirect::to("/login").into_response();
     };
@@ -3020,7 +3010,7 @@ async fn curate_page(
     let spotify_ready = crate::curate::has_write_scope(&st.pool, nav.id).await;
     render(&CuratePage {
         nav,
-        flash: flash.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         rows,
         modes: mode_opts("manual"),
         tags: tag_opts(&tags, None),
@@ -3103,7 +3093,6 @@ async fn curate_update(
 async fn curate_detail(
     State(st): State<AppState>,
     Path(id): Path<i64>,
-    Query(flash): Query<Flash>,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "curate").await else {
@@ -3171,7 +3160,7 @@ async fn curate_detail(
     let tags = crate::tags::list_user_tags(&st.pool, nav.id).await;
     render(&CurateDetailPage {
         nav,
-        flash: flash.msg.unwrap_or_default(),
+        flash: crate::flash::from_headers(&headers),
         id: cp.id,
         name: cp.name.clone(),
         description: cp.description.clone(),
@@ -3222,7 +3211,7 @@ async fn curate_push(
             format!("Push-Fehler: {e}")
         }
     };
-    Redirect::to(&format!("/curate/{id}?msg={}", urlencoding::encode(&msg))).into_response()
+    crate::flash::redirect(&format!("/curate/{id}"), &msg, "ok")
 }
 
 async fn curate_delete(
@@ -3341,17 +3330,13 @@ async fn track_fetch(
         .ok()
         .flatten();
     let Some(isrc) = isrc.filter(|s| !s.is_empty()) else {
-        return Redirect::to(&format!(
-            "/track/{id}?msg={}",
-            urlencoding::encode("kein ISRC vorhanden")
-        ))
-        .into_response();
+        return crate::flash::redirect(&format!("/track/{id}"), "kein ISRC vorhanden", "ok");
     };
     let msg = match crate::music_api::order(&st.cfg, std::slice::from_ref(&isrc)).await {
         Ok(order) => format!("Bestellt ({order}) — music-api lädt"),
         Err(e) => format!("Fehler: {e}"),
     };
-    Redirect::to(&format!("/track/{id}?msg={}", urlencoding::encode(&msg))).into_response()
+    crate::flash::redirect(&format!("/track/{id}"), &msg, "ok")
 }
 
 async fn login_form(State(st): State<AppState>) -> Response {
@@ -4224,6 +4209,7 @@ async fn tonies_binding_save(
                             tn,
                             &source_kind,
                             Some(sid),
+                            None,
                             &format,
                             &mode,
                         )
@@ -4424,6 +4410,9 @@ struct TonieAlbumsPage {
     tonie_name: String,
     /// Bound Deezer artist id (`""` when none is linked).
     artist_id: String,
+    /// Display name of the bound artist (`None` when unknown, e.g. rows from
+    /// before migration 064); the template then falls back to the id.
+    artist_name: Option<String>,
     /// The three album-mode buttons (pre-styled so the template needs no
     /// conditional inside an HTML tag), in display order.
     modes: Vec<ModeButton>,
@@ -4458,6 +4447,9 @@ struct AlbumTile {
     album_id: String,
     title: String,
     release_date: String,
+    /// Formatted length (`3 min`, `1 h 29`); empty when unknown, so the tile
+    /// renders no length instead of `0 min`.
+    duration: String,
     cover_url: Option<String>,
     /// This user already had the album on a tonie.
     seen: bool,
@@ -4469,6 +4461,9 @@ struct AlbumTile {
 struct BasketRow {
     album_id: String,
     title: String,
+    /// Formatted length from the cart row (empty when unknown): the user
+    /// compares it against the tonie's free minutes.
+    duration: String,
     /// The album is neither in the artist catalogue nor in the album cache.
     unresolved: bool,
 }
@@ -4543,6 +4538,11 @@ async fn tonie_albums_render(
         .and_then(|b| b.source_id)
         .map(|id| id.to_string())
         .unwrap_or_default();
+    let artist_name = binding
+        .as_ref()
+        .and_then(|b| b.source_name.clone())
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty());
 
     let mut notes: Vec<String> = Vec::new();
     if st
@@ -4587,17 +4587,36 @@ async fn tonie_albums_render(
                 catalog_loaded = true;
                 for a in page.albums {
                     catalog.insert(a.album_id.clone());
+                    // #621: the list carries the length from music-api's own
+                    // catalogue — the primary source. A missing `seconds` stays
+                    // empty and is only resolved via the detail fallback below.
+                    let duration = a
+                        .seconds
+                        .map(crate::tonies::format_duration)
+                        .unwrap_or_default();
                     tiles.push(AlbumTile {
                         seen: seen_set.contains(&a.album_id),
                         in_basket: basket_ids.contains(&a.album_id),
                         album_id: a.album_id,
                         title: a.title,
                         release_date: a.release_date.unwrap_or_default(),
+                        duration,
                         cover_url: a.cover_url,
                     });
                 }
             }
             Err(e) => notes.push(format!("Alben nicht ladbar: {e}")),
+        }
+    }
+    // Primary source is the list (`seconds`, above). Only tiles that came back
+    // without a length are resolved via the album detail — a fully catalogued
+    // artist triggers no detail call at all.
+    let durations = album_durations(&st.cfg, &tiles).await;
+    for tile in &mut tiles {
+        if tile.duration.is_empty() {
+            if let Some(seconds) = durations.get(&tile.album_id) {
+                tile.duration = crate::tonies::format_duration(*seconds);
+            }
         }
     }
 
@@ -4616,6 +4635,7 @@ async fn tonie_albums_render(
         basket.push(BasketRow {
             album_id: item.album_id,
             title,
+            duration: crate::tonies::format_duration(item.seconds),
             unresolved,
         });
     }
@@ -4658,6 +4678,7 @@ async fn tonie_albums_render(
         tonie_id: tonie_id.to_string(),
         tonie_name,
         artist_id,
+        artist_name,
         mode_label,
         modes,
         q: q.to_string(),
@@ -4679,6 +4700,57 @@ async fn album_meta_from_api(
         .await
         .ok()
         .map(|a| (a.title, a.seconds.unwrap_or(0)))
+}
+
+/// Album lengths in flight at once. One album costs one music-api call (cached
+/// in its catalogue), so the grid is asked in small batches instead of 50 serial
+/// round trips.
+const ALBUM_DURATION_BATCH: usize = 8;
+
+/// `album_id -> seconds` for the grid tiles still missing a length.
+///
+/// The artist album list now carries `seconds` (from music-api's catalogue) and
+/// is the primary source; this is the **fallback** for tiles the list left
+/// empty. Only those tiles trigger an album-detail call, so a fully catalogued
+/// artist costs zero detail calls. Albums that cannot be resolved are simply
+/// absent from the map — the tile then renders no length, and a page render
+/// never fails because of a lookup.
+async fn album_durations(
+    cfg: &crate::config::Config,
+    tiles: &[AlbumTile],
+) -> std::collections::HashMap<String, i64> {
+    let mut out = std::collections::HashMap::new();
+    for chunk in tiles.chunks(ALBUM_DURATION_BATCH) {
+        let mut set = tokio::task::JoinSet::new();
+        for tile in chunk {
+            // Already known from the list → no detail call.
+            if !tile.duration.is_empty() {
+                continue;
+            }
+            let cfg = cfg.clone();
+            let album_id = tile.album_id.clone();
+            set.spawn(async move {
+                let seconds = crate::music_api::deezer_album(&cfg, &album_id)
+                    .await
+                    .ok()
+                    .and_then(|a| a.seconds)
+                    .unwrap_or(0);
+                (album_id, seconds)
+            });
+        }
+        // One failed lookup (or a task that died) must not swallow the lengths
+        // that did arrive.
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok((album_id, seconds)) if seconds > 0 => {
+                    out.insert(album_id, seconds);
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("Album-Dauer nicht ladbar: {e}"),
+            }
+        }
+    }
+    out
 }
 
 /// The owner's binding for `tonie_id`, or a 404 (never another user's Tonie).
@@ -4713,7 +4785,8 @@ async fn tonie_albums_toast(
 struct TonieAlbumArtistForm {
     #[serde(default)]
     artist_id: String,
-    /// Only used for the toast — the name is not persisted (no column).
+    /// The Deezer artist name, persisted as the binding's `source_name` so the
+    /// UI can show it instead of the bare id.
     #[serde(default)]
     artist_name: Option<String>,
 }
@@ -4755,13 +4828,12 @@ async fn tonie_albums_set_artist(
     };
     let uid = nav.id;
     let raw = form.artist_id.trim().to_string();
-    let label = form
+    let artist_name = form
         .artist_name
         .as_deref()
         .map(str::trim)
-        .filter(|n| !n.is_empty())
-        .unwrap_or(&raw)
-        .to_string();
+        .filter(|n| !n.is_empty());
+    let label = artist_name.unwrap_or(&raw).to_string();
     let Ok(artist_id) = raw.parse::<i64>() else {
         return tonie_albums_toast(&st, nav, &tonie_id, "Ungültige Deezer-Artist-ID.", "err").await;
     };
@@ -4789,6 +4861,7 @@ async fn tonie_albums_set_artist(
         tonie_name.as_deref(),
         crate::tonies::bindings::SOURCE_ALBUMS,
         Some(artist_id),
+        artist_name,
         &format,
         &mode,
     )
@@ -5038,7 +5111,8 @@ async fn tonie_albums_unlisten(
         ("Kein Album gewählt.".to_string(), "err")
     } else {
         match crate::tonies::unlisten_album(&st.pool, uid, &album_id).await {
-            Ok(()) => ("Album wieder auf der Liste".to_string(), "ok"),
+            Ok(0) => ("Album war nicht in der Liste".to_string(), "info"),
+            Ok(_) => ("Album wieder auf der Liste".to_string(), "ok"),
             Err(e) => (format!("Fehler: {e}"), "err"),
         }
     };

@@ -115,6 +115,10 @@ pub struct Binding {
     pub tonie_name: Option<String>,
     pub source_kind: String,
     pub source_id: Option<i64>,
+    /// Display name of the source (e.g. the Deezer artist name). `None` for
+    /// rows from before migration 064 and whenever no name is known; the UI
+    /// then falls back to the id.
+    pub source_name: Option<String>,
     pub format: String,
     pub cap_seconds: i64,
     pub mode: String,
@@ -135,6 +139,7 @@ fn row_to_binding(r: sqlx::sqlite::SqliteRow) -> Binding {
         tonie_name: r.get("tonie_name"),
         source_kind: r.get("source_kind"),
         source_id: r.get("source_id"),
+        source_name: r.get("source_name"),
         format: r.get("format"),
         cap_seconds: r.get("cap_seconds"),
         mode: r.get("mode"),
@@ -146,8 +151,9 @@ fn row_to_binding(r: sqlx::sqlite::SqliteRow) -> Binding {
     }
 }
 
-const SELECT_COLS: &str = "id, tonie_id, tonie_name, source_kind, source_id, format, \
-     cap_seconds, mode, order_by, album_mode, dirty_since, last_sync_at, last_sync_status";
+const SELECT_COLS: &str = "id, tonie_id, tonie_name, source_kind, source_id, source_name, \
+     format, cap_seconds, mode, order_by, album_mode, dirty_since, last_sync_at, \
+     last_sync_status";
 
 /// All bindings owned by `user_id`, ordered by Tonie id.
 pub async fn list_bindings(pool: &SqlitePool, user_id: i64) -> Result<Vec<Binding>> {
@@ -190,19 +196,21 @@ pub async fn upsert_binding(
     tonie_name: Option<&str>,
     source_kind: &str,
     source_id: Option<i64>,
+    source_name: Option<&str>,
     format: &str,
     mode: &str,
 ) -> Result<()> {
     let ts = now_iso();
     sqlx::query(
         "INSERT INTO hub_tonie_bindings
-             (user_id, tonie_id, tonie_name, source_kind, source_id, format, mode,
-              dirty_since, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?8)
+             (user_id, tonie_id, tonie_name, source_kind, source_id, source_name, format,
+              mode, dirty_since, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?9)
          ON CONFLICT(user_id, tonie_id) DO UPDATE SET
              tonie_name  = excluded.tonie_name,
              source_kind = excluded.source_kind,
              source_id   = excluded.source_id,
+             source_name = excluded.source_name,
              format      = excluded.format,
              mode        = excluded.mode,
              dirty_since = excluded.dirty_since,
@@ -213,6 +221,7 @@ pub async fn upsert_binding(
     .bind(tonie_name)
     .bind(source_kind)
     .bind(source_id)
+    .bind(source_name)
     .bind(format)
     .bind(mode)
     .bind(&ts)
@@ -371,14 +380,17 @@ pub async fn list_seen_albums(
 }
 
 /// Drop one album from the listened ledger ("unlistened").
-pub async fn unlisten_album(pool: &SqlitePool, user_id: i64, album_id: &str) -> Result<()> {
-    sqlx::query("DELETE FROM hub_tonie_albums_seen WHERE user_id = ?1 AND album_id = ?2")
+///
+/// Returns the number of dropped rows: `0` means the album was not in the
+/// ledger, so callers must not report success.
+pub async fn unlisten_album(pool: &SqlitePool, user_id: i64, album_id: &str) -> Result<u64> {
+    let res = sqlx::query("DELETE FROM hub_tonie_albums_seen WHERE user_id = ?1 AND album_id = ?2")
         .bind(user_id)
         .bind(album_id)
         .execute(pool)
         .await
         .context("Album konnte nicht zurueckgesetzt werden")?;
-    Ok(())
+    Ok(res.rows_affected())
 }
 
 /// Forget every album this user has listened to ("alle zuruecksetzen").
