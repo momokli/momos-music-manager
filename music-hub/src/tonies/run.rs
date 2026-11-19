@@ -760,6 +760,40 @@ pub async fn execute_binding(
         let isrcs: Vec<String> =
             desired.iter().filter_map(|t| t.isrc.clone()).collect();
         let ready = readiness(cfg, isrcs).await;
+
+        // #624: a playlist-bound Tonie orders its *missing* tracks here,
+        // honouring the Tonie's current fill level (remaining = cap - present),
+        // so the newest fitting tracks land first. Only playlists: album sources
+        // have their own ordering path above, backpack/tag stay untouched. The
+        // extra state GET is read-only; no Spotify request is involved.
+        if binding.source_kind == super::bindings::SOURCE_PLAYLIST
+            && let Ok(t) = client.get_creativetonie(&household, &binding.tonie_id).await
+        {
+            let present = super::Capacity::from_tonie(&t).present;
+            let plan = super::sync::order_plan_for_tonie(&desired, binding.cap_seconds, present, |isrc| {
+                ready.contains(isrc)
+            });
+            if !plan.is_empty() {
+                match crate::music_api::order_with_priority_intent(
+                    cfg,
+                    &plan,
+                    5,
+                    "toys",
+                    Some(&binding.format),
+                )
+                .await
+                {
+                    Ok(_) => tracing::info!(
+                        "tonies: {} Playlist-Tracks geordert (user {uid})",
+                        plan.len()
+                    ),
+                    Err(e) => {
+                        tracing::warn!("tonies playlist order failed for user {uid}: {e:#}")
+                    }
+                }
+            }
+        }
+
         (desired, ready)
     };
 

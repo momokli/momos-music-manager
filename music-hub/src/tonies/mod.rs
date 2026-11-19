@@ -29,7 +29,7 @@ pub use run::{
 pub use sync::{
     DesiredTrack, DiffKind, DiffPlan, FitPlan, SkipReason, SkippedTrack, dedupe_by_isrc,
     desired_for_source, desired_from_backpack, desired_from_playlist, desired_from_tag, greedy_fit,
-    ms_to_seconds, plan_diff,
+    ms_to_seconds, order_plan_for_tonie, plan_diff,
 };
 
 use anyhow::{Context, Result, bail};

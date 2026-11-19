@@ -154,6 +154,32 @@ pub fn greedy_fit(
     plan
 }
 
+/// Plan the ISRCs to *order* for a playlist-bound Tonie, honouring the
+/// Tonie's current fill level (#624).
+///
+/// `remaining = max(cap_seconds - present_seconds, 0)` is the time still free
+/// on the Tonie. The desired tracks are walked in Tonie order through
+/// [`greedy_fit`]; the fit stops at the first overflow (`CapReached`), so no
+/// track is ordered that [`super::run::run_sync`] would never place anyway.
+///
+/// Tracks that are already in the vault (`is_ready`) still consume remaining
+/// time — they are on the Tonie and need no download — but are **not** ordered.
+/// The result is the missing, fitting ISRCs in Tonie order.
+pub fn order_plan_for_tonie(
+    desired: &[DesiredTrack],
+    cap_seconds: i64,
+    present_seconds: i64,
+    is_ready: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let remaining = (cap_seconds - present_seconds).max(0);
+    let (deduped, _) = dedupe_by_isrc(desired.to_vec());
+    let fit = greedy_fit(&deduped, remaining, |_| true);
+    fit.tracks
+        .iter()
+        .filter_map(|t| t.isrc.clone().filter(|i| !is_ready(i)))
+        .collect()
+}
+
 fn chapter_for(track: &DesiredTrack) -> Chapter {
     Chapter {
         title: Some(track.title.clone()),
@@ -506,6 +532,79 @@ mod tests {
         let plan = greedy_fit(&desired, 5400, ready(&["a"]));
         assert_eq!(plan.tracks.len(), 1);
         assert_eq!(plan.skipped[0].reason, SkipReason::NoIsrc);
+    }
+
+    #[test]
+    fn order_plan_keeps_only_missing_fitting_isrcs_in_order() {
+        // 5400 cap, 5300 present → 100 s remaining: only the 60 s track fits.
+        let desired = vec![
+            track(Some("a"), "A", 60),
+            track(Some("b"), "B", 200),
+        ];
+        let plan = order_plan_for_tonie(&desired, 5400, 5300, |_| false);
+        assert_eq!(plan, vec!["a"]);
+    }
+
+    #[test]
+    fn order_plan_ready_track_spends_time_but_is_not_ordered() {
+        // A (60 s, ready) consumes 60 s, leaving 40 s; B (30 s, missing) fits.
+        let desired = vec![
+            track(Some("a"), "A", 60),
+            track(Some("b"), "B", 30),
+            track(Some("c"), "C", 30),
+        ];
+        let plan = order_plan_for_tonie(&desired, 5400, 5300, ready(&["a"]));
+        // remaining 100; a(60 ready) + b(30) = 90; c(30) would be 120 > 100 → break.
+        assert_eq!(plan, vec!["b"]);
+    }
+
+    #[test]
+    fn order_plan_overflow_stops() {
+        let desired = vec![
+            track(Some("a"), "A", 60),
+            track(Some("b"), "B", 200),
+            track(Some("c"), "C", 10),
+        ];
+        let plan = order_plan_for_tonie(&desired, 5400, 5300, |_| false);
+        // a fits (60), b overflows (260 > 100) → break; c is never considered.
+        assert_eq!(plan, vec!["a"]);
+    }
+
+    #[test]
+    fn order_plan_dedupe_first_wins() {
+        let desired = vec![
+            track(Some("dup"), "First", 10),
+            track(Some("dup"), "Second", 10),
+        ];
+        let plan = order_plan_for_tonie(&desired, 5400, 0, |_| false);
+        assert_eq!(plan, vec!["dup"]);
+    }
+
+    #[test]
+    fn order_plan_exact_fit_is_ordered() {
+        let desired = vec![track(Some("a"), "A", 100)];
+        let plan = order_plan_for_tonie(&desired, 5400, 5300, |_| false);
+        assert_eq!(plan, vec!["a"]);
+    }
+
+    #[test]
+    fn order_plan_no_isrc_is_not_ordered() {
+        let desired = vec![track(None, "NoIsrc", 10), track(Some("a"), "A", 10)];
+        let plan = order_plan_for_tonie(&desired, 5400, 0, |_| false);
+        assert_eq!(plan, vec!["a"]);
+    }
+
+    #[test]
+    fn order_plan_empty_source_is_empty() {
+        let plan = order_plan_for_tonie(&[], 5400, 0, |_| false);
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn order_plan_present_at_cap_is_empty() {
+        let desired = vec![track(Some("a"), "A", 10)];
+        let plan = order_plan_for_tonie(&desired, 5400, 5400, |_| false);
+        assert!(plan.is_empty());
     }
 
     #[test]
