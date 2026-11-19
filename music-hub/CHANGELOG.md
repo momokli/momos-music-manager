@@ -57,6 +57,15 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Changed
 
+- **Flash-Meldungen für Full-Page-POSTs** (#622): Aktionen, die eine ganze Seite per
+  PRG-Redirect neu laden (Tonie-Sync/-Upload/-Reset, Backpack-, Tag-, Einstellungen- und
+  Kellner-Formulare, `/admin`, `/curate`, `/track`), verloren ihre Meldung — `HX-Trigger`
+  erreicht nur htmx. Die Meldung reist jetzt in einem kurzlebigen `hub_flash`-Cookie
+  (`HttpOnly`, `SameSite=Lax`, `Max-Age=30`, ASCII-codiert): der `POST` setzt es im `303`,
+  eine neue serverseitige Middleware injiziert es beim nächsten Rendern als
+  `x-hub-flash-*`-Header und löscht es einmalig. Ein doppeltes Reload zeigt den Toast damit
+  genau einmal; der `?msg=`-Query-Behelf entfällt. htmx-Aktionen behalten ihren
+  `HX-Trigger`-Toast.
 - **Track-page download UX** (#460): the bare `FLAC laden` / `MP3 laden` links are gone.
   The `Download`-Bucket offers **one button per format the vault says is ready**
   („FLAC", „MP3 320", „MP3 128") and a **passive hint** while nothing is ready — no dead
