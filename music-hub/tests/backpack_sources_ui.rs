@@ -49,6 +49,65 @@ async fn insert_backpack(pool: &sqlx::SqlitePool, user_id: i64, name: &str) -> i
     .expect("insert backpack")
 }
 
+/// Insert a `hub_playlists` row owned by `user_id` plus its memberships, and
+/// return the new id. This is the id space the resolver/label read and the
+/// dropdown must offer — unlike `app.seed.pl_alice` (owned by `alice`).
+async fn insert_playlist(
+    pool: &sqlx::SqlitePool,
+    user_id: i64,
+    name: &str,
+    tracks: &[i64],
+) -> i64 {
+    let pid = music_hub::spotify::random_token();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_playlists
+            (user_id, service, playlist_id, name, is_liked, items_available,
+             is_owned, owner_name, collaborative, fetched_at)
+         VALUES (?1, 'spotify', ?2, ?3, 0, 1, 1, 'Tester', 0, '2026-01-01T00:00:00+00:00')
+         RETURNING id",
+    )
+    .bind(user_id)
+    .bind(&pid)
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .expect("insert playlist");
+    for (pos, t) in tracks.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position, added_at)
+             VALUES (?1, ?2, ?3, '2026-01-01T00:00:00+00:00')",
+        )
+        .bind(id)
+        .bind(t)
+        .bind(pos as i64)
+        .execute(pool)
+        .await
+        .expect("insert playlist membership");
+    }
+    id
+}
+
+/// The `value="…"` attributes of the `<option>`s inside the rendered
+/// `<select name="source_playlist_id">` of the `/backpacks` HTML (empty
+/// placeholder included).
+fn playlist_option_values(html: &str) -> Vec<String> {
+    let start = html
+        .find("name=\"source_playlist_id\"")
+        .expect("playlist select rendered");
+    let rest = &html[start..];
+    let end = rest.find("</select>").expect("select close tag");
+    let block = &rest[..end];
+    let mut values = Vec::new();
+    let mut idx = 0;
+    while let Some(p) = block[idx..].find("value=\"") {
+        let s = idx + p + "value=\"".len();
+        let e = block[s..].find('"').expect("closing quote") + s;
+        values.push(block[s..e].to_string());
+        idx = e;
+    }
+    values
+}
+
 async fn item_count(pool: &sqlx::SqlitePool, backpack_id: i64) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM hub_backpack_items WHERE backpack_id = ?1")
         .bind(backpack_id)
@@ -100,6 +159,35 @@ async fn add_playlist_adds_and_resolves() {
     let app = common::spawn().await;
     let (owner, cookie) = app.user_with_password("ui-pl", "pw").await;
     let bp = insert_backpack(&app.pool, owner, "Playlist-Backpack").await;
+    // A playlist the caller owns, in the picker's id space (`hub_playlists`).
+    let pl = insert_playlist(
+        &app.pool,
+        owner,
+        "Testliste",
+        &[app.seed.t_all, app.seed.t_two],
+    )
+    .await;
+
+    // Use the value the *rendered* dropdown offers, not an internal id: this is
+    // exactly what a real browser submits.
+    let html = app
+        .client()
+        .get(app.url("/backpacks"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let options = playlist_option_values(&html);
+    let value = options
+        .iter()
+        .find(|v| **v == pl.to_string())
+        .unwrap_or_else(|| {
+            panic!("dropdown must offer the caller's playlist {pl}, got {options:?}")
+        })
+        .clone();
 
     let resp = post_form(
         &app,
@@ -107,7 +195,7 @@ async fn add_playlist_adds_and_resolves() {
         &cookie,
         &[
             ("source_kind", "playlist".into()),
-            ("source_playlist_id", app.seed.pl_alice.to_string()),
+            ("source_playlist_id", value),
         ],
     )
     .await;
@@ -116,9 +204,67 @@ async fn add_playlist_adds_and_resolves() {
     let sources = music_hub::backpacks::list_sources(&app.pool, bp).await.unwrap();
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].source_kind, "playlist");
-    // pl_alice resolves to exactly the two seeded membership tracks.
+    assert_eq!(sources[0].source_playlist_id, Some(pl));
+
+    // The label resolves against `hub_playlists` with the same id.
+    let views = music_hub::backpacks::list_source_views(&app.pool, bp).await.unwrap();
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].label, "Testliste");
+
+    // And the source resolves to exactly the inserted membership tracks.
     let count = music_hub::backpacks::resolve_count(&app.pool, bp).await.unwrap();
     assert_eq!(count, 2);
+}
+
+/// Regression (#651 review blocker): the picker must offer only the caller's
+/// `hub_playlists` — the same id space the resolver/label use. A
+/// `hub_curated_playlists` row (the old, wrong source) and a foreign user's
+/// playlist must never appear as an option.
+#[tokio::test]
+async fn playlist_picker_offers_only_own_hub_playlists() {
+    let app = common::spawn().await;
+    let (owner, cookie) = app.user_with_password("ui-picker", "pw").await;
+    let _bp = insert_backpack(&app.pool, owner, "Picker-Backpack").await;
+
+    let mine = insert_playlist(&app.pool, owner, "Meine Liste", &[app.seed.t_all]).await;
+    // A curated playlist for the same user lives in a different id space and
+    // must NOT be offered.
+    let curated: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_curated_playlists
+            (user_id, name, description, is_public, fill_mode, fill_limit, created_at, updated_at)
+         VALUES (?1, 'Curated Liste', '', 0, 'manual', 50, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+         RETURNING id",
+    )
+    .bind(owner)
+    .fetch_one(&app.pool)
+    .await
+    .expect("insert curated playlist");
+    // Another user's playlist must not leak either.
+    let foreign = insert_playlist(&app.pool, app.seed.alice, "Fremde Liste", &[app.seed.t_all]).await;
+
+    let html = app
+        .client()
+        .get(app.url("/backpacks"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let values = playlist_option_values(&html);
+    assert!(values.contains(&mine.to_string()), "own playlist offered: {values:?}");
+    assert!(
+        !values.contains(&curated.to_string()),
+        "curated playlist must not appear: {values:?}"
+    );
+    assert!(
+        !values.contains(&foreign.to_string()),
+        "foreign playlist must not appear: {values:?}"
+    );
+    // Only the caller's `hub_playlists` ids appear (placeholder + mine).
+    let nonempty: Vec<&String> = values.iter().filter(|v| !v.is_empty()).collect();
+    assert_eq!(nonempty, vec![&mine.to_string()]);
 }
 
 #[tokio::test]
@@ -355,13 +501,15 @@ mod real_form_serialization {
         let app = common::spawn().await;
         let (owner, cookie) = app.user_with_password("ui-real-pl", "pw").await;
         let bp = insert_backpack(&app.pool, owner, "Real-Pl").await;
+        let pl = insert_playlist(&app.pool, owner, "Real Liste", &[app.seed.t_all]).await;
 
-        let body = real_body("playlist", "", &app.seed.pl_alice.to_string(), "", "");
+        let body = real_body("playlist", "", &pl.to_string(), "", "");
         let resp = post_form(&app, &format!("/backpacks/{bp}/sources"), &cookie, &body).await;
         assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
         let sources = music_hub::backpacks::list_sources(&app.pool, bp).await.unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].source_kind, "playlist");
+        assert_eq!(sources[0].source_playlist_id, Some(pl));
     }
 
     #[tokio::test]

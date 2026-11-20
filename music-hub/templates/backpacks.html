@@ -125,7 +125,7 @@
             <select name="source_playlist_id" aria-label="Playlist">
                 <option value="">— Playlist —</option>
                 {% for p in playlists %}
-                <option value="{{ p.id }}">{{ p.name }}</option>
+                <option value="{{ p.0 }}">{{ p.1 }}</option>
                 {% endfor %}
             </select>
             <select name="source_lens" aria-label="Linse">

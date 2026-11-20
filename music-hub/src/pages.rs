@@ -4964,9 +4964,10 @@ struct BackpacksPage {
     flash: String,
     cards: Vec<BackpackCard>,
     /// Pickers for the per-card add form (#651): the caller's tags as
-    /// `(id, name)`, the caller's curated playlists, and the static lens list.
+    /// `(id, name)`, the caller's `hub_playlists` as `(id, name)` (the same id
+    /// space the resolver/label use), and the static lens list.
     tags: Vec<(i64, String)>,
-    playlists: Vec<crate::curate::CuratedPlaylist>,
+    playlists: Vec<(i64, String)>,
     lenses: &'static [(&'static str, &'static str)],
 }
 
@@ -5017,7 +5018,7 @@ async fn backpacks_page(State(st): State<AppState>, headers: HeaderMap) -> Respo
     }
 
     let tags = crate::tags::list_user_tags(&st.pool, nav.id).await;
-    let playlists = crate::curate::list_for_user(&st.pool, nav.id)
+    let playlists = crate::backpacks::playlist_options(&st.pool, nav.id)
         .await
         .unwrap_or_default();
 
@@ -5218,6 +5219,15 @@ async fn backpack_source_add(
         Err(msg) => return flash_redirect("/backpacks", format!("Fehler: {msg}")),
     };
 
+    // Owner scoping of the target (#651): a tag/playlist source must belong to
+    // the caller, mirroring `tonies::sync::source_owned_by`. Lens/track have no
+    // per-user owner and are always accepted.
+    match crate::backpacks::source_owned_by(&st.pool, nav.id, &src).await {
+        Ok(true) => {}
+        Ok(false) => return flash_redirect("/backpacks", "Quelle gehört dir nicht".to_string()),
+        Err(e) => return flash_redirect("/backpacks", format!("Fehler: {e}")),
+    }
+
     match crate::backpacks::source_exists(&st.pool, id, &src).await {
         Ok(true) => return flash_redirect("/backpacks", "Quelle ist bereits enthalten".to_string()),
         Ok(false) => {}
@@ -5225,7 +5235,7 @@ async fn backpack_source_add(
     }
 
     match crate::backpacks::add_source(&st.pool, id, src).await {
-        Ok(_) => Redirect::to("/backpacks").into_response(),
+        Ok(_) => flash_redirect("/backpacks", "Quelle hinzugefügt".to_string()),
         Err(e) => flash_redirect("/backpacks", format!("Fehler: {e}")),
     }
 }
@@ -5256,7 +5266,7 @@ async fn backpack_source_delete(
     }
 
     match crate::backpacks::remove_source(&st.pool, item_id).await {
-        Ok(_) => Redirect::to("/backpacks").into_response(),
+        Ok(_) => flash_redirect("/backpacks", "Quelle entfernt".to_string()),
         Err(e) => flash_redirect("/backpacks", format!("Fehler: {e}")),
     }
 }
@@ -5280,7 +5290,7 @@ async fn backpack_sources_clear(
     };
 
     match crate::backpacks::clear_sources(&st.pool, id).await {
-        Ok(_) => Redirect::to("/backpacks").into_response(),
+        Ok(_) => flash_redirect("/backpacks", "Alle Quellen entfernt".to_string()),
         Err(e) => flash_redirect("/backpacks", format!("Fehler: {e}")),
     }
 }

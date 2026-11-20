@@ -216,6 +216,65 @@ pub async fn source_exists(pool: &SqlitePool, backpack_id: i64, src: &SourceRef)
     Ok(found.is_some())
 }
 
+/// The caller's playlists as `(id, display name)` picker options (#651).
+///
+/// Reads `hub_playlists` — the **same** id space the resolver
+/// ([`tracks_for_playlist`], reading `hub_playlist_tracks.playlist_id`) and the
+/// label ([`list_source_views`], reading `hub_playlists.name`) use, and the table
+/// `hub_backpack_items.source_playlist_id` references as a foreign key
+/// (migration 044). Owner-scoped (`WHERE user_id = ?1`), sorted by name
+/// case-insensitively then id. The display name is
+/// `COALESCE(NULLIF(name, ''), '#' || id)`, so an empty/NULL name still yields a
+/// usable option. An unknown user yields `Ok(vec![])`.
+pub async fn playlist_options(pool: &SqlitePool, user_id: i64) -> Result<Vec<(i64, String)>> {
+    Ok(sqlx::query_as::<_, (i64, String)>(
+        "SELECT id,
+                COALESCE(NULLIF(name, ''), '#' || id) AS name
+           FROM hub_playlists
+          WHERE user_id = ?1
+          ORDER BY name COLLATE NOCASE, id",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Whether the source target of `src` belongs to `user_id` (#651).
+///
+/// Mirrors `tonies::sync::source_owned_by`: a `tag` must be a `hub_tags` row
+/// with `owner_user_id = ?`, a `playlist` a `hub_playlists` row with
+/// `user_id = ?`. `lens` and `track` have no per-user owner here and are always
+/// considered owned (no check). A missing/foreign row is simply not owned.
+pub async fn source_owned_by(
+    pool: &SqlitePool,
+    user_id: i64,
+    src: &SourceRef,
+) -> Result<bool> {
+    let found: Option<i64> = match src {
+        SourceRef::Tag(id) => {
+            sqlx::query_scalar(
+                "SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2 LIMIT 1",
+            )
+            .bind(id)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?
+        }
+        SourceRef::Playlist(id) => {
+            sqlx::query_scalar(
+                "SELECT 1 FROM hub_playlists WHERE id = ?1 AND user_id = ?2 LIMIT 1",
+            )
+            .bind(id)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?
+        }
+        // No per-user owner on lens keys or literal hub tracks.
+        SourceRef::Lens(_) | SourceRef::Track(_) => return Ok(true),
+    };
+    Ok(found.is_some())
+}
+
 /// Whether `item_id` is a source row of `backpack_id` (delete ownership check,
 /// #651). A row of a foreign or a different backpack is indistinguishable from
 /// a missing one, so the handler answers `404` and a delete can never reach

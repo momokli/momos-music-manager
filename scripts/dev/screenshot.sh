@@ -142,11 +142,6 @@ SELECT (SELECT id FROM hub_backpacks WHERE user_id = $UID_ AND name = 'Demo-Quel
        NULL, NULL, NULL, 0, strftime('%Y-%m-%dT%H:%M:%SZ','now')
 UNION ALL
 SELECT (SELECT id FROM hub_backpacks WHERE user_id = $UID_ AND name = 'Demo-Quellen'),
-       'playlist', NULL,
-       (SELECT id FROM hub_playlists WHERE user_id = $UID_ AND playlist_id = 'demo-playlist-651'),
-       NULL, NULL, 1, strftime('%Y-%m-%dT%H:%M:%SZ','now')
-UNION ALL
-SELECT (SELECT id FROM hub_backpacks WHERE user_id = $UID_ AND name = 'Demo-Quellen'),
        'lens', NULL, NULL, 'newest', NULL, 2, strftime('%Y-%m-%dT%H:%M:%SZ','now')
 UNION ALL
 SELECT (SELECT id FROM hub_backpacks WHERE user_id = $UID_ AND name = 'Demo-Quellen'),
@@ -154,6 +149,16 @@ SELECT (SELECT id FROM hub_backpacks WHERE user_id = $UID_ AND name = 'Demo-Quel
        (SELECT id FROM hub_tracks WHERE service = 'spotify' AND service_track_id = 'demo-track-651'),
        3, strftime('%Y-%m-%dT%H:%M:%SZ','now');
 SQL
+
+# Add the playlist source through the real form route (not a raw INSERT), so the
+# screenshot proves the dropdown's id space matches the resolver (#651).
+BP_ID="$(sqlite3 "$DB" "SELECT id FROM hub_backpacks WHERE user_id = $UID_ AND name = 'Demo-Quellen';")"
+PL_ID="$(sqlite3 "$DB" "SELECT id FROM hub_playlists WHERE user_id = $UID_ AND playlist_id = 'demo-playlist-651';")"
+[ -n "$BP_ID" ] && [ -n "$PL_ID" ] || die "demo backpack/playlist ids missing"
+curl -fsS -o /dev/null -b "$TMP/cookies.txt" \
+  -d "source_kind=playlist" -d "source_playlist_id=$PL_ID" \
+  "http://127.0.0.1:$HUB_PORT/backpacks/$BP_ID/sources" \
+  || die "playlist source POST failed"
 
 # ── 6. screenshots ─────────────────────────────────────────────────────────
 say "taking screenshots into $OUT_DIR"
