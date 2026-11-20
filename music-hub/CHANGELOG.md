@@ -10,29 +10,6 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
-- feat: **Lens-Limit (`max_tracks`) für Backpack-Quellen** (#654) — jede
-  Backpack-Quelle kann jetzt ein **Track-Limit** tragen; der Resolver wendet es
-  **pro Quelle nach der quellen-eigenen Ordnung** an (eine `newest`-Linse mit
-  `max_tracks=100` behält genau die 100 neuesten), **kein** globaler Schnitt.
-  `NULL`/`< 1` bleibt unbegrenzt. Das `/backpacks`-Add-Formular bekommt ein
-  Zahlenfeld `max_tracks`, das per Inline-JS nur bei `source_kind=lens` sichtbar
-  ist. **Migration 065, additiv** (`ALTER TABLE … ADD COLUMN max_tracks`).
-- feat: **Comment-Template verdrahten** (#652) — `ALLOWED_PLACEHOLDERS`
-  (`{tags}/{bpm}/{key}/{energy}`) werden beim Speichern validiert (unbekannt →
-  `400` mit Whitelist), leerer Wert löst auf `DEFAULT_TEMPLATE` auf, und
-  `GET /api/hub/backpacks/{id}/export` liefert `comment_template` pro Gerät (ohne
-  Settings → Default). **No migration.**
-- feat: **Backpack-Quellen bedienbar** (#651) — `/backpacks` offers a per-backpack
-  add form for the four source kinds (**tag**, **playlist**, **lens**, **track**),
-  a per-row remove button, „Alle leeren", and a live count of sources plus
-  resolved tracks. The playlist picker reads the caller's **`hub_playlists`** — the
-  same id space the resolver (`tracks_for_playlist` → `hub_playlist_tracks`) and the
-  source label read, and the table `hub_backpack_items.source_playlist_id`
-  references — so a selected option resolves to the intended playlist. Sources are
-  owner-scoped (a foreign backpack is `404`; a tag/playlist target must belong to
-  the caller) and duplicate adds are idempotent. Add/remove/clear flash a
-  confirmation. Routen `POST /backpacks/{id}/sources`, …/sources/{item}/delete,
-  …/clear. **No migration.**
 - feat: **Tag hygiene — rename, merge similar tags, suggestions** (#456) — a tag
   detail page (`/tag/{id}`) now surfaces owner-only **suggestions** for similar
   own tags (`tags::similar_tags`; ranked by normalised-equal > small edit
@@ -94,6 +71,39 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   `hub_track_audio`-Read-Model, der hinterherhinkt (gedeckter Backfill, `ORDER BY id`, 7-Tage-TTL
   für „no data"), und zeigte deshalb „—", während die Track-Page den Vault-Wert hatte. Beide
   lesen jetzt denselben `resolved`-Block über `music_api::resolved_audio`.
+
+## [0.33.0] — 2026-11-20
+
+**backpack-sync-1.0.0** — Backpacks werden im Hub bedienbar: Quellen (Tag,
+Playlist, Lens, einzelner Track) zusammenklicken, ein Lens-Limit setzen und den
+Comment aus einem geräteweiten Template rendern lassen; der kellner (#653) liest
+das Template und taggt vorhandene Dateien nach.
+
+### Added
+
+- feat: **Lens-Limit (`max_tracks`) für Backpack-Quellen** (#654) — jede
+  Backpack-Quelle kann jetzt ein **Track-Limit** tragen; der Resolver wendet es
+  **pro Quelle nach der quellen-eigenen Ordnung** an (eine `newest`-Linse mit
+  `max_tracks=100` behält genau die 100 neuesten), **kein** globaler Schnitt.
+  `NULL`/`< 1` bleibt unbegrenzt. Das `/backpacks`-Add-Formular bekommt ein
+  Zahlenfeld `max_tracks`, das per Inline-JS nur bei `source_kind=lens` sichtbar
+  ist. **Migration 065, additiv** (`ALTER TABLE … ADD COLUMN max_tracks`).
+- feat: **Comment-Template verdrahten** (#652) — `ALLOWED_PLACEHOLDERS`
+  (`{tags}/{bpm}/{key}/{energy}`) werden beim Speichern validiert (unbekannt →
+  `400` mit Whitelist), leerer Wert löst auf `DEFAULT_TEMPLATE` auf, und
+  `GET /api/hub/backpacks/{id}/export` liefert `comment_template` pro Gerät (ohne
+  Settings → Default). **No migration.**
+- feat: **Backpack-Quellen bedienbar** (#651) — `/backpacks` offers a per-backpack
+  add form for the four source kinds (**tag**, **playlist**, **lens**, **track**),
+  a per-row remove button, „Alle leeren", and a live count of sources plus
+  resolved tracks. The playlist picker reads the caller's **`hub_playlists`** — the
+  same id space the resolver (`tracks_for_playlist` → `hub_playlist_tracks`) and the
+  source label read, and the table `hub_backpack_items.source_playlist_id`
+  references — so a selected option resolves to the intended playlist. Sources are
+  owner-scoped (a foreign backpack is `404`; a tag/playlist target must belong to
+  the caller) and duplicate adds are idempotent. Add/remove/clear flash a
+  confirmation. Routen `POST /backpacks/{id}/sources`, …/sources/{item}/delete,
+  …/clear. **No migration.**
 
 ## [0.32.0] — 2026-11-19
 
