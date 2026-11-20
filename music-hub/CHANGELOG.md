@@ -10,6 +10,11 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Comment-Template verdrahten** (#652) — `ALLOWED_PLACEHOLDERS`
+  (`{tags}/{bpm}/{key}/{energy}`) werden beim Speichern validiert (unbekannt →
+  `400` mit Whitelist), leerer Wert löst auf `DEFAULT_TEMPLATE` auf, und
+  `GET /api/hub/backpacks/{id}/export` liefert `comment_template` pro Gerät (ohne
+  Settings → Default). **No migration.**
 - feat: **Backpack-Quellen bedienbar** (#651) — `/backpacks` offers a per-backpack
   add form for the four source kinds (**tag**, **playlist**, **lens**, **track**),
   a per-row remove button, „Alle leeren", and a live count of sources plus
