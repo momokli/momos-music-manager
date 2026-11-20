@@ -2194,3 +2194,62 @@ einen gemeinsamen Fehlerradius fuer zwei Produkte.
   `music-api`; `tonies-hub` haelt nur Korb/Ledger/Bindings.
 - **Rueckwaerts** ist der Weg offen: solange T8 nicht gelaufen ist, kann der
   Hub die Tonies-Flaeche weiter bedienen.
+
+## ADR-084: Backpacks bedienbar + Comment-Template mit Platzhaltern (kellner-Sync)
+
+**Date**: 2026-11-20
+**Status**: Accepted (Betreiber-Entscheidung; Plan `plans/proposed/backpack-sources-comment.md`)
+**Relates**: ADR-081 (kellner: Authority-Split, Pairing, Tagging, Transport, Form),
+ADR-075 (Spelunke Tag-Layer), #327/#329/#330/#331 (Backpacks), #367 (kellner backpack)
+
+**Context**: Der Sync „Hub-Backpack → Mac" ist gebaut, aber nicht bedienbar und beim
+Tagging inkonsistent. Messung 2026-11-20: `hub_backpack_items` kann seit Migration 044
+vier Quellenarten (`tag`, `playlist`, `lens`, `track`), und `backpacks.rs` hat
+`add_source`/`remove_source`/`clear_sources` — **ohne einen einzigen Aufrufer**, also
+ohne Route und Formular. Weiter: `hub_device_settings.comment_template` wird gespeichert
+und validiert, aber weder im Export mitgeliefert noch von kellner gelesen; kellner
+rendert den Comment aus festem Code (`render_comment`). Re-Tagging beschraenkt sich auf
+frisch geladene Dateien. Im Produktions-Hub haben **166 von 609** Tags Leerzeichen, die
+laengsten sind abgeleitete Playlist-Namen — ein naives `{tags}` im Comment-Feld ist damit
+keine Formalie, sondern ein Defekt.
+
+**Decision**:
+
+1. **Backpack-Quellen werden bedienbar.** Routen + UI fuer alle vier Arten; die
+   vorhandenen Store-Funktionen bekommen ihre Aufrufer. Eigentumspruefung an jedem
+   Endpoint (fremdes Backpack = 404, nie 403-Detail).
+2. **Lens bekommt ein Limit.** `max_tracks` pro Item (`NULL` = unbegrenzt), damit
+   „neueste 100" sagbar ist. Die Lens-Liste bleibt code-definiert (`curate::LENSES`).
+3. **Ein Zielordner, vereinigt per ISRC.** Alle aktiven Backpacks bilden die Union
+   `desired`; geschrieben wird flach als `<isrc>.<ext>`. Was in keinem aktiven Backpack
+   mehr steckt, wandert nach `<root>/_trash` — Dateien werden **nie** geloescht; nicht
+   von kellner verwaltete Dateien bleiben unberuehrt.
+4. **Comment aus einem Template mit Platzhaltern.** Whitelist `{tags}`, `{bpm}`,
+   `{key}`, `{energy}`; Default `{tags} {bpm} {key} {energy}`. Gerendert wird pro
+   Geraet aus `hub_device_settings.comment_template`, das dafuer im Device-Export
+   mitgeliefert wird.
+5. **Tokens ohne Leerzeichen.** Werte sind ein Token (`BPM-128`, `KEY-8A`,
+   `ENERGY-7`); Tag-Namen werden geslugged (`[^A-Za-z0-9_-]` → `-`, Folgen
+   zusammengefasst, Raender getrimmt), weil das Leerzeichen das Trennsymbol zwischen
+   Tags ist. Token-Deckel 48 Zeichen, Comment-Deckel 512 Zeichen mit `…`-Marker.
+   Leere Platzhalter fallen weg, danach wird Whitespace normalisiert.
+6. **Unbekannter Platzhalter = Fehler beim Speichern** im Hub (400 mit Whitelist);
+   kellner faellt bei unbekanntem Platzhalter auf den Default zurueck und warnt.
+7. **Tagging folgt dem Soll, nicht dem Download.** kellner taggt alle `desired`-ISRCs;
+   eine schon vorhandene Datei wird nur geschrieben, wenn das gerenderte Comment
+   abweicht (idempotent, mtime bleibt sonst unberuehrt).
+
+**Consequences**:
+
+- **Flach bleibt flach.** Kein `Artist/Album/NN`-Layout: Ordnung entsteht ueber Tags
+  und Traktor, nicht ueber Verzeichnisse (Entscheidung 2026-11-20).
+- **Kein neuer Export-Endpoint.** Backpacks *sind* der Transport; fehlte die Definition,
+  nicht die Zustellung.
+- **Datenhygiene wird sichtbar.** Mit `{tags}` im Comment werden lange, abgeleitete
+  Playlist-Namen als Tags stoerend — das ist erwuenscht: es zwingt zur kuratierten
+  Tag-Pflege statt zu stillschweigend kaputten Comment-Feldern.
+- **Bestehende Dateien werden beim ersten Lauf nachgezogen** (neues Template), danach
+  nur noch bei echter Aenderung.
+- **Rueckwaerts:** ohne gesetztes Template gilt der Default, der den heutigen Inhalt in
+  neuer Form reproduziert; ein leeres Template schaltet das Comment-Schreiben nicht ab
+  (das bleibt `--no-tags`).

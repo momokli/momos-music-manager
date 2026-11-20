@@ -1,6 +1,6 @@
 # Active Plans
 
-**57 done** · **2 in progress** · **30 proposed**
+**57 done** · **2 in progress** · **31 proposed**
 
 ## Proposed
 
@@ -8,6 +8,7 @@
 - [apple-music-source](proposed/apple-music-source.md) — `feat/apple-music-source` (Apple Music als Playlist-/Metadaten-Quelle, **kein** Acquire: öffentliche Playlist-URL + MusicKit-Library → ISRCs → bestehender Order-Flow; Migration 056 rebuildet `hub_service_accounts`; MUT hat keinen Refresh → Reconnect-UX; Faktenblatt in `music-hub/docs/apple-music.md`)
 - [native-deezer-download](proposed/native-deezer-download.md) — **in progress** (M1 #509, M2 #510 gemergt; Deezer-Audio **in** music-api laden statt deemix-Sidecar: Rusteer MIT vendoren, 128/320/FLAC live getestet; **M3 = deemix ersatzlos entfernen** — kein Sidecar, kein Fallback, kein Node/Docker)
 - [tonies](proposed/tonies.md) — `feat/hub-tonies` (Spotify-Playlist/Backpack → Kreativ-Tonie: greedy Prefix bis 90 min, mp3-128, Diff ohne Re-Upload; Autosync hängt an der bestehenden `snapshot_id`-Erkennung im Worker → 0 zusätzliche Spotify-Requests)
+- [backpack-sources-comment](proposed/backpack-sources-comment.md) — **approved, in Arbeit** (Backpack-Quellen in der Hub-UI bedienbar [tag/playlist/lens/track], Lens-Limit, Comment-Template mit Platzhaltern `{tags} {bpm} {key} {energy}` und space-freien Tokens `BPM-128`; kellner taggt auch vorhandene Dateien. Ein Zielordner, Union per ISRC, Prune nach `_trash`. ADR-084)
 - [tonies-hub](proposed/tonies-hub.md) — **approved, in Arbeit** (Tonies als **eigener Dienst**: eigene DB `tonies.db`, eigene Konten, eigene deploy-Kette, Alben-only aus `music-api`; geteilt wird nur eine `music-api-client`-Lib. Slices T1–T8, T8 = Tonies-Flaeche aus `music-hub` entfernen, erst nach stabilem Live-Lauf. ADR-083)
 - [tonie-album-queue](proposed/tonie-album-queue.md) — `feat/tonie-album-queue` (Tonie aus **Deezer-Alben** fuellen statt aus Spotify-Playlists: ISRC ist editionsgebunden, Folge 456-459 fehlen per ISRC komplett; Artist-Abo neueste/aufwaerts, Warenkorb mit Covern, listened-Ledger, ganze Alben nie angeschnitten)
 
