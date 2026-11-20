@@ -52,12 +52,7 @@ async fn insert_backpack(pool: &sqlx::SqlitePool, user_id: i64, name: &str) -> i
 /// Insert a `hub_playlists` row owned by `user_id` plus its memberships, and
 /// return the new id. This is the id space the resolver/label read and the
 /// dropdown must offer — unlike `app.seed.pl_alice` (owned by `alice`).
-async fn insert_playlist(
-    pool: &sqlx::SqlitePool,
-    user_id: i64,
-    name: &str,
-    tracks: &[i64],
-) -> i64 {
+async fn insert_playlist(pool: &sqlx::SqlitePool, user_id: i64, name: &str, tracks: &[i64]) -> i64 {
     let pid = music_hub::spotify::random_token();
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO hub_playlists
@@ -142,15 +137,22 @@ async fn add_tag_adds_and_resolves() {
         &app,
         &format!("/backpacks/{bp}/sources"),
         &cookie,
-        &[("source_kind", "tag".into()), ("source_tag_id", tag.to_string())],
+        &[
+            ("source_kind", "tag".into()),
+            ("source_tag_id", tag.to_string()),
+        ],
     )
     .await;
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
 
-    let sources = music_hub::backpacks::list_sources(&app.pool, bp).await.unwrap();
+    let sources = music_hub::backpacks::list_sources(&app.pool, bp)
+        .await
+        .unwrap();
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].source_kind, "tag");
-    let count = music_hub::backpacks::resolve_count(&app.pool, bp).await.unwrap();
+    let count = music_hub::backpacks::resolve_count(&app.pool, bp)
+        .await
+        .unwrap();
     assert!(count > 0, "tag source must resolve at least one track");
 }
 
@@ -201,18 +203,24 @@ async fn add_playlist_adds_and_resolves() {
     .await;
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
 
-    let sources = music_hub::backpacks::list_sources(&app.pool, bp).await.unwrap();
+    let sources = music_hub::backpacks::list_sources(&app.pool, bp)
+        .await
+        .unwrap();
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].source_kind, "playlist");
     assert_eq!(sources[0].source_playlist_id, Some(pl));
 
     // The label resolves against `hub_playlists` with the same id.
-    let views = music_hub::backpacks::list_source_views(&app.pool, bp).await.unwrap();
+    let views = music_hub::backpacks::list_source_views(&app.pool, bp)
+        .await
+        .unwrap();
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].label, "Testliste");
 
     // And the source resolves to exactly the inserted membership tracks.
-    let count = music_hub::backpacks::resolve_count(&app.pool, bp).await.unwrap();
+    let count = music_hub::backpacks::resolve_count(&app.pool, bp)
+        .await
+        .unwrap();
     assert_eq!(count, 2);
 }
 
@@ -240,7 +248,8 @@ async fn playlist_picker_offers_only_own_hub_playlists() {
     .await
     .expect("insert curated playlist");
     // Another user's playlist must not leak either.
-    let foreign = insert_playlist(&app.pool, app.seed.alice, "Fremde Liste", &[app.seed.t_all]).await;
+    let foreign =
+        insert_playlist(&app.pool, app.seed.alice, "Fremde Liste", &[app.seed.t_all]).await;
 
     let html = app
         .client()
@@ -253,7 +262,10 @@ async fn playlist_picker_offers_only_own_hub_playlists() {
         .await
         .unwrap();
     let values = playlist_option_values(&html);
-    assert!(values.contains(&mine.to_string()), "own playlist offered: {values:?}");
+    assert!(
+        values.contains(&mine.to_string()),
+        "own playlist offered: {values:?}"
+    );
     assert!(
         !values.contains(&curated.to_string()),
         "curated playlist must not appear: {values:?}"
@@ -277,12 +289,17 @@ async fn add_lens_adds_row() {
         &app,
         &format!("/backpacks/{bp}/sources"),
         &cookie,
-        &[("source_kind", "lens".into()), ("source_lens", "newest".into())],
+        &[
+            ("source_kind", "lens".into()),
+            ("source_lens", "newest".into()),
+        ],
     )
     .await;
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
 
-    let sources = music_hub::backpacks::list_sources(&app.pool, bp).await.unwrap();
+    let sources = music_hub::backpacks::list_sources(&app.pool, bp)
+        .await
+        .unwrap();
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].source_kind, "lens");
     assert_eq!(sources[0].source_lens.as_deref(), Some("newest"));
@@ -306,12 +323,16 @@ async fn add_track_adds_and_resolves() {
     .await;
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
 
-    let sources = music_hub::backpacks::list_sources(&app.pool, bp).await.unwrap();
+    let sources = music_hub::backpacks::list_sources(&app.pool, bp)
+        .await
+        .unwrap();
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].source_kind, "track");
     assert_eq!(sources[0].source_track_id, Some(app.seed.t_all));
     assert_eq!(
-        music_hub::backpacks::resolve_count(&app.pool, bp).await.unwrap(),
+        music_hub::backpacks::resolve_count(&app.pool, bp)
+            .await
+            .unwrap(),
         1
     );
 }
@@ -383,10 +404,18 @@ async fn foreign_backpack_404_on_every_route() {
         &[],
     )
     .await;
-    assert_eq!(del.status(), reqwest::StatusCode::NOT_FOUND, "delete must 404");
+    assert_eq!(
+        del.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "delete must 404"
+    );
 
     let clear = post_form(&app, &format!("/backpacks/{bp}/clear"), &caller_cookie, &[]).await;
-    assert_eq!(clear.status(), reqwest::StatusCode::NOT_FOUND, "clear must 404");
+    assert_eq!(
+        clear.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "clear must 404"
+    );
 
     // The owner's backpack is untouched by the foreign caller.
     assert_eq!(item_count(&app.pool, bp).await, 1);
@@ -399,9 +428,10 @@ async fn cross_backpack_item_delete_is_404() {
     let bp_a = insert_backpack(&app.pool, owner, "A").await;
     let bp_b = insert_backpack(&app.pool, owner, "B").await;
     // An item that belongs to backpack B …
-    let item_b = music_hub::backpacks::add_source(&app.pool, bp_b, SourceRef::Track(app.seed.t_all))
-        .await
-        .unwrap();
+    let item_b =
+        music_hub::backpacks::add_source(&app.pool, bp_b, SourceRef::Track(app.seed.t_all))
+            .await
+            .unwrap();
 
     // … must not be deletable through backpack A's delete route.
     let resp = post_form(
@@ -467,7 +497,13 @@ mod real_form_serialization {
     /// Full body shape of a real submit for `kind`, mirroring the <form> fields
     /// in `backpacks.html`: all four pickers + the two numeric ids are always
     /// present, unused ones empty.
-    fn real_body(kind: &str, tag: &str, playlist: &str, lens: &str, id: &str) -> Vec<(&'static str, String)> {
+    fn real_body(
+        kind: &str,
+        tag: &str,
+        playlist: &str,
+        lens: &str,
+        id: &str,
+    ) -> Vec<(&'static str, String)> {
         vec![
             ("source_kind", kind.to_string()),
             ("source_tag_id", tag.to_string()),
@@ -491,7 +527,9 @@ mod real_form_serialization {
             reqwest::StatusCode::SEE_OTHER,
             "empty sibling fields must not 422 the real tag submit"
         );
-        let sources = music_hub::backpacks::list_sources(&app.pool, bp).await.unwrap();
+        let sources = music_hub::backpacks::list_sources(&app.pool, bp)
+            .await
+            .unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].source_kind, "tag");
     }
@@ -506,7 +544,9 @@ mod real_form_serialization {
         let body = real_body("playlist", "", &pl.to_string(), "", "");
         let resp = post_form(&app, &format!("/backpacks/{bp}/sources"), &cookie, &body).await;
         assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-        let sources = music_hub::backpacks::list_sources(&app.pool, bp).await.unwrap();
+        let sources = music_hub::backpacks::list_sources(&app.pool, bp)
+            .await
+            .unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].source_kind, "playlist");
         assert_eq!(sources[0].source_playlist_id, Some(pl));
@@ -521,7 +561,9 @@ mod real_form_serialization {
         let body = real_body("lens", "", "", "newest", "");
         let resp = post_form(&app, &format!("/backpacks/{bp}/sources"), &cookie, &body).await;
         assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-        let sources = music_hub::backpacks::list_sources(&app.pool, bp).await.unwrap();
+        let sources = music_hub::backpacks::list_sources(&app.pool, bp)
+            .await
+            .unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].source_lens.as_deref(), Some("newest"));
     }
@@ -535,7 +577,9 @@ mod real_form_serialization {
         let body = real_body("track", "", "", "", &app.seed.t_all.to_string());
         let resp = post_form(&app, &format!("/backpacks/{bp}/sources"), &cookie, &body).await;
         assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-        let sources = music_hub::backpacks::list_sources(&app.pool, bp).await.unwrap();
+        let sources = music_hub::backpacks::list_sources(&app.pool, bp)
+            .await
+            .unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].source_track_id, Some(app.seed.t_all));
     }
@@ -558,7 +602,13 @@ mod real_form_serialization {
 #[tokio::test]
 async fn sources_route_requires_login() {
     let app = common::spawn().await;
-    let resp = post_form(&app, "/backpacks/1/sources", "", &[("source_kind", "lens".into())]).await;
+    let resp = post_form(
+        &app,
+        "/backpacks/1/sources",
+        "",
+        &[("source_kind", "lens".into())],
+    )
+    .await;
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
     assert_eq!(resp.headers()["location"], "/login");
 }
