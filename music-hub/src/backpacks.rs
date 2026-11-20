@@ -72,6 +72,8 @@ pub struct BackpackItem {
     pub source_playlist_id: Option<i64>,
     pub source_lens: Option<String>,
     pub source_track_id: Option<i64>,
+    /// Optional per-source cap on contributed tracks (#654). `None` = unlimited.
+    pub max_tracks: Option<i64>,
     pub position: i64,
     pub added_at: String,
 }
@@ -102,6 +104,20 @@ impl SourceRef {
 /// A lens key must exist in [`crate::curate::LENSES`]; otherwise this returns an
 /// error and writes nothing.
 pub async fn add_source(pool: &SqlitePool, backpack_id: i64, src: SourceRef) -> Result<i64> {
+    add_source_with_limit(pool, backpack_id, src, None).await
+}
+
+/// Like [`add_source`], but with an optional per-source track cap (#654).
+///
+/// `max_tracks` is stored verbatim (NULL when `None`) and applied by the resolver
+/// per source, after that source's own ordering. A value `< 1` should be treated
+/// by callers as unlimited; this store persists exactly what it is given.
+pub async fn add_source_with_limit(
+    pool: &SqlitePool,
+    backpack_id: i64,
+    src: SourceRef,
+    max_tracks: Option<i64>,
+) -> Result<i64> {
     let now = chrono::Utc::now().to_rfc3339();
     let kind = src.kind().as_str();
 
@@ -121,10 +137,10 @@ pub async fn add_source(pool: &SqlitePool, backpack_id: i64, src: SourceRef) -> 
 
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO hub_backpack_items
-            (backpack_id, source_kind, source_tag_id, source_playlist_id, source_lens, source_track_id, position, added_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6,
+            (backpack_id, source_kind, source_tag_id, source_playlist_id, source_lens, source_track_id, max_tracks, position, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7,
                  (SELECT COALESCE(MAX(position), 0) + 1 FROM hub_backpack_items WHERE backpack_id = ?1),
-                 ?7)
+                 ?8)
          RETURNING id",
     )
     .bind(backpack_id)
@@ -133,6 +149,7 @@ pub async fn add_source(pool: &SqlitePool, backpack_id: i64, src: SourceRef) -> 
     .bind(playlist_id)
     .bind(lens)
     .bind(track_id)
+    .bind(max_tracks)
     .bind(&now)
     .fetch_one(pool)
     .await?;
@@ -151,7 +168,7 @@ pub async fn add_source(pool: &SqlitePool, backpack_id: i64, src: SourceRef) -> 
 pub async fn list_sources(pool: &SqlitePool, backpack_id: i64) -> Result<Vec<BackpackItem>> {
     Ok(sqlx::query_as::<_, BackpackItem>(
         "SELECT id, backpack_id, source_kind, source_tag_id, source_playlist_id,
-                source_lens, source_track_id, position, added_at
+                source_lens, source_track_id, max_tracks, position, added_at
            FROM hub_backpack_items
           WHERE backpack_id = ?1
           ORDER BY position, id",
@@ -751,6 +768,15 @@ async fn resolve_with_limit(
 
         if !seen.insert(source.clone()) {
             continue;
+        }
+        // Per-source cap (#654): truncate this source's *already ordered* id list
+        // after its own ordering, never a global cut. `Some(n)` with `n > 0`
+        // limits; `None`/`<= 0` means unlimited.
+        let mut tracks = tracks;
+        if let Some(n) = item.max_tracks {
+            if n > 0 {
+                tracks.truncate(n as usize);
+            }
         }
         contributions.push((source, item.position, tracks));
     }

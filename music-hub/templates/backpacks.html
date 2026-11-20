@@ -110,7 +110,8 @@
             action="/backpacks/{{ c.id }}/sources"
             style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center"
         >
-            <select name="source_kind" aria-label="Quellenart">
+            <select name="source_kind" aria-label="Quellenart"
+                onchange="this.form.querySelector('[name=max_tracks]').style.display = this.value === 'lens' ? '' : 'none'">
                 <option value="tag">Tag</option>
                 <option value="playlist">Playlist</option>
                 <option value="lens">Linse</option>
@@ -139,6 +140,14 @@
                 name="source_id"
                 placeholder="Track-ID"
                 aria-label="Track-ID"
+            />
+            <input
+                type="number"
+                name="max_tracks"
+                min="1"
+                placeholder="Max. Tracks (nur Linse)"
+                aria-label="Max. Tracks (nur Linse)"
+                style="display: none"
             />
             <button type="submit">Hinzufügen</button>
         </form>

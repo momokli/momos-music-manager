@@ -79,6 +79,19 @@ async fn insert_track(pool: &SqlitePool, ext: &str) -> i64 {
     .expect("insert track")
 }
 
+/// Insert a track with an explicit `first_seen_at` (drives the `newest` lens
+/// ordering: `first_seen_at DESC, id DESC`).
+async fn insert_track_seen(pool: &SqlitePool, ext: &str, first_seen_at: &str) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO hub_tracks (service, service_track_id, first_seen_at) VALUES ('spotify', ?1, ?2) RETURNING id",
+    )
+    .bind(ext)
+    .bind(first_seen_at)
+    .fetch_one(pool)
+    .await
+    .expect("insert track with first_seen_at")
+}
+
 async fn insert_backpack(pool: &SqlitePool, user_id: i64, name: &str, active: i64) -> i64 {
     sqlx::query_scalar(
         "INSERT INTO hub_backpacks (user_id, name, is_active, created_at, updated_at)
@@ -428,4 +441,93 @@ async fn sources_listed_once_each_in_position_order() {
         ],
         "sources appear once each, ordered by item position"
     );
+}
+
+// ── per-source max_tracks (#654) ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn lens_max_tracks_keeps_the_n_newest_per_source() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let bp = insert_backpack(&pool, user, "B", 0).await;
+
+    // 120 tracks, first_seen_at increasing with the index: track i (1-based)
+    // seen on day i. `newest` orders by first_seen_at DESC, so the 100 newest
+    // are i = 21..120.
+    let mut newest_ids: Vec<i64> = Vec::new();
+    for i in 1..=120 {
+        let seen = format!("2026-01-{i:03}T00:00:00+00:00");
+        let id = insert_track_seen(&pool, &format!("t{i}"), &seen).await;
+        if i > 20 {
+            newest_ids.push(id);
+        }
+    }
+
+    backpacks::add_source_with_limit(&pool, bp, SourceRef::Lens("newest".into()), Some(100))
+        .await
+        .unwrap();
+
+    let got = backpacks::resolve(&pool, bp, 1000).await.unwrap();
+    assert_eq!(got.len(), 100, "exactly 100 of 120 tracks survive the cap");
+
+    let mut have = ids(&got);
+    have.sort();
+    let mut want = newest_ids.clone();
+    want.sort();
+    assert_eq!(have, want, "the 100 kept tracks are the 100 newest");
+}
+
+#[tokio::test]
+async fn lens_without_limit_is_unlimited() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let bp = insert_backpack(&pool, user, "B", 0).await;
+
+    let mut all: Vec<i64> = Vec::new();
+    for i in 1..=120 {
+        let seen = format!("2026-01-{i:03}T00:00:00+00:00");
+        all.push(insert_track_seen(&pool, &format!("t{i}"), &seen).await);
+    }
+
+    // NULL (None) = unlimited.
+    backpacks::add_source(&pool, bp, SourceRef::Lens("newest".into()))
+        .await
+        .unwrap();
+
+    let got = backpacks::resolve(&pool, bp, 1000).await.unwrap();
+    assert_eq!(got.len(), 120, "no cap -> every track resolves");
+    let mut have = ids(&got);
+    have.sort();
+    all.sort();
+    assert_eq!(have, all);
+}
+
+#[tokio::test]
+async fn tag_source_limit_is_per_source() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let bp = insert_backpack(&pool, user, "B", 0).await;
+    let tag = insert_tag(&pool, user, "dark").await;
+
+    // 8 tagged tracks; `tracks_for_tag` orders by track_id ascending.
+    let mut first_five: Vec<i64> = Vec::new();
+    for i in 1..=8 {
+        let id = insert_track(&pool, &format!("t{i}")).await;
+        insert_resolved_tag(&pool, tag, id).await;
+        if i <= 5 {
+            first_five.push(id);
+        }
+    }
+
+    // The cap is generic: it applies to a non-lens source too.
+    backpacks::add_source_with_limit(&pool, bp, SourceRef::Tag(tag), Some(5))
+        .await
+        .unwrap();
+
+    let got = backpacks::resolve(&pool, bp, 1000).await.unwrap();
+    assert_eq!(got.len(), 5, "tag source capped at 5");
+    let mut have = ids(&got);
+    have.sort();
+    first_five.sort();
+    assert_eq!(have, first_five, "kept the 5 lowest-id (first) tagged tracks");
 }

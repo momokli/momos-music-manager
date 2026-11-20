@@ -5156,6 +5156,10 @@ struct AddSourceForm {
     source_tag_id: Option<i64>,
     #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
     source_playlist_id: Option<i64>,
+    /// Per-source track cap (#654); only meaningful for `source_kind == "lens"`.
+    /// `None` / `< 1` means unlimited.
+    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
+    max_tracks: Option<i64>,
 }
 
 impl AddSourceForm {
@@ -5234,7 +5238,14 @@ async fn backpack_source_add(
         Err(e) => return flash_redirect("/backpacks", format!("Fehler: {e}")),
     }
 
-    match crate::backpacks::add_source(&st.pool, id, src).await {
+    // Per-source cap (#654): only honoured for lenses; any other kind ignores it.
+    // A submitted value `< 1` is treated as unlimited (`None`).
+    let max_tracks = match src.kind() {
+        crate::backpacks::SourceKind::Lens => f.max_tracks.filter(|n| *n >= 1),
+        _ => None,
+    };
+
+    match crate::backpacks::add_source_with_limit(&st.pool, id, src, max_tracks).await {
         Ok(_) => flash_redirect("/backpacks", "Quelle hinzugefügt".to_string()),
         Err(e) => flash_redirect("/backpacks", format!("Fehler: {e}")),
     }
