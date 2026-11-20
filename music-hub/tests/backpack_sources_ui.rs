@@ -310,6 +310,103 @@ async fn unknown_source_kind_flashes_and_writes_nothing() {
     assert_eq!(item_count(&app.pool, bp).await, 0);
 }
 
+/// Regression (#651 review blocker): a real browser form submit serialises
+/// **every** field, empties as `key=`. A bare `Option<i64>` rejects "" with
+/// "cannot parse integer from empty string", so the whole form extractor 422s
+/// every real submission. These tests post the full body, empty fields
+/// included, and demand a 303 with the correct effect.
+mod real_form_serialization {
+    use super::*;
+
+    /// Full body shape of a real submit for `kind`, mirroring the <form> fields
+    /// in `backpacks.html`: all four pickers + the two numeric ids are always
+    /// present, unused ones empty.
+    fn real_body(kind: &str, tag: &str, playlist: &str, lens: &str, id: &str) -> Vec<(&'static str, String)> {
+        vec![
+            ("source_kind", kind.to_string()),
+            ("source_tag_id", tag.to_string()),
+            ("source_playlist_id", playlist.to_string()),
+            ("source_lens", lens.to_string()),
+            ("source_id", id.to_string()),
+        ]
+    }
+
+    #[tokio::test]
+    async fn tag_full_body_with_empty_fields_is_303() {
+        let app = common::spawn().await;
+        let (owner, cookie) = app.user_with_password("ui-real-tag", "pw").await;
+        let bp = insert_backpack(&app.pool, owner, "Real-Tag").await;
+        let tag = insert_tag_and_link(&app.pool, owner, "real", Some(app.seed.t_all)).await;
+
+        let body = real_body("tag", &tag.to_string(), "", "", "");
+        let resp = post_form(&app, &format!("/backpacks/{bp}/sources"), &cookie, &body).await;
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::SEE_OTHER,
+            "empty sibling fields must not 422 the real tag submit"
+        );
+        let sources = music_hub::backpacks::list_sources(&app.pool, bp).await.unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].source_kind, "tag");
+    }
+
+    #[tokio::test]
+    async fn playlist_full_body_with_empty_fields_is_303() {
+        let app = common::spawn().await;
+        let (owner, cookie) = app.user_with_password("ui-real-pl", "pw").await;
+        let bp = insert_backpack(&app.pool, owner, "Real-Pl").await;
+
+        let body = real_body("playlist", "", &app.seed.pl_alice.to_string(), "", "");
+        let resp = post_form(&app, &format!("/backpacks/{bp}/sources"), &cookie, &body).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+        let sources = music_hub::backpacks::list_sources(&app.pool, bp).await.unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].source_kind, "playlist");
+    }
+
+    #[tokio::test]
+    async fn lens_full_body_with_empty_fields_is_303() {
+        let app = common::spawn().await;
+        let (owner, cookie) = app.user_with_password("ui-real-lens", "pw").await;
+        let bp = insert_backpack(&app.pool, owner, "Real-Lens").await;
+
+        let body = real_body("lens", "", "", "newest", "");
+        let resp = post_form(&app, &format!("/backpacks/{bp}/sources"), &cookie, &body).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+        let sources = music_hub::backpacks::list_sources(&app.pool, bp).await.unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].source_lens.as_deref(), Some("newest"));
+    }
+
+    #[tokio::test]
+    async fn track_full_body_with_empty_fields_is_303() {
+        let app = common::spawn().await;
+        let (owner, cookie) = app.user_with_password("ui-real-track", "pw").await;
+        let bp = insert_backpack(&app.pool, owner, "Real-Track").await;
+
+        let body = real_body("track", "", "", "", &app.seed.t_all.to_string());
+        let resp = post_form(&app, &format!("/backpacks/{bp}/sources"), &cookie, &body).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+        let sources = music_hub::backpacks::list_sources(&app.pool, bp).await.unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].source_track_id, Some(app.seed.t_all));
+    }
+
+    /// An empty `source_lens` on a lens submit is "Linse fehlt": a flash, not a
+    /// 422 and not an insert.
+    #[tokio::test]
+    async fn lens_empty_value_flashes_and_writes_nothing() {
+        let app = common::spawn().await;
+        let (owner, cookie) = app.user_with_password("ui-real-lens-empty", "pw").await;
+        let bp = insert_backpack(&app.pool, owner, "Real-Lens-Empty").await;
+
+        let body = real_body("lens", "", "", "", "");
+        let resp = post_form(&app, &format!("/backpacks/{bp}/sources"), &cookie, &body).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+        assert_eq!(item_count(&app.pool, bp).await, 0);
+    }
+}
+
 #[tokio::test]
 async fn sources_route_requires_login() {
     let app = common::spawn().await;

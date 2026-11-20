@@ -5145,10 +5145,15 @@ async fn backpack_toggle_active(
 #[derive(Deserialize)]
 struct AddSourceForm {
     source_kind: String,
+    // Real form submits send every field, empties as `key=`. serde's bare
+    // `Option<i64>` rejects "" (422); `qnum::opt_i64` maps empty -> None.
+    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
     source_id: Option<i64>,
     source_lens: Option<String>,
     /// Distinct pickers so the kind select drives which value is used (no JS).
+    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
     source_tag_id: Option<i64>,
+    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
     source_playlist_id: Option<i64>,
 }
 
