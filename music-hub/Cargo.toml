@@ -5,6 +5,7 @@ edition = "2024"
 description = "Spelunke — multi-user music ingest + exploration service"
 
 [dependencies]
+music-api-client = { path = "../music-api-client" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["multipart"] }
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
