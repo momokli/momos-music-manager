@@ -10,6 +10,13 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Lens-Limit (`max_tracks`) für Backpack-Quellen** (#654) — jede
+  Backpack-Quelle kann jetzt ein **Track-Limit** tragen; der Resolver wendet es
+  **pro Quelle nach der quellen-eigenen Ordnung** an (eine `newest`-Linse mit
+  `max_tracks=100` behält genau die 100 neuesten), **kein** globaler Schnitt.
+  `NULL`/`< 1` bleibt unbegrenzt. Das `/backpacks`-Add-Formular bekommt ein
+  Zahlenfeld `max_tracks`, das per Inline-JS nur bei `source_kind=lens` sichtbar
+  ist. **Migration 065, additiv** (`ALTER TABLE … ADD COLUMN max_tracks`).
 - feat: **Comment-Template verdrahten** (#652) — `ALLOWED_PLACEHOLDERS`
   (`{tags}/{bpm}/{key}/{energy}`) werden beim Speichern validiert (unbekannt →
   `400` mit Whitelist), leerer Wert löst auf `DEFAULT_TEMPLATE` auf, und
