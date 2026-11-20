@@ -30,6 +30,12 @@ pub fn router(state: AppState) -> Router {
         .route("/backpacks/{id}/rename", post(backpack_rename))
         .route("/backpacks/{id}/delete", post(backpack_delete))
         .route("/backpacks/{id}/active", post(backpack_toggle_active))
+        .route("/backpacks/{id}/sources", post(backpack_source_add))
+        .route(
+            "/backpacks/{id}/sources/{item_id}/delete",
+            post(backpack_source_delete),
+        )
+        .route("/backpacks/{id}/clear", post(backpack_sources_clear))
         .route("/backpacks/{id}/export", get(backpack_export))
         .route("/tags/create", post(tag_create))
         .route("/tags/smart/create", post(smart_tag_create))
@@ -4932,8 +4938,11 @@ fn referer_path(headers: &HeaderMap) -> Option<String> {
     Some(path.to_string())
 }
 
-/// One source row inside a backpack card: kind literal + plain-text label.
+/// One source row inside a backpack card: kind literal + plain-text label +
+/// the backing `hub_backpack_items.id` (so the row can carry its own delete
+/// form, #651).
 struct SourceRow {
+    item_id: i64,
     kind: String,
     label: String,
 }
@@ -4954,6 +4963,11 @@ struct BackpacksPage {
     nav: crate::ui::Nav,
     flash: String,
     cards: Vec<BackpackCard>,
+    /// Pickers for the per-card add form (#651): the caller's tags as
+    /// `(id, name)`, the caller's curated playlists, and the static lens list.
+    tags: Vec<(i64, String)>,
+    playlists: Vec<crate::curate::CuratedPlaylist>,
+    lenses: &'static [(&'static str, &'static str)],
 }
 
 /// GET `/backpacks` (#332): read-only overview of the caller's backpacks, each
@@ -4994,6 +5008,7 @@ async fn backpacks_page(State(st): State<AppState>, headers: HeaderMap) -> Respo
             sources: views
                 .into_iter()
                 .map(|v| SourceRow {
+                    item_id: v.id,
                     kind: v.kind,
                     label: v.label,
                 })
@@ -5001,10 +5016,18 @@ async fn backpacks_page(State(st): State<AppState>, headers: HeaderMap) -> Respo
         });
     }
 
+    let tags = crate::tags::list_user_tags(&st.pool, nav.id).await;
+    let playlists = crate::curate::list_for_user(&st.pool, nav.id)
+        .await
+        .unwrap_or_default();
+
     render(&BackpacksPage {
         nav,
         flash: crate::flash::from_headers(&headers),
         cards,
+        tags,
+        playlists,
+        lenses: crate::curate::LENSES,
     })
 }
 
@@ -5109,6 +5132,150 @@ async fn backpack_toggle_active(
     };
     match result {
         Ok(()) => Redirect::to("/backpacks").into_response(),
+        Err(e) => flash_redirect("/backpacks", format!("Fehler: {e}")),
+    }
+}
+
+// ── backpack sources UI (#651) ───────────────────────────────────────────────
+
+/// Add a source via the per-card form: `source_kind` picks the kind, the
+/// kind-specific field carries the target. `source_id` stays the generic
+/// numeric id (track; also accepted as a fallback for tag/playlist, mirroring
+/// the store's [`crate::backpacks::SourceRef`]), `source_lens` the lens key.
+#[derive(Deserialize)]
+struct AddSourceForm {
+    source_kind: String,
+    source_id: Option<i64>,
+    source_lens: Option<String>,
+    /// Distinct pickers so the kind select drives which value is used (no JS).
+    source_tag_id: Option<i64>,
+    source_playlist_id: Option<i64>,
+}
+
+impl AddSourceForm {
+    /// Map the submitted form to a typed source, or `Err(message)` for an
+    /// unknown kind / a missing required value.
+    fn to_source_ref(&self) -> Result<crate::backpacks::SourceRef, String> {
+        use crate::backpacks::{SourceKind, SourceRef};
+        use std::str::FromStr;
+
+        let kind = SourceKind::from_str(&self.source_kind)
+            .map_err(|_| format!("unbekannte Quellenart: {}", self.source_kind))?;
+        match kind {
+            SourceKind::Tag => self
+                .source_tag_id
+                .or(self.source_id)
+                .map(SourceRef::Tag)
+                .ok_or_else(|| "Tag fehlt".to_string()),
+            SourceKind::Playlist => self
+                .source_playlist_id
+                .or(self.source_id)
+                .map(SourceRef::Playlist)
+                .ok_or_else(|| "Playlist fehlt".to_string()),
+            SourceKind::Lens => self
+                .source_lens
+                .as_deref()
+                .filter(|k| !k.is_empty())
+                .map(|k| SourceRef::Lens(k.to_string()))
+                .ok_or_else(|| "Linse fehlt".to_string()),
+            SourceKind::Track => self
+                .source_id
+                .map(SourceRef::Track)
+                .ok_or_else(|| "Track-ID fehlt".to_string()),
+        }
+    }
+}
+
+/// POST `/backpacks/{id}/sources` (#651): attach one source to the caller's
+/// backpack. A foreign/unknown backpack is a `404` (owner scoping via
+/// [`crate::backpacks::backpack_owned_by`], never a cross-user leak). A
+/// duplicate target is idempotent: no second row is written and a flash says
+/// so.
+async fn backpack_source_add(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<AddSourceForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "backpacks").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(_bp) = crate::backpacks::backpack_owned_by(&st.pool, id, nav.id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return not_found("Backpack nicht gefunden.");
+    };
+
+    let src = match f.to_source_ref() {
+        Ok(src) => src,
+        Err(msg) => return flash_redirect("/backpacks", format!("Fehler: {msg}")),
+    };
+
+    match crate::backpacks::source_exists(&st.pool, id, &src).await {
+        Ok(true) => return flash_redirect("/backpacks", "Quelle ist bereits enthalten".to_string()),
+        Ok(false) => {}
+        Err(e) => return flash_redirect("/backpacks", format!("Fehler: {e}")),
+    }
+
+    match crate::backpacks::add_source(&st.pool, id, src).await {
+        Ok(_) => Redirect::to("/backpacks").into_response(),
+        Err(e) => flash_redirect("/backpacks", format!("Fehler: {e}")),
+    }
+}
+
+/// POST `/backpacks/{id}/sources/{item_id}/delete` (#651): remove one source
+/// row. A foreign/unknown backpack — or an item that does not belong to *this*
+/// backpack — is a `404`, so a delete can never reach across backpacks.
+async fn backpack_source_delete(
+    State(st): State<AppState>,
+    Path((id, item_id)): Path<(i64, i64)>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "backpacks").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(_bp) = crate::backpacks::backpack_owned_by(&st.pool, id, nav.id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return not_found("Backpack nicht gefunden.");
+    };
+
+    match crate::backpacks::item_owned_by(&st.pool, item_id, id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found("Quelle nicht gefunden."),
+        Err(e) => return flash_redirect("/backpacks", format!("Fehler: {e}")),
+    }
+
+    match crate::backpacks::remove_source(&st.pool, item_id).await {
+        Ok(_) => Redirect::to("/backpacks").into_response(),
+        Err(e) => flash_redirect("/backpacks", format!("Fehler: {e}")),
+    }
+}
+
+/// POST `/backpacks/{id}/clear` (#651): remove every source of the caller's
+/// backpack. A foreign/unknown backpack is a `404`.
+async fn backpack_sources_clear(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "backpacks").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(_bp) = crate::backpacks::backpack_owned_by(&st.pool, id, nav.id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return not_found("Backpack nicht gefunden.");
+    };
+
+    match crate::backpacks::clear_sources(&st.pool, id).await {
+        Ok(_) => Redirect::to("/backpacks").into_response(),
         Err(e) => flash_redirect("/backpacks", format!("Fehler: {e}")),
     }
 }

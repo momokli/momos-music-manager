@@ -532,3 +532,42 @@ async fn db_check_rejects_two_source_columns() {
     assert!(res.is_err(), "the exactly-one-source CHECK must reject two columns");
     assert_eq!(count_items(&pool, bp).await, 0);
 }
+
+/// `source_exists` (#651): dedup by target identity, per source kind. A target
+/// already attached (same kind + id/lens key) reports `true`; a different id,
+/// kind, or backpack reports `false`.
+#[tokio::test]
+async fn source_exists_dedups_by_target() {
+    let (_dir, pool) = setup().await;
+    let alice = insert_user(&pool, "alice").await;
+    let bp = insert_backpack(&pool, alice, "B", 0).await;
+    let other = insert_backpack(&pool, alice, "Other", 0).await;
+    let tag = insert_tag(&pool, alice, "dark").await;
+    let pl = insert_playlist(&pool, alice, "pl-1").await;
+    let tr = insert_track(&pool, "t-1").await;
+
+    // Nothing attached yet.
+    assert!(!backpacks::source_exists(&pool, bp, &SourceRef::Tag(tag)).await.unwrap());
+
+    backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Lens("newest".into())).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Track(tr)).await.unwrap();
+
+    // Exact same target -> true.
+    assert!(backpacks::source_exists(&pool, bp, &SourceRef::Tag(tag)).await.unwrap());
+    assert!(backpacks::source_exists(&pool, bp, &SourceRef::Playlist(pl)).await.unwrap());
+    assert!(backpacks::source_exists(&pool, bp, &SourceRef::Lens("newest".into())).await.unwrap());
+    assert!(backpacks::source_exists(&pool, bp, &SourceRef::Track(tr)).await.unwrap());
+
+    // Same kind, different id/key -> false (no false positive).
+    let tag2 = insert_tag(&pool, alice, "bright").await;
+    assert!(!backpacks::source_exists(&pool, bp, &SourceRef::Tag(tag2)).await.unwrap());
+    assert!(!backpacks::source_exists(&pool, bp, &SourceRef::Lens("liked".into())).await.unwrap());
+
+    // Same target in a *different* backpack -> false (scoped per backpack).
+    assert!(!backpacks::source_exists(&pool, other, &SourceRef::Tag(tag)).await.unwrap());
+
+    // The helper never writes: the dedup probe leaves the row count unchanged.
+    assert_eq!(count_items(&pool, bp).await, 4);
+}

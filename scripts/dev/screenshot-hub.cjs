@@ -11,8 +11,43 @@
  */
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 
 const { chromium } = require("playwright");
+
+/**
+ * System Chrome ("channel: chrome") is the intended browser — no download. On a
+ * host without it, fall back to a Chromium already in the Playwright cache so
+ * the dev screenshots still work offline.
+ */
+function findBrowser() {
+  if (process.env.CHROME_PATH && fs.existsSync(process.env.CHROME_PATH)) {
+    return { executablePath: process.env.CHROME_PATH };
+  }
+  for (const p of [
+    "/opt/google/chrome/chrome",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ]) {
+    if (fs.existsSync(p)) return { channel: "chrome" };
+  }
+  const cache = path.join(os.homedir(), ".cache", "ms-playwright");
+  if (fs.existsSync(cache)) {
+    const dirs = fs
+      .readdirSync(cache)
+      .filter((d) => /^chromium-\d+$/.test(d))
+      .sort((a, b) => Number(b.split("-")[1]) - Number(a.split("-")[1]));
+    for (const d of dirs) {
+      for (const rel of ["chrome-linux64/chrome", "chrome-linux/chrome"]) {
+        const p = path.join(cache, d, rel);
+        if (fs.existsSync(p)) return { executablePath: p };
+      }
+    }
+  }
+  return { channel: "chrome" };
+}
 
 const base = process.env.HUB_BASE;
 const cookie = process.env.HUB_COOKIE;
@@ -37,12 +72,24 @@ const shots = [
     width: 390,
     height: 844,
   },
+  {
+    name: "hub-backpacks-quellen-desktop.png",
+    url: "/backpacks",
+    width: 1280,
+    height: 900,
+  },
+  {
+    name: "hub-backpacks-quellen-mobile.png",
+    url: "/backpacks",
+    width: 390,
+    height: 844,
+  },
 ];
 
 (async () => {
   fs.mkdirSync(outDir, { recursive: true });
 
-  const browser = await chromium.launch({ channel: "chrome" });
+  const browser = await chromium.launch(findBrowser());
   const errors = [];
 
   for (const shot of shots) {
@@ -78,6 +125,19 @@ const shots = [
       const basket = await page.locator(".tonies-list[data-cart] li").count();
       if (tiles === 0) throw new Error(`${shot.url}: album grid is empty`);
       console.log(`${shot.name}: ${tiles} tiles, ${basket} cart rows`);
+    }
+
+    // The backpack view (#651) is only worth a screenshot when it actually
+    // rendered cards and all four seeded source kinds: an empty grid or a card
+    // without sources would otherwise pass silently.
+    if (shot.url.includes("/backpacks")) {
+      const cards = await page.locator(".hub-backpack-card").count();
+      const sources = await page.locator(".hub-backpack-sources li").count();
+      if (cards === 0) throw new Error(`${shot.url}: backpack grid is empty`);
+      if (sources < 4) {
+        throw new Error(`${shot.url}: expected >=4 backpack sources, got ${sources}`);
+      }
+      console.log(`${shot.name}: ${cards} backpack cards, ${sources} source rows`);
     }
 
     const file = path.join(outDir, shot.name);

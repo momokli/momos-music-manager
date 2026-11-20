@@ -161,6 +161,76 @@ pub async fn list_sources(pool: &SqlitePool, backpack_id: i64) -> Result<Vec<Bac
     .await?)
 }
 
+/// Whether the backpack already contains `src` (same kind + same target
+/// identity). Used by the backpack UI (#651) to keep adds idempotent: a
+/// duplicate target is detected *before* inserting a second row (which
+/// [`add_source`] would happily create, double-counting the target in
+/// [`resolve`]). An unknown backpack yields `Ok(false)`.
+pub async fn source_exists(pool: &SqlitePool, backpack_id: i64, src: &SourceRef) -> Result<bool> {
+    let found: Option<i64> = match src {
+        SourceRef::Tag(id) => {
+            sqlx::query_scalar(
+                "SELECT 1 FROM hub_backpack_items
+                  WHERE backpack_id = ?1 AND source_kind = 'tag' AND source_tag_id = ?2
+                  LIMIT 1",
+            )
+            .bind(backpack_id)
+            .bind(id)
+            .fetch_optional(pool)
+            .await?
+        }
+        SourceRef::Playlist(id) => {
+            sqlx::query_scalar(
+                "SELECT 1 FROM hub_backpack_items
+                  WHERE backpack_id = ?1 AND source_kind = 'playlist' AND source_playlist_id = ?2
+                  LIMIT 1",
+            )
+            .bind(backpack_id)
+            .bind(id)
+            .fetch_optional(pool)
+            .await?
+        }
+        SourceRef::Lens(key) => {
+            sqlx::query_scalar(
+                "SELECT 1 FROM hub_backpack_items
+                  WHERE backpack_id = ?1 AND source_kind = 'lens' AND source_lens = ?2
+                  LIMIT 1",
+            )
+            .bind(backpack_id)
+            .bind(key)
+            .fetch_optional(pool)
+            .await?
+        }
+        SourceRef::Track(id) => {
+            sqlx::query_scalar(
+                "SELECT 1 FROM hub_backpack_items
+                  WHERE backpack_id = ?1 AND source_kind = 'track' AND source_track_id = ?2
+                  LIMIT 1",
+            )
+            .bind(backpack_id)
+            .bind(id)
+            .fetch_optional(pool)
+            .await?
+        }
+    };
+    Ok(found.is_some())
+}
+
+/// Whether `item_id` is a source row of `backpack_id` (delete ownership check,
+/// #651). A row of a foreign or a different backpack is indistinguishable from
+/// a missing one, so the handler answers `404` and a delete can never reach
+/// across backpacks.
+pub async fn item_owned_by(pool: &SqlitePool, item_id: i64, backpack_id: i64) -> Result<bool> {
+    let found: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM hub_backpack_items WHERE id = ?1 AND backpack_id = ?2 LIMIT 1",
+    )
+    .bind(item_id)
+    .bind(backpack_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(found.is_some())
+}
+
 /// All backpacks owned by `user_id`, ordered by creation (`created_at, id`, a
 /// stable total order). Foreign backpacks are never returned; an unknown user
 /// yields `Ok(vec![])`.
@@ -176,10 +246,11 @@ pub async fn list_backpacks(pool: &SqlitePool, user_id: i64) -> Result<Vec<Backp
     .await?)
 }
 
-/// One backpack source as shown in the view: its kind literal, a plain-text
-/// label, and its append position.
+/// One backpack source as shown in the view: its backing item id, its kind
+/// literal, a plain-text label, and its append position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceView {
+    pub id: i64,
     pub kind: String,
     pub label: String,
     pub position: i64,
@@ -243,6 +314,7 @@ pub async fn list_source_views(pool: &SqlitePool, backpack_id: i64) -> Result<Ve
             other => other.to_string(),
         };
         views.push(SourceView {
+            id: item.id,
             kind: item.source_kind,
             label,
             position: item.position,
