@@ -32,7 +32,10 @@
 > **New in this batch (per-device Kellner settings, #369):** migration `052`
 > (`hub_device_settings` + `hub_device_backpacks`, additive, both FKs
 > `ON DELETE CASCADE`) and the new module `src/device_settings.rs` — per-device
-> `preferred_format` (`flac|mp3|wav|m4a`) / `comment_template` (trim, ≤1024) /
+> `preferred_format` (`flac|mp3|wav|m4a`) / `comment_template` (trim, ≤1024;
+> placeholders whitelisted to `{tags}/{bpm}/{key}/{energy}` — an unknown token is
+> a `400`, `{{` is an escaped literal; an empty value resolves to
+> `DEFAULT_TEMPLATE` on the read/export side while the DB value stays raw) /
 > `active_backpack_ids`. JSON `GET`/`PUT /api/hub/devices/{id}/settings`
 > (web-session gated, owner-scoped via `devices::find_owned`; foreign/unknown →
 > `404`) + the HTML page `/kellner` (form POST `/kellner/{id}/settings`). Settings

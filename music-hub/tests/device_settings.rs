@@ -243,6 +243,42 @@ async fn over_long_template_is_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
 }
 
+// (f2b) unknown placeholder → 400 listing the allowed ones ──────────────────
+
+#[tokio::test]
+async fn unknown_placeholder_is_400() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("ds-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+
+    let (status, v) = put(&app, &cookie, did, json!({ "comment_template": "{title} {tags}" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    let err = v["error"].as_str().unwrap_or_default();
+    assert!(err.contains("{title}"), "names the token: {err}");
+    for allowed in ["{tags}", "{bpm}", "{key}", "{energy}"] {
+        assert!(err.contains(allowed), "lists {allowed}: {err}");
+    }
+}
+
+// (f2c) valid placeholders + `{{` edge cases → 200 ─────────────────────────
+
+#[tokio::test]
+async fn valid_placeholders_and_brace_edge_cases_are_200() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("ds-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+
+    for tpl in ["{tags} {bpm} {key} {energy}", "{{tags}}", "pre: {key}", "{{ literal"] {
+        let (status, v) = put(&app, &cookie, did, json!({ "comment_template": tpl })).await;
+        assert_eq!(status, StatusCode::OK, "{tpl:?} rejected: {v}");
+    }
+
+    // Empty template is accepted and reads back as empty (default resolved on export).
+    let (status, v) = put(&app, &cookie, did, json!({ "comment_template": "" })).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["comment_template"], "");
+}
+
 // (f3) empty body {} → 200, nothing changed (all fields absent = unchanged) ───
 
 #[tokio::test]
