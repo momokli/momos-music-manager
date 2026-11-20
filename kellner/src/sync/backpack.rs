@@ -27,7 +27,7 @@ use crate::client::hub::HubClient;
 use crate::state::{self, MembershipRecord, SyncState};
 use crate::sync::backup::canonicalise;
 use crate::sync::downloads::{choose_format, write_atomic};
-use crate::tag::comment::{render_comment, write_comment};
+use crate::tag::comment::{render_from_template, write_comment};
 
 /// Subdirectory (under the collection root) that receives soft-pruned files.
 pub const TRASH_DIR: &str = ".kellner-trash";
@@ -82,6 +82,8 @@ struct Desired {
     key: Option<String>,
     energy: Option<f64>,
     backpack_id: i64,
+    /// The Comment template of the backpack this track came from (issue #653).
+    comment_template: String,
 }
 
 fn now_epoch_secs() -> i64 {
@@ -128,6 +130,8 @@ pub async fn run_backpack(
             .export_backpack(bp.id)
             .await
             .with_context(|| format!("exporting backpack {} failed", bp.id))?;
+        // The device's resolved template travels with the export (#652/#659).
+        let comment_template = export.comment_template.clone();
         for t in export.tracks {
             let isrc = t.isrc.trim().to_string();
             if isrc.is_empty() {
@@ -142,6 +146,7 @@ pub async fn run_backpack(
                 key: t.key,
                 energy: t.energy,
                 backpack_id: bp.id,
+                comment_template: comment_template.clone(),
             });
         }
     }
@@ -167,6 +172,12 @@ pub async fn run_backpack(
         }
         return Ok(stats);
     }
+
+    // US3b: re-tag files already flat in the target folder (issue #653). The
+    // `missing` filter only decides what gets *fetched*; every desired ISRC whose
+    // file is already present is re-rendered and written on change (unchanged
+    // renders keep their mtime).
+    retag_existing(opts, &desired, &mut state, &mut stats)?;
 
     if missing.is_empty() {
         report(&stats, opts);
@@ -213,6 +224,51 @@ pub async fn run_backpack(
 
     report(&stats, opts);
     Ok(stats)
+}
+
+/// Re-render + (only on change) rewrite the Comment of every desired ISRC that
+/// already sits flat in the target folder (issue #653).
+fn retag_existing(
+    opts: &BackpackOptions,
+    desired: &BTreeMap<String, Desired>,
+    state: &mut SyncState,
+    stats: &mut BackpackStats,
+) -> Result<()> {
+    if !opts.write_tags {
+        return Ok(());
+    }
+    let mut membership_changed = false;
+    for (isrc, dev) in desired {
+        let Some(path) = existing_file(&opts.root, isrc) else {
+            continue;
+        };
+        let rendered = render_from_template(
+            &dev.comment_template,
+            &dev.tags,
+            dev.bpm,
+            dev.key.as_deref(),
+            dev.energy,
+        );
+        match write_comment(&path, &rendered) {
+            Ok(true) => {
+                stats.tagged += 1;
+                if let Some(rec) = state.backpack_membership.get_mut(isrc) {
+                    rec.tags_rendered = rendered.clone();
+                    membership_changed = true;
+                }
+                println!("kellner: backpack: re-tagged {isrc} -> {}", path.display());
+            }
+            Ok(false) => {}
+            Err(e) => {
+                stats.failed += 1;
+                eprintln!("kellner: backpack: re-tagging {} failed: {e:#}", path.display());
+            }
+        }
+    }
+    if membership_changed {
+        state::save(state)?;
+    }
+    Ok(())
 }
 
 /// Soft-move membership entries whose ISRC left every active backpack.
@@ -354,12 +410,12 @@ async fn fetch_and_tag(
     let dev = desired
         .get(isrc)
         .ok_or_else(|| anyhow!("{isrc} vanished from the desired set"))?;
-    let rendered = render_comment(
+    let rendered = render_from_template(
+        &dev.comment_template,
         &dev.tags,
         dev.bpm,
         dev.key.as_deref(),
         dev.energy,
-        true,
     );
     let tagged = if opts.write_tags {
         write_comment(&path, &rendered)

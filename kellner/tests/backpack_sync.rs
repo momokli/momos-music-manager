@@ -347,8 +347,25 @@ fn backpack_json(id: i64, name: &str, is_active: bool) -> serde_json::Value {
     serde_json::json!({ "id": id, "name": name, "is_active": is_active })
 }
 
+/// The hub resolves a device template into every export (#652/#659); mirror the
+/// default so kellner renders the new token form.
+const DEFAULT_TEMPLATE: &str = "{tags} {bpm} {key} {energy}";
+
 fn export_json(id: i64, name: &str, tracks: Vec<serde_json::Value>) -> serde_json::Value {
-    serde_json::json!({ "backpack": { "id": id, "name": name }, "tracks": tracks })
+    export_json_with_template(id, name, DEFAULT_TEMPLATE, tracks)
+}
+
+fn export_json_with_template(
+    id: i64,
+    name: &str,
+    template: &str,
+    tracks: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "backpack": { "id": id, "name": name },
+        "comment_template": template,
+        "tracks": tracks,
+    })
 }
 
 fn track_json(isrc: &str, tags: &[&str], bpm: Option<f64>, key: Option<&str>, energy: Option<f64>) -> serde_json::Value {
@@ -412,7 +429,7 @@ async fn fetches_missing_then_is_idempotent() {
     let m = &sj["backpack_membership"]["DEABC1234567"];
     assert!(m.is_object(), "membership recorded: {sj}");
     assert_eq!(m["backpack_id"], 1);
-    assert_eq!(m["tags_rendered"], "a, b  BPM 128 | A-Minor | Energy 7");
+    assert_eq!(m["tags_rendered"], "a, b BPM-128 KEY-A-Minor ENERGY-7");
     assert!(m["content_hash"].as_str().unwrap().len() == 64);
     assert!(m["path"].as_str().unwrap().ends_with("DEABC1234567.flac"));
 
@@ -421,7 +438,7 @@ async fn fetches_missing_then_is_idempotent() {
         use lofty::prelude::*;
         let tagged = lofty::read_from_path(coll.join("DEABC1234567.flac")).unwrap();
         let comment = tagged.primary_tag().and_then(|t| t.comment()).map(|c| c.to_string());
-        assert_eq!(comment.as_deref(), Some("a, b  BPM 128 | A-Minor | Energy 7"));
+        assert_eq!(comment.as_deref(), Some("a, b BPM-128 KEY-A-Minor ENERGY-7"));
     }
 
     // (b) second run: nothing ordered or fetched.
@@ -531,6 +548,67 @@ async fn user_downloads_are_never_pruned() {
     let sj = state_json(&config);
     assert_eq!(sj["downloads"]["USER00000001"]["order_id"], "user-order");
     assert!(!coll.join(".kellner-trash").join("USER00000001.flac").exists());
+}
+
+// (e) an existing flat file is re-tagged, then left untouched (mtime) ─────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retags_existing_file_then_keeps_mtime() {
+    let (url, state) = start_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let coll = tmp.path().join("collection");
+    std::fs::create_dir_all(&coll).unwrap();
+    let config = tmp.path().join("kellner").join("config.toml");
+    write_config(&config, &url);
+
+    // A flat file with a stale Comment already sits in the target folder — it is
+    // *not* missing, so nothing is ordered/fetched, yet the Comment is re-derived.
+    let dest = coll.join("DEABC1234567.flac");
+    std::fs::copy(flac_fixture_path(), &dest).unwrap();
+    {
+        use lofty::prelude::*;
+        let mut tagged = lofty::read_from_path(&dest).unwrap();
+        tagged
+            .primary_tag_mut()
+            .expect("fixture has a primary tag")
+            .set_comment("stale old comment".to_string());
+        tagged
+            .save_to_path(&dest, lofty::config::WriteOptions::default())
+            .unwrap();
+    }
+
+    seed_one_track(&state, "DEABC1234567", &["Techno"], Some(128.0), None, Some(7.0));
+
+    let args = vec![
+        "backpack".to_string(),
+        "--root".into(),
+        coll.to_string_lossy().to_string(),
+    ];
+    let (code, out) = run_in_blocking(args.clone(), url.clone(), config.clone());
+    assert_eq!(code, 0, "retag run: {out}");
+
+    // No order + no fetch (the file was already on disk), but the Comment changed.
+    assert_eq!(order_count(&state), 0, "present file must not be re-ordered");
+    assert_eq!(file_fetch_count(&state), 0, "present file must not be re-fetched");
+    {
+        use lofty::prelude::*;
+        let tagged = lofty::read_from_path(&dest).unwrap();
+        let comment = tagged.primary_tag().and_then(|t| t.comment()).map(|c| c.to_string());
+        assert_eq!(comment.as_deref(), Some("Techno BPM-128 ENERGY-7"));
+    }
+    assert!(out.contains("re-tagged"), "operator sees the re-tag: {out}");
+
+    let mtime_after_retag = std::fs::metadata(&dest).unwrap().modified().unwrap();
+
+    // Second run: identical render -> no write, mtime unchanged, no re-tag line.
+    let (code, out) = run_in_blocking(args, url, config.clone());
+    assert_eq!(code, 0, "idempotent run: {out}");
+    assert_eq!(
+        std::fs::metadata(&dest).unwrap().modified().unwrap(),
+        mtime_after_retag,
+        "unchanged render keeps the mtime"
+    );
+    assert!(!out.contains("re-tagged"), "no spurious re-tag: {out}");
 }
 
 fn flac_fixture_path() -> PathBuf {

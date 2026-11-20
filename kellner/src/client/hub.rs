@@ -86,6 +86,11 @@ pub struct ExportTrack {
 pub struct ExportResponse {
     #[serde(default)]
     pub backpack: Backpack,
+    /// The calling device's resolved Comment template (issue #652/#659). The hub
+    /// always sends it (falling back to the default when unset), but the field is
+    /// `#[serde(default)]` so older hubs without it still deserialize.
+    #[serde(default)]
+    pub comment_template: String,
     #[serde(default)]
     pub tracks: Vec<ExportTrack>,
 }
@@ -282,6 +287,7 @@ mod tests {
     fn export_response_parses_full_and_nullable() {
         let json = r#"{
             "backpack":{"id":1,"name":"Party"},
+            "comment_template":"{tags} {bpm}",
             "tracks":[
               {"track_id":9,"isrc":"DEABC1234567","title":"t","artists":"a","tags":["b","a"],"bpm":128.0,"key":"A-Minor","energy":7.0},
               {"track_id":10,"isrc":"DEABC7654321","title":"u","artists":"c","tags":[],"bpm":null,"key":null,"energy":null}
@@ -290,6 +296,7 @@ mod tests {
         let parsed: ExportResponse = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.backpack.id, 1);
         assert_eq!(parsed.backpack.name, "Party");
+        assert_eq!(parsed.comment_template, "{tags} {bpm}");
         // The export's backpack omits `is_active`; it defaults to false.
         assert!(!parsed.backpack.is_active);
         assert_eq!(parsed.tracks.len(), 2);
@@ -308,5 +315,6 @@ mod tests {
     fn export_response_tolerates_missing_fields() {
         let parsed: ExportResponse = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed, ExportResponse::default());
+        assert_eq!(parsed.comment_template, "");
     }
 }
