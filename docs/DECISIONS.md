@@ -2137,3 +2137,59 @@ ersatzlos.
   Node; yt-dlp bleibt der Pfad für Nicht-Deezer-Quellen.
 - **Historie bleibt lesbar:** die alten Tabellen werden nicht gelöscht; die
   historischen ADRs 038/064/065/067 werden nicht umgeschrieben.
+
+## ADR-083: Drei Dienste — `tonies-hub` wird eigenstaendig (music-api bleibt der Unterbau)
+
+**Date**: 2026-11-19
+**Status**: Accepted (Entscheidung des Betreibers; Plan `plans/proposed/tonies-hub.md`)
+**Relates**: ADR-065 (music-api = Download-Autoritaet), ADR-078 (Queue-Engine),
+ADR-079/080 (ISRC/Feature-Autoritaet), ADR-082 (nur nativer Download), #601-#624 (Tonie-Alben)
+
+**Context**: Die Tonies-Funktion ist in `music-hub` gewachsen und dort
+funktional vollstaendig (Korb, Artist-Abo, Album-Fit, Ledger, Verlauf). Sie
+bedient aber eine andere Zielgruppe als der Hub: Eltern auf dem Handy statt
+DJ-Bibliothek. Messung vom 2026-11-19: 4.616 Zeilen Tonie-Domaene, davon 272
+Treffer in `music-hub/src/web.rs` (5.138 Zeilen), 9 Routen, 3 Templates plus
+Shell aus `base.html`, 7 Tabellen. Die Domaene ist duenn gekoppelt
+(`music_api` 5x, `ui`/`config` je 4x, `backpacks` 3x), die **Flaeche** mischt.
+Zusaetzlich erzwingt ein gemeinsamer Prozess gemeinsame Deploys, Releases und
+einen gemeinsamen Fehlerradius fuer zwei Produkte.
+
+**Decision**:
+
+1. **Drei Dienste.** `music-api` (Katalog, Orders, Readiness) ist der gemeinsame
+   Unterbau. `music-hub` (DJ/Library) und **`tonies-hub`** (Eltern/Kind) sind
+   Geschwister: **kein** Aufruf in irgendeine Richtung zwischen ihnen.
+2. **Eigene Datenbank.** `tonies-hub` bekommt `tonies.db` mit eigenen Migrationen
+   und **eigenen Konten** (`users`, `sessions`, Cookie `tonies_session`). Kein
+   Shared-DB: sonst waeren Migrationen und Deploys wieder gekoppelt — genau das
+   soll die Trennung verhindern. SSO/Magic-Link ist ein spaeterer, offener Slice.
+3. **Alben-only.** Tonies werden aus Deezer-Alben gefuellt (Artist-Abo oder
+   Korb). Die Quellenarten `playlist`/`backpack`/`tag` bleiben Hub-Konzepte und
+   werden **nicht** portiert; ihre Historie bleibt in `hub.db`.
+4. **Geteilter Code nur fuer den music-api-Client.** Neue Lib-Crate
+   `music-api-client` (`deezer_*`, `file_bytes`, `order`, `readiness`) mit
+   `ApiConfig { base, token }`; `music-hub` stellt darauf um und behaelt nur
+   einen Re-Export. Tonies-Domaene, Auth, Shell und Templates werden **nicht**
+   geteilt — geteilte UI ist der Ort, an dem zwei Produkte wieder zusammenwachsen.
+5. **Eigener Betrieb.** `tonies-hub/deploy/` mit systemd-Unit, 5-Minuten-Deploy-
+   Timer (main-basiert, wie `hub-deploy`) und Caddy-Vhost; Default-Port 8090,
+   Vorschlag `tonies.zukkafabrik.de`. Eigener Tag-Strang `tonies-v*`, falls
+   spaeter Releases dazukommen.
+6. **Datenuebernahme einmalig, Hub bleibt unangetastet.** Ein Import-Skript liest
+   `hub.db` read-only (Bindings, Korb, Ledger, Run-Log) und schreibt `tonies.db`.
+   Die Hub-Tabellen werden nicht geloescht (Rollback), die Hub-Oberflaeche erst
+   nach stabilem Live-Lauf entfernt (Slice T8).
+
+**Consequences**:
+
+- **Zwei Konten pro Person** ist der Preis der Entkopplung. Bewusst akzeptiert;
+  Ausbaupfad ist ein Magic-Link/SSO-Slice, nicht ein Shared-DB.
+- **Dritter Deploy-Block** auf dem Host (Unit + Timer + Vhost) und ein dritter
+  CI-Job. Dafuer eigener Release-Takt und eigener Fehlerradius.
+- **`music-hub` schrumpft** um ~4.6k Zeilen Domaeene und 9 Routen; `web.rs`
+  verliert die 272 Tonie-Treffer erst mit T8.
+- **Keine zweite Kataloghaltung**: Dauern, Readiness und Orders bleiben in
+  `music-api`; `tonies-hub` haelt nur Korb/Ledger/Bindings.
+- **Rueckwaerts** ist der Weg offen: solange T8 nicht gelaufen ist, kann der
+  Hub die Tonies-Flaeche weiter bedienen.
