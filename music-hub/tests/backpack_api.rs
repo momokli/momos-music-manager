@@ -247,6 +247,7 @@ async fn export_has_exact_shape_with_tags_and_audio() {
         v,
         json!({
             "backpack": { "id": bp, "name": "Mix" },
+            "comment_template": "{tags} {bpm} {key} {energy}",
             "tracks": [
                 {
                     "track_id": t1,
@@ -294,8 +295,75 @@ async fn empty_backpack_exports_empty_tracks() {
     assert_eq!(status, StatusCode::OK, "empty backpack is not a 500: {v}");
     assert_eq!(
         v,
-        json!({ "backpack": { "id": bp, "name": "Leer" }, "tracks": [] })
+        json!({
+            "backpack": { "id": bp, "name": "Leer" },
+            "comment_template": "{tags} {bpm} {key} {energy}",
+            "tracks": []
+        })
     );
+}
+
+#[tokio::test]
+async fn export_includes_device_comment_template() {
+    let app = common::spawn().await;
+    let did = bound_device(&app, app.seed.alice, "alice-box", ALICE_TOKEN).await;
+    let bp = backpacks::create_backpack(&app.pool, app.seed.alice, "Mix")
+        .await
+        .expect("create");
+
+    // No settings row yet -> the export falls back to the default template.
+    let (status, v) = json_body(
+        app.client()
+            .get(app.url(&format!("/api/hub/backpacks/{bp}/export")))
+            .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+            .send()
+            .await
+            .expect("export"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["comment_template"], "{tags} {bpm} {key} {energy}");
+
+    // A stored per-device template is delivered verbatim.
+    sqlx::query(
+        "INSERT INTO hub_device_settings (device_id, preferred_format, comment_template, updated_at)
+         VALUES (?1, 'flac', ?2, ?3)",
+    )
+    .bind(did)
+    .bind("{key} / {bpm}")
+    .bind("2026-01-01T00:00:00+00:00")
+    .execute(&app.pool)
+    .await
+    .expect("insert settings");
+
+    let (status, v) = json_body(
+        app.client()
+            .get(app.url(&format!("/api/hub/backpacks/{bp}/export")))
+            .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+            .send()
+            .await
+            .expect("export"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["comment_template"], "{key} / {bpm}");
+
+    // An empty stored template resolves to the default.
+    sqlx::query("UPDATE hub_device_settings SET comment_template = '' WHERE device_id = ?1")
+        .bind(did)
+        .execute(&app.pool)
+        .await
+        .expect("clear template");
+    let (_, v) = json_body(
+        app.client()
+            .get(app.url(&format!("/api/hub/backpacks/{bp}/export")))
+            .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+            .send()
+            .await
+            .expect("export"),
+    )
+    .await;
+    assert_eq!(v["comment_template"], "{tags} {bpm} {key} {energy}");
 }
 
 #[tokio::test]

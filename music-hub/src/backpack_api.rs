@@ -47,9 +47,11 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
     (!token.is_empty()).then(|| token.to_string())
 }
 
-/// Resolve the `Bearer` device token to its owning `user_id`, or an error
-/// response (`401`). Touches `last_seen_at` best-effort (never fails the read).
-async fn bound_user(st: &AppState, headers: &HeaderMap) -> Result<i64, Response> {
+/// Resolve the `Bearer` device token to its owning `(user_id, device_id)`, or
+/// an error response (`401`). Touches `last_seen_at` best-effort (never fails
+/// the read). The `device_id` lets the export resolve that device's settings
+/// (issue #652).
+async fn bound_user(st: &AppState, headers: &HeaderMap) -> Result<(i64, i64), Response> {
     let Some(token) = bearer_token(headers) else {
         return Err(err(StatusCode::UNAUTHORIZED, "missing device token"));
     };
@@ -69,13 +71,13 @@ async fn bound_user(st: &AppState, headers: &HeaderMap) -> Result<i64, Response>
     if let Err(e) = devices::touch_last_seen(&st.pool, device.id).await {
         tracing::warn!(error = %e, "backpack api: last_seen update failed");
     }
-    Ok(user_id)
+    Ok((user_id, device.id))
 }
 
 /// `GET /api/hub/backpacks` — the owner's backpacks, in creation order.
 async fn list(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let user_id = match bound_user(&st, &headers).await {
-        Ok(id) => id,
+        Ok((id, _device)) => id,
         Err(resp) => return resp,
     };
 
@@ -149,9 +151,23 @@ async fn track_audio(
 /// resolve order. An unknown/foreign backpack is a `404`; an empty one yields
 /// `tracks: []` (never a `500`).
 async fn export(State(st): State<AppState>, Path(id): Path<i64>, headers: HeaderMap) -> Response {
-    let user_id = match bound_user(&st, &headers).await {
-        Ok(id) => id,
+    let (user_id, device_id) = match bound_user(&st, &headers).await {
+        Ok(ids) => ids,
         Err(resp) => return resp,
+    };
+
+    // The calling device's comment template (issue #652): per-device settings,
+    // resolved to the default when unset. A settings read failure is not fatal —
+    // fall back to the default rather than failing the export.
+    let comment_template = match crate::device_settings::get_for_device(&st.pool, device_id, user_id)
+        .await
+    {
+        Ok(Some(s)) => crate::device_settings::resolve_template(&s.comment_template),
+        Ok(None) => crate::device_settings::DEFAULT_TEMPLATE.to_string(),
+        Err(e) => {
+            tracing::warn!(error = %e, "backpack api: device settings lookup failed");
+            crate::device_settings::DEFAULT_TEMPLATE.to_string()
+        }
     };
 
     let backpack = match backpacks::backpack_owned_by(&st.pool, id, user_id).await {
@@ -209,6 +225,7 @@ async fn export(State(st): State<AppState>, Path(id): Path<i64>, headers: Header
 
     Json(json!({
         "backpack": { "id": backpack.id, "name": backpack.name },
+        "comment_template": comment_template,
         "tracks": tracks,
     }))
     .into_response()

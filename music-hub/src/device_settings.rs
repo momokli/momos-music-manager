@@ -44,6 +44,14 @@ pub const FORMATS: [&str; 4] = ["flac", "mp3", "wav", "m4a"];
 /// Longest accepted `comment_template`, measured in Unicode scalar values.
 pub const MAX_TEMPLATE_CHARS: usize = 1024;
 
+/// The placeholders a `comment_template` may reference. Anything else inside a
+/// `{...}` token is rejected on save (issue #652).
+pub const ALLOWED_PLACEHOLDERS: [&str; 4] = ["tags", "bpm", "key", "energy"];
+
+/// The template applied when the stored value is empty (issue #652): a device
+/// without settings, or one that saved `""`, resolves to this default.
+pub const DEFAULT_TEMPLATE: &str = "{tags} {bpm} {key} {energy}";
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route(
@@ -115,8 +123,56 @@ pub fn valid_format(s: &str) -> bool {
     FORMATS.contains(&s)
 }
 
-/// Trim `s` and enforce the length cap. `""` is valid (v1 default = the
-/// alphabetical tag list is applied downstream, not here).
+/// The comma-separated, brace-wrapped list of allowed placeholders, e.g.
+/// `{tags}, {bpm}, {key}, {energy}` — used in the rejection message so a client
+/// can correct the template without guessing.
+pub fn allowed_placeholder_list() -> String {
+    ALLOWED_PLACEHOLDERS
+        .iter()
+        .map(|p| format!("{{{p}}}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Reject any `{name}` token whose `name` is not in [`ALLOWED_PLACEHOLDERS`].
+///
+/// A doubled brace (`{{`) is treated as an escaped literal and skipped, so
+/// templates that contain `{{`-like sequences are accepted. An unclosed `{`
+/// (no following `}`) is treated as literal text and accepted. The returned
+/// error names the offending token and lists the allowed placeholders.
+pub fn validate_placeholders(s: &str) -> Result<(), String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '{' {
+            i += 1;
+            continue;
+        }
+        // `{{` is an escaped literal brace — skip both, not a placeholder.
+        if i + 1 < chars.len() && chars[i + 1] == '{' {
+            i += 2;
+            continue;
+        }
+        match chars[i + 1..].iter().position(|&c| c == '}') {
+            Some(rel) => {
+                let name: String = chars[i + 1..i + 1 + rel].iter().collect();
+                if !ALLOWED_PLACEHOLDERS.contains(&name.as_str()) {
+                    return Err(format!(
+                        "unknown placeholder {{{name}}} (allowed: {})",
+                        allowed_placeholder_list()
+                    ));
+                }
+                i += 1 + rel + 1;
+            }
+            // Unclosed `{` → literal text.
+            None => i += 1,
+        }
+    }
+    Ok(())
+}
+
+/// Trim `s`, enforce the length cap and validate the placeholders. `""` is
+/// valid: it means "use [`DEFAULT_TEMPLATE`]" (resolved on read/export).
 pub fn clean_template(s: &str) -> Result<String, String> {
     let t = s.trim();
     if t.chars().count() > MAX_TEMPLATE_CHARS {
@@ -124,7 +180,20 @@ pub fn clean_template(s: &str) -> Result<String, String> {
             "comment_template too long (max {MAX_TEMPLATE_CHARS} characters)"
         ));
     }
+    validate_placeholders(t)?;
     Ok(t.to_string())
+}
+
+/// Resolve a stored template to its effective value: an empty (or
+/// whitespace-only) template falls back to [`DEFAULT_TEMPLATE`]. The stored
+/// value is never rewritten — this is the read-side default.
+pub fn resolve_template(stored: &str) -> String {
+    let t = stored.trim();
+    if t.is_empty() {
+        DEFAULT_TEMPLATE.to_string()
+    } else {
+        t.to_string()
+    }
 }
 
 // ── queries ─────────────────────────────────────────────────────────────────
@@ -597,6 +666,47 @@ mod tests {
         // Whitespace is trimmed *before* the length check.
         let padded = format!("  {}  ", "a".repeat(MAX_TEMPLATE_CHARS + 1));
         assert!(clean_template(&padded).is_err());
+    }
+
+    #[test]
+    fn clean_template_accepts_allowed_placeholders() {
+        for t in [
+            DEFAULT_TEMPLATE,
+            "{tags}",
+            "{bpm} {key} {energy}",
+            "tags: {tags}",
+            "",
+            "   ",
+        ] {
+            assert!(clean_template(t).is_ok(), "{t:?} should be accepted");
+        }
+    }
+
+    #[test]
+    fn clean_template_rejects_unknown_placeholder() {
+        let err = clean_template("{title}").unwrap_err();
+        assert!(err.contains("{title}"), "names the token: {err}");
+        assert!(err.contains("{tags}"), "lists allowed: {err}");
+        assert!(err.contains("{energy}"), "lists allowed: {err}");
+        assert!(clean_template("{tags} {artist}").is_err());
+    }
+
+    #[test]
+    fn validate_placeholders_accepts_double_brace_edge_cases() {
+        // `{{` is an escaped literal, never an unknown placeholder.
+        for t in ["{{", "{{tags}}", "a {{ b", "{{{tags}}}", "}", "{tags", "no braces"] {
+            assert!(validate_placeholders(t).is_ok(), "{t:?} should be accepted");
+        }
+        // A `{name}` after an escaped pair is still validated.
+        assert!(validate_placeholders("{{ {nope}").is_err());
+    }
+
+    #[test]
+    fn resolve_template_falls_back_to_default() {
+        assert_eq!(resolve_template(""), DEFAULT_TEMPLATE);
+        assert_eq!(resolve_template("   "), DEFAULT_TEMPLATE);
+        assert_eq!(resolve_template("{tags}"), "{tags}");
+        assert_eq!(resolve_template("  {tags}  "), "{tags}");
     }
 
     #[test]
