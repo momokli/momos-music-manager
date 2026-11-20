@@ -2149,8 +2149,9 @@ ADR-079/080 (ISRC/Feature-Autoritaet), ADR-082 (nur nativer Download), #601-#624
 funktional vollstaendig (Korb, Artist-Abo, Album-Fit, Ledger, Verlauf). Sie
 bedient aber eine andere Zielgruppe als der Hub: Eltern auf dem Handy statt
 DJ-Bibliothek. Messung vom 2026-11-19: 4.616 Zeilen Tonie-Domaene, davon 272
-Treffer in `music-hub/src/web.rs` (5.138 Zeilen), 9 Routen, 3 Templates plus
-Shell aus `base.html`, 7 Tabellen. Die Domaene ist duenn gekoppelt
+Treffer in `music-hub/src/web.rs` (5.138 Zeilen), 15 Routen, 3 Templates plus
+Shell aus `base.html`, 6 Tonie-Tabellen (Zahlen korrigiert 2026-11-20 nach Review;
+gezaehlt ueber alle `.route(...)`-Registrierungen, die Rebuild-Tabelle aus 060 nicht mit). Die Domaene ist duenn gekoppelt
 (`music_api` 5x, `ui`/`config` je 4x, `backpacks` 3x), die **Flaeche** mischt.
 Zusaetzlich erzwingt ein gemeinsamer Prozess gemeinsame Deploys, Releases und
 einen gemeinsamen Fehlerradius fuer zwei Produkte.
@@ -2187,7 +2188,7 @@ einen gemeinsamen Fehlerradius fuer zwei Produkte.
   Ausbaupfad ist ein Magic-Link/SSO-Slice, nicht ein Shared-DB.
 - **Dritter Deploy-Block** auf dem Host (Unit + Timer + Vhost) und ein dritter
   CI-Job. Dafuer eigener Release-Takt und eigener Fehlerradius.
-- **`music-hub` schrumpft** um ~4.6k Zeilen Domaeene und 9 Routen; `web.rs`
+- **`music-hub` schrumpft** um ~4.6k Zeilen Domaeene und 15 Routen; `web.rs`
   verliert die 272 Tonie-Treffer erst mit T8.
 - **Keine zweite Kataloghaltung**: Dauern, Readiness und Orders bleiben in
   `music-api`; `tonies-hub` haelt nur Korb/Ledger/Bindings.
