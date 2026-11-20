@@ -104,6 +104,45 @@
             </form>
         </div>
 
+        <p class="hub-muted" style="margin-top: 0.6rem">Quelle hinzufügen</p>
+        <form
+            method="post"
+            action="/backpacks/{{ c.id }}/sources"
+            style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center"
+        >
+            <select name="source_kind" aria-label="Quellenart">
+                <option value="tag">Tag</option>
+                <option value="playlist">Playlist</option>
+                <option value="lens">Linse</option>
+                <option value="track">Track</option>
+            </select>
+            <select name="source_tag_id" aria-label="Tag">
+                <option value="">— Tag —</option>
+                {% for t in tags %}
+                <option value="{{ t.0 }}">{{ t.1 }}</option>
+                {% endfor %}
+            </select>
+            <select name="source_playlist_id" aria-label="Playlist">
+                <option value="">— Playlist —</option>
+                {% for p in playlists %}
+                <option value="{{ p.0 }}">{{ p.1 }}</option>
+                {% endfor %}
+            </select>
+            <select name="source_lens" aria-label="Linse">
+                <option value="">— Linse —</option>
+                {% for l in lenses %}
+                <option value="{{ l.0 }}">{{ l.1 }}</option>
+                {% endfor %}
+            </select>
+            <input
+                type="number"
+                name="source_id"
+                placeholder="Track-ID"
+                aria-label="Track-ID"
+            />
+            <button type="submit">Hinzufügen</button>
+        </form>
+
         {% if c.sources.is_empty() %}
         <p class="hub-muted">Keine Quellen.</p>
         {% else %}
@@ -112,9 +151,24 @@
             <li>
                 <span class="hub-badge">{{ s.kind }}</span>
                 {{ s.label }}
+                <form
+                    method="post"
+                    action="/backpacks/{{ c.id }}/sources/{{ s.item_id }}/delete"
+                    style="display: inline"
+                >
+                    <button type="submit" class="secondary outline">Entfernen</button>
+                </form>
             </li>
             {% endfor %}
         </ul>
+        <form
+            method="post"
+            action="/backpacks/{{ c.id }}/clear"
+            style="display: inline"
+            onsubmit="return confirm('Alle Quellen dieses Backpacks entfernen?')"
+        >
+            <button type="submit" class="secondary outline">Alle leeren</button>
+        </form>
         {% endif %}
     </article>
     {% endfor %}

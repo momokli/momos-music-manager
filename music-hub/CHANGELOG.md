@@ -10,6 +10,17 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Backpack-Quellen bedienbar** (#651) — `/backpacks` offers a per-backpack
+  add form for the four source kinds (**tag**, **playlist**, **lens**, **track**),
+  a per-row remove button, „Alle leeren", and a live count of sources plus
+  resolved tracks. The playlist picker reads the caller's **`hub_playlists`** — the
+  same id space the resolver (`tracks_for_playlist` → `hub_playlist_tracks`) and the
+  source label read, and the table `hub_backpack_items.source_playlist_id`
+  references — so a selected option resolves to the intended playlist. Sources are
+  owner-scoped (a foreign backpack is `404`; a tag/playlist target must belong to
+  the caller) and duplicate adds are idempotent. Add/remove/clear flash a
+  confirmation. Routen `POST /backpacks/{id}/sources`, …/sources/{item}/delete,
+  …/clear. **No migration.**
 - feat: **Tag hygiene — rename, merge similar tags, suggestions** (#456) — a tag
   detail page (`/tag/{id}`) now surfaces owner-only **suggestions** for similar
   own tags (`tags::similar_tags`; ranked by normalised-equal > small edit
