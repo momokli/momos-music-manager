@@ -245,11 +245,7 @@ pub async fn playlist_options(pool: &SqlitePool, user_id: i64) -> Result<Vec<(i6
 /// with `owner_user_id = ?`, a `playlist` a `hub_playlists` row with
 /// `user_id = ?`. `lens` and `track` have no per-user owner here and are always
 /// considered owned (no check). A missing/foreign row is simply not owned.
-pub async fn source_owned_by(
-    pool: &SqlitePool,
-    user_id: i64,
-    src: &SourceRef,
-) -> Result<bool> {
+pub async fn source_owned_by(pool: &SqlitePool, user_id: i64, src: &SourceRef) -> Result<bool> {
     let found: Option<i64> = match src {
         SourceRef::Tag(id) => {
             sqlx::query_scalar(
@@ -261,13 +257,11 @@ pub async fn source_owned_by(
             .await?
         }
         SourceRef::Playlist(id) => {
-            sqlx::query_scalar(
-                "SELECT 1 FROM hub_playlists WHERE id = ?1 AND user_id = ?2 LIMIT 1",
-            )
-            .bind(id)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await?
+            sqlx::query_scalar("SELECT 1 FROM hub_playlists WHERE id = ?1 AND user_id = ?2 LIMIT 1")
+                .bind(id)
+                .bind(user_id)
+                .fetch_optional(pool)
+                .await?
         }
         // No per-user owner on lens keys or literal hub tracks.
         SourceRef::Lens(_) | SourceRef::Track(_) => return Ok(true),
