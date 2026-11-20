@@ -29,9 +29,9 @@ Gemessen am Code vom 2026-11-19:
 |---|---|
 | Tonie-Domäne in `music-hub/src/tonies/` + `tonie_history.rs` | 4.616 Zeilen |
 | Treffer auf „tonie" in `music-hub/src/web.rs` (5.138 Zeilen) | 272 |
-| Tonie-Routen (`/tonies…`) in `web.rs` | 9 (+ `/artist/{key}/cart` in `artists.rs`) |
+| Tonie-Routen (`/tonies…`) in `web.rs` | 15 (+ `/artist/{key}/cart` in `artists.rs`)<br>_gezaehlt ueber alle `.route(...)`-Registrierungen, auch mehrzeilig (Korrektur 2026-11-20)_ |
 | Tonie-Templates | 3 Seiten + 3 Partials, Shell aus `base.html` |
-| Tabellen | 7, alle `hub_tonie_*` (+ totes `hub_deezer_albums`) |
+| Tabellen | 6 × `hub_tonie_*` (+ stillgelegtes `hub_deezer_albums`); `hub_tonie_bindings_new` ist nur der Rebuild-Zwischenschritt aus 060 |
 
 Die **Domäne ist schon gekapselt** (Abhängigkeiten nach außen: `music_api` 5×,
 `ui` 4×, `config` 4×, `backpacks` 3×, `db` 2×). Was mischt, ist die **Fläche**:
@@ -91,7 +91,7 @@ Migrationen `001…` in `tonies-hub/migrations/`:
 | `users` | `id`, `slug`, `display_name`, `password_hash` (bcrypt), `is_admin`, `created_at` |
 | `sessions` | `id` (Token), `user_id`, `created_at`, `expires_at` |
 | `tonies_accounts` | wie `hub_tonies_accounts`: `user_id`, `household_id`, `tonie_email`, `secret_enc`, `last_login_at`, `last_error` |
-| `bindings` | `user_id`, `tonie_id`, `tonie_name`, `source_kind='albums'`, `artist_id`, `artist_name`, `cap_seconds`, `mode`, `album_mode`, `order_by`, `last_sync_*` |
+| `bindings` | `user_id`, `tonie_id`, `tonie_name`, `source_kind='albums'`, `artist_id`, `artist_name` (im Hub heissen sie `source_id`/`source_name`, Migration 064), `cap_seconds`, `mode`, `album_mode`, `order_by`, `last_sync_*` |
 | `cart_items` | `user_id`, `tonie_id`, `position`, `album_id`, `title`, `cover_url`, `seconds`, `added_at`, `UNIQUE(user_id, tonie_id, album_id)` |
 | `albums_seen` | `user_id`, `album_id`, `seen_at` (Ledger, PRIMARY KEY `(user_id, album_id)`) |
 | `syncs` | Run-Log: `binding_id`, `status`, `started_at`, `finished_at`, `added`, `removed`, `skipped_json`, `error` + Teil-Index „eine `running`-Zeile pro Binding" |
