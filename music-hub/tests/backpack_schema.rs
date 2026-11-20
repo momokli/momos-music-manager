@@ -315,6 +315,48 @@ async fn foreign_keys_cascade() {
 }
 
 #[tokio::test]
+async fn max_tracks_column_is_additive_and_null_default() {
+    let (_dir, pool) = setup().await;
+
+    // The additive migration 065 added the column.
+    let has_col: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('hub_backpack_items') WHERE name = 'max_tracks'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(has_col, 1, "hub_backpack_items.max_tracks must exist");
+
+    // An item inserted without max_tracks defaults to NULL (unlimited).
+    let user = insert_user(&pool, "alice").await;
+    let bp = insert_backpack(&pool, user, "B", 0).await;
+    let tag = insert_tag(&pool, user, "dark").await;
+    insert_item(&pool, bp, "tag", tag).await.unwrap();
+
+    let val: Option<i64> =
+        sqlx::query_scalar("SELECT max_tracks FROM hub_backpack_items WHERE backpack_id = ?1")
+            .bind(bp)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(val, None, "max_tracks defaults to NULL = unlimited");
+
+    // A value is storable and round-trips.
+    sqlx::query("UPDATE hub_backpack_items SET max_tracks = 100 WHERE backpack_id = ?1")
+        .bind(bp)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let val: Option<i64> =
+        sqlx::query_scalar("SELECT max_tracks FROM hub_backpack_items WHERE backpack_id = ?1")
+            .bind(bp)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(val, Some(100));
+}
+
+#[tokio::test]
 async fn indexes_exist() {
     let (_dir, pool) = setup().await;
     let expected = [
