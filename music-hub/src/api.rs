@@ -52,6 +52,7 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::device_settings::router(state.clone()))
         .merge(crate::traktor_api::router(state.clone()))
         .merge(crate::backpack_api::router(state.clone()))
+        .merge(crate::playlist_import::router(state.clone()))
         .merge(crate::tagtaskui::router(state))
 }
 
@@ -132,8 +133,11 @@ pub async fn backlog_counts(pool: &SqlitePool) -> BacklogCounts {
                              WHERE g.track_id = t.id AND g.source = 'lastfm')",
     )
     .await;
-    let crawl_pending =
-        count(pool, "SELECT COUNT(*) FROM hub_crawl_state WHERE state = 'pending'").await;
+    let crawl_pending = count(
+        pool,
+        "SELECT COUNT(*) FROM hub_crawl_state WHERE state = 'pending'",
+    )
+    .await;
     let cutoff = (chrono::Utc::now() - chrono::Duration::hours(20)).to_rfc3339();
     let curation_due = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM hub_curated_playlists
@@ -261,10 +265,7 @@ pub async fn status_data(st: &AppState) -> Value {
 
 /// `GET /api/hub/status` — session-gated ops view of the Hub loops, backlog and
 /// the downstream music-api worker/queue (issue #353). Never 500s on backlog.
-async fn status(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+async fn status(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
     if crate::web::current_user(&st, &headers).await.is_none() {
         return Err(err(StatusCode::UNAUTHORIZED, "login required"));
     }
