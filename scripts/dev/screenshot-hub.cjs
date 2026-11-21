@@ -158,6 +158,37 @@ const shots = [
       console.log(`${shot.name}: ${cards} backpack cards, ${sources} source rows`);
     }
 
+    // Comment-template preview (#670): /kellner renders the fragment on the
+    // server, /comment-templates loads it via htmx on click. Either way the
+    // shot is only meaningful with rows, `10 von N` and the `n/512` counter.
+    if (shot.url.includes("/comment-templates")) {
+      const btn = page.locator('button[hx-post$="/preview"]').first();
+      if ((await btn.count()) === 0) {
+        throw new Error(`${shot.url}: no preview trigger button`);
+      }
+      await btn.click();
+      await page.waitForSelector(".hub-preview-list li", { timeout: 15000 });
+      const rows = await page.locator(".hub-preview-list li").count();
+      if (rows === 0) throw new Error(`${shot.url}: preview list is empty`);
+      const counter = (await page.locator(".hub-preview p.hub-muted").last().textContent()) || "";
+      if (!/\d+ von \d+/.test(counter)) {
+        throw new Error(`${shot.url}: missing "10 von N" counter (got "${counter.trim()}")`);
+      }
+      console.log(`${shot.name}: ${rows} preview rows, counter "${counter.trim()}"`);
+    }
+
+    if (shot.url.includes("/kellner")) {
+      const rows = await page.locator(".hub-preview-list li").count();
+      if (rows < 10) {
+        throw new Error(`${shot.url}: expected >=10 preview rows, got ${rows}`);
+      }
+      const counter = (await page.locator(".hub-preview p.hub-muted").last().textContent()) || "";
+      if (!/\d+ von \d+/.test(counter)) {
+        throw new Error(`${shot.url}: missing "10 von N" counter (got "${counter.trim()}")`);
+      }
+      console.log(`${shot.name}: ${rows} preview rows, counter "${counter.trim()}"`);
+    }
+
     const file = path.join(outDir, shot.name);
     await page.screenshot({ path: file, fullPage: true });
     console.log(`wrote ${file}`);
