@@ -616,12 +616,7 @@ async fn page(State(st): State<AppState>, headers: HeaderMap) -> Response {
             })
             .collect();
         let resolved_comment = resolve_effective_comment(&st.pool, d.id, nav.id).await;
-        let preview_html = render_preview_fragment(
-            &st.pool,
-            &settings.active_backpack_ids,
-            &resolved_comment,
-        )
-        .await;
+        let preview_html = render_preview_fragment(&st.pool, nav.id, &resolved_comment).await;
         cards.push(DeviceCard {
             id: d.id,
             name: d.name,
@@ -782,8 +777,8 @@ async fn form_submit(
 
 /// Render the `_partials/comment_preview.html` fragment for the `/kellner` card
 /// (`#670`). Advisory: a resolve failure yields the empty hint, never a 500.
-async fn render_preview_fragment(pool: &SqlitePool, backpack_ids: &[i64], body: &str) -> String {
-    match crate::preview::comment_preview(pool, backpack_ids, body).await {
+async fn render_preview_fragment(pool: &SqlitePool, user_id: i64, body: &str) -> String {
+    match crate::preview::comment_preview(pool, user_id, body).await {
         Ok(p) => p.render().unwrap_or_default(),
         Err(e) => {
             tracing::warn!(error = %e, "comment preview failed");
@@ -807,7 +802,7 @@ struct PreviewForm {
 /// gated; foreign/unknown device → `404`. The rendered body comes from the
 /// **just-submitted** form value (selected template → legacy free text →
 /// [`DEFAULT_TEMPLATE`]), never the stored selection, so the preview tracks the
-/// form. Track source: the device's active backpacks in `position` order.
+/// form. Track source: the session user's top tagged tracks (`#678`).
 async fn template_preview(
     State(st): State<AppState>,
     Path(id): Path<i64>,
@@ -818,14 +813,16 @@ async fn template_preview(
         return Redirect::to("/login").into_response();
     };
 
-    let settings = match get_for_device(&st.pool, id, user_id).await {
-        Ok(Some(s)) => s,
+    // 404 scoping: foreign/unknown device is rejected. The settings value
+    // itself is no longer needed — the track source is the session user.
+    match get_for_device(&st.pool, id, user_id).await {
+        Ok(Some(_)) => {}
         Ok(None) => return (StatusCode::NOT_FOUND, "Unbekanntes Gerät").into_response(),
         Err(e) => {
             tracing::warn!(error = %e, "template preview: settings lookup failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Vorschau fehlgeschlagen").into_response();
         }
-    };
+    }
 
     // Body: the just-selected template wins; an empty/`"0"` id falls back to the
     // legacy free text of the form and finally to DEFAULT_TEMPLATE.
@@ -855,7 +852,7 @@ async fn template_preview(
         pick_comment(None, f.comment_template.as_deref().unwrap_or(""))
     };
 
-    match crate::preview::comment_preview(&st.pool, &settings.active_backpack_ids, &body).await {
+    match crate::preview::comment_preview(&st.pool, user_id, &body).await {
         Ok(p) => render(&p),
         Err(e) => {
             tracing::warn!(error = %e, "template preview: render failed");
