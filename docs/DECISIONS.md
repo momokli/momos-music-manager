@@ -2253,3 +2253,49 @@ keine Formalie, sondern ein Defekt.
 - **Rueckwaerts:** ohne gesetztes Template gilt der Default, der den heutigen Inhalt in
   neuer Form reproduziert; ein leeres Template schaltet das Comment-Schreiben nicht ab
   (das bleibt `--no-tags`).
+
+## ADR-085: Ein Renderer fuer das Comment-Template (geteilte Crate) + Vorschau im Hub
+
+**Date**: 2026-11-21
+**Status**: Proposed (Plan `plans/proposed/comment-template-preview.md`; wartet auf Freigabe)
+**Relates**: ADR-084 (Template mit Platzhaltern, space-freie Tokens), #652/#653 (Feld, Export, kellner-Renderer)
+
+**Context**: Seit v0.33.0 laesst sich das Comment-Template pro Geraet setzen
+(`hub_device_settings.comment_template`), kellner rendert es beim Schreiben. Zwei Luecken:
+(1) Man sieht das Ergebnis erst, wenn eine Datei geschrieben wird — `kellner backpack
+--dry-run` zaehlt nur. (2) Die Template-Semantik existiert doppelt: `ALLOWED_PLACEHOLDERS`
+und `DEFAULT_TEMPLATE` stehen in `music-hub/src/device_settings.rs` **und** in
+`kellner/src/tag/comment.rs`, die Deckel (48 Zeichen pro Token, 512 pro Comment),
+Slugging und Fallback nur in kellner. Eine Vorschau im Hub wuerde daraus die dritte
+Wahrheit machen.
+
+**Decision**:
+
+1. **Eine Crate `comment-template`** (path-dependency, kein Workspace noetig) haelt die
+   gesamte Semantik: `render(template, &TrackFacts) -> String`, `validate(template)`,
+   `DEFAULT_TEMPLATE`, `ALLOWED_PLACEHOLDERS`, `TOKEN_MAX_CHARS = 48`,
+   `COMMENT_MAX_CHARS = 512`, Slugging, Whitespace-Normalisierung, Fallback bei
+   unbekanntem Platzhalter. `music-hub` und `kellner` benutzen sie; der Umzug ist
+   verhaltensneutral (bestehende Tests wandern mit).
+2. **Golden-Fixture als Vertrag**: `comment-template/tests/fixtures/cases.json` mit
+   Eingabe->Ausgabe-Paaren; beide Seiten testen dagegen. Zusaetzlich ein Test in
+   `kellner`, dass Vorschau und geschriebene Datei **byte-identisch** sind.
+3. **Vorschau im Hub, ohne Netz**: `POST /kellner/{device}/template/preview` rendert die
+   ersten **10** Tracks aus der Vereinigung der aktiven Backpacks des Geraets. Daten aus
+   dem Hub selbst (`hub_track_resolved_tags`, `hub_track_audio` — dieselben Abfragen wie
+   der Backpack-Export). Anzeige mit Zeichenzaehler `n/512` und sichtbarer Kuerzung.
+4. **kellner bekommt `comment --preview`**: dieselbe Ausgabe lokal, offline, ohne Sync —
+   fuer die Arbeit am Mac.
+5. **Kein Template pro Backpack, kein Speichern gerenderter Strings.** Weiterhin pro
+   Geraet, weiterhin bei jedem Request neu gerechnet.
+
+**Consequences**:
+
+- **Vorschau kann nicht luegen**: beide Seiten rufen dieselbe Funktion auf, der
+  Golden-Test haelt sie zusammen.
+- **Neue Crate = neuer CI-Job** (wie `music-api-client`); dafuer keine dritte
+  Implementierung und keine zwei Listen erlaubter Platzhalter mehr.
+- **Verhalten bleibt**: Platzhalter, Slugging (`Hard Techno` -> `Hard-Techno`), Deckel und
+  Fallback sind unveraendert — der Umzug ist ein Move, keine Neuerung.
+- **Vorschau-Daten koennen vom Sync abweichen**, wenn sich Tags zwischen Vorschau und Lauf
+  aendern; das ist beabsichtigt (Momentaufnahme, kein Cache).
