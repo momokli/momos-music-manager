@@ -8,6 +8,12 @@ use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **TrackFacts tragen `types` + `source_ids`** (#691, Slice T3) — `ExportTrack`
+  (`kellner/src/client/hub.rs`) liest die neuen Export-Felder `types` und `source_ids`
+  (beide `#[serde(default)]`); `Desired` reicht sie bis in `TrackFacts` durch, und
+  `retag_existing`/`fetch_and_tag` speisen statt `vec![]` die echten Werte ein (die
+  Vorschau in `preview.rs` bleibt paritätisch zum Hub). Ein älterer Hub ohne die Felder
+  parst weiter und die `{types}`/`{source_ids}`-Token entfallen.
 - **Comment-Vorschau** (#671) — `kellner comment --preview [--limit N]` gibt die
   Kommentare aus, die der Sync schreiben würde: vollständig lokal/offline,
   read-only (nur zwei Hub-GETs, kein Order/Fetch/Write/`state.json`). Nutzt den
