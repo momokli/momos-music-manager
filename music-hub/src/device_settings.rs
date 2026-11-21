@@ -121,19 +121,6 @@ pub fn valid_format(s: &str) -> bool {
     FORMATS.contains(&s)
 }
 
-/// The comma-separated, brace-wrapped list of allowed placeholders, e.g.
-/// `{tags}, {bpm}, {key}, {energy}`.
-///
-/// Kept as a thin wrapper over [`ALLOWED_PLACEHOLDERS`] for the Hub's own use;
-/// the rejection message itself is produced by [`comment_template::validate`].
-pub fn allowed_placeholder_list() -> String {
-    ALLOWED_PLACEHOLDERS
-        .iter()
-        .map(|p| format!("{{{p}}}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 /// Trim `s`, enforce the length cap and validate the placeholders. `""` is
 /// valid: it means "use [`DEFAULT_TEMPLATE`]" (resolved on read/export).
 pub fn clean_template(s: &str) -> Result<String, String> {
