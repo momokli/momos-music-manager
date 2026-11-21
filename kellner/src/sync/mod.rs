@@ -10,5 +10,6 @@
 pub mod backup;
 pub mod backpack;
 pub mod downloads;
+pub mod preview;
 pub mod run;
 pub mod traktor;

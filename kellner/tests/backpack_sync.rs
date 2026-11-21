@@ -617,3 +617,189 @@ fn flac_fixture_path() -> PathBuf {
         .join("fixtures")
         .join("test.flac")
 }
+
+// ── `kellner comment --preview` (issue #671, C5) ─────────────────────────────
+
+/// The Comment fragment of every `"{title}  ->  {comment}"` line.
+fn preview_comments(out: &str) -> Vec<String> {
+    out.lines()
+        .filter_map(|l| l.split_once("  ->  ").map(|(_, c)| c.to_string()))
+        .collect()
+}
+
+/// Read the primary-tag Comment back out of a file (`lofty`).
+fn read_comment(path: &Path) -> String {
+    use lofty::prelude::*;
+    lofty::read_from_path(path)
+        .expect("read tag")
+        .primary_tag()
+        .and_then(|t| t.comment())
+        .map(|c| c.to_string())
+        .unwrap_or_default()
+}
+
+/// (a) `--preview` output is byte-identical to the Comment `backpack` writes; with
+/// two active backpacks sharing an ISRC, the **lower** id's template wins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preview_matches_written_comment_lowest_id_wins() {
+    let (url, state) = start_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let coll = tmp.path().join("collection");
+    std::fs::create_dir_all(&coll).unwrap();
+    let config = tmp.path().join("kellner").join("config.toml");
+    write_config(&config, &url);
+
+    // Two active backpacks, same ISRC, different templates → id 1 must win.
+    {
+        let mut st = state.lock().unwrap();
+        st.backpacks = vec![backpack_json(1, "A", true), backpack_json(2, "B", true)];
+        st.exports.insert(
+            1,
+            export_json_with_template(
+                1,
+                "A",
+                "{tags}",
+                vec![track_json("DEABC1234567", &["Techno"], Some(128.0), Some("A-Minor"), Some(7.0))],
+            ),
+        );
+        st.exports.insert(
+            2,
+            export_json_with_template(
+                2,
+                "B",
+                "{key} {bpm}",
+                vec![track_json("DEABC1234567", &["House"], Some(120.0), Some("8A"), None)],
+            ),
+        );
+    }
+
+    // Preview is read-only and renders the union with the lower backpack's template.
+    let (code, out) = run_in_blocking(vec!["comment".into(), "--preview".into()], url.clone(), config.clone());
+    assert_eq!(code, 0, "preview: {out}");
+    let preview = preview_comments(&out);
+    assert_eq!(preview, vec!["Techno".to_string()], "lower id template wins: {out}");
+
+    // The sync path writes exactly those bytes into the file's Comment.
+    let (code, out) = run_in_blocking(
+        vec![
+            "backpack".into(),
+            "--root".into(),
+            coll.to_string_lossy().to_string(),
+            "--poll-secs".into(),
+            "1".into(),
+        ],
+        url,
+        config.clone(),
+    );
+    assert_eq!(code, 0, "backpack: {out}");
+    let written = read_comment(&coll.join("DEABC1234567.flac"));
+    assert_eq!(written.as_bytes(), preview[0].as_bytes(), "preview == written comment");
+}
+
+/// (b) `--limit`: default 10, explicit 3, and 0 lines.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preview_limit_default_and_explicit() {
+    let (url, state) = start_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("kellner").join("config.toml");
+    write_config(&config, &url);
+
+    {
+        let mut st = state.lock().unwrap();
+        st.backpacks = vec![backpack_json(1, "A", true)];
+        let tracks: Vec<_> = (0..12)
+            .map(|i| track_json(&format!("DEABC12345{i:02}"), &["Techno"], None, None, None))
+            .collect();
+        st.exports.insert(1, export_json(1, "A", tracks));
+    }
+
+    let (code, out) = run_in_blocking(vec!["comment".into(), "--preview".into()], url.clone(), config.clone());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(preview_comments(&out).len(), 10, "default limit is 10: {out}");
+
+    let (code, out) = run_in_blocking(
+        vec!["comment".into(), "--preview".into(), "--limit".into(), "3".into()],
+        url.clone(),
+        config.clone(),
+    );
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(preview_comments(&out).len(), 3, "--limit 3: {out}");
+
+    let (code, out) = run_in_blocking(
+        vec!["comment".into(), "--preview".into(), "--limit".into(), "0".into()],
+        url,
+        config,
+    );
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(preview_comments(&out).len(), 0, "--limit 0: {out}");
+}
+
+/// (c) no active backpack → clear message, exit 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preview_no_active_backpack_exits_zero() {
+    let (url, state) = start_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("kellner").join("config.toml");
+    write_config(&config, &url);
+    state.lock().unwrap().backpacks = vec![backpack_json(1, "A", false)];
+
+    let (code, out) = run_in_blocking(vec!["comment".into(), "--preview".into()], url, config);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("no active backpack"), "{out}");
+    assert!(preview_comments(&out).is_empty(), "{out}");
+}
+
+/// (d) an unpaired device fails with a nonzero exit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preview_unpaired_device_exits_nonzero() {
+    let (url, _state) = start_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("kellner").join("config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, format!("hub_url = \"{url}\"\n")).unwrap();
+
+    let (code, out) = run_in_blocking(vec!["comment".into(), "--preview".into()], url, config);
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("not paired"), "{out}");
+}
+
+/// (e) preview is strictly read-only: no order, no fetch, no file, no state change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preview_is_read_only() {
+    let (url, state) = start_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let coll = tmp.path().join("collection");
+    std::fs::create_dir_all(&coll).unwrap();
+    let config = tmp.path().join("kellner").join("config.toml");
+    write_config(&config, &url);
+
+    // A pre-existing state.json must survive byte-for-byte.
+    let state_path = config.with_file_name("state.json");
+    let before = serde_json::json!({ "downloads": {} }).to_string();
+    std::fs::write(&state_path, &before).unwrap();
+
+    seed_one_track(&state, "DEABC1234567", &["Techno"], Some(128.0), None, Some(7.0));
+
+    let (code, out) = run_in_blocking(vec!["comment".into(), "--preview".into()], url, config.clone());
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(order_count(&state), 0, "no order placed");
+    assert_eq!(file_fetch_count(&state), 0, "no file fetched");
+    assert!(
+        std::fs::read_dir(&coll).unwrap().next().is_none(),
+        "collection root untouched"
+    );
+    assert_eq!(std::fs::read_to_string(&state_path).unwrap(), before, "state.json unchanged");
+}
+
+/// (f) without `--preview` the command refuses: stderr message, exit 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn comment_without_preview_is_rejected() {
+    let (url, _state) = start_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("kellner").join("config.toml");
+    write_config(&config, &url);
+
+    let (code, out) = run_in_blocking(vec!["comment".into()], url, config);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("only --preview is implemented"), "{out}");
+}
