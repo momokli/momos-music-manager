@@ -4,6 +4,18 @@ All notable changes to `kellner` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project aims to
 use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Comment-Vorschau** (#671) — `kellner comment --preview [--limit N]` gibt die
+  Kommentare aus, die der Sync schreiben würde: vollständig lokal/offline,
+  read-only (nur zwei Hub-GETs, kein Order/Fetch/Write/`state.json`). Nutzt den
+  **gleichen** Union-Pfad wie `backpack` und den **gleichen**
+  `comment_template::render`, druckt `Titel  ->  Comment`. `--limit` default 10;
+  ohne aktives Backpack eine klare Meldung (Exit 0) statt einer leeren Liste;
+  byte-identisch zum Schreib-Output.
+
 ## [0.1.0]
 
 First shippable slice of the local, cross-platform music-stack companion.
