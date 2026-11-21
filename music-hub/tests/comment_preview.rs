@@ -561,3 +561,130 @@ async fn kellner_and_library_preview_match_same_seed() {
 
     assert_eq!(kellner, library, "both routes render the same fragment");
 }
+
+// ── export parity (#690, slice T2) ──────────────────────────────────────────
+
+const PARITY_TOKEN: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+async fn set_tag_type(app: &common::TestApp, tag_id: i64, ty: &str) {
+    sqlx::query("UPDATE hub_tags SET type = ?2 WHERE id = ?1")
+        .bind(tag_id)
+        .bind(ty)
+        .execute(&app.pool)
+        .await
+        .expect("set tag type");
+}
+
+async fn audio_with_camelot(
+    app: &common::TestApp,
+    track_id: i64,
+    bpm: f64,
+    musical_key: &str,
+    camelot: &str,
+) {
+    sqlx::query(
+        "INSERT INTO hub_track_audio (track_id, bpm, musical_key, camelot, energy)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(track_id)
+    .bind(bpm)
+    .bind(musical_key)
+    .bind(camelot)
+    .bind(6.0)
+    .execute(&app.pool)
+    .await
+    .expect("audio with camelot");
+}
+
+/// Acceptance #690: the preview facts are byte-identical to the export API's
+/// per-track facts — same tags/types/source_ids/key/bpm/energy, one read path.
+#[tokio::test]
+async fn preview_facts_match_export_api_track_facts() {
+    let app = common::spawn().await;
+    let (uid, _cookie) = app.user_with_password("cp-parity", "1234").await;
+    bound_device(&app, uid, "parity-k", PARITY_TOKEN).await;
+
+    let t = track(&app, "par1", "Parity").await;
+    let mood = tag(&app, uid, "mood", "Deep").await;
+    let phase = tag(&app, uid, "phase", "Peak").await;
+    let merkmal = tag(&app, uid, "airy", "Airy").await;
+    let loose = tag(&app, uid, "zzz", "Zzz").await;
+    set_tag_type(&app, mood, "MOOD").await;
+    set_tag_type(&app, phase, "PHASE_2").await;
+    set_tag_type(&app, merkmal, "MERKMAL").await;
+    for tg in [loose, merkmal, phase, mood] {
+        resolve_tag(&app, t, tg).await;
+    }
+    audio_with_camelot(&app, t, 128.0, "G-Minor", "8A").await;
+    for (service, id) in [("youtube", "yt-1"), ("spotify", "sp-1"), ("soundcloud", "sc-1")] {
+        sqlx::query(
+            "INSERT INTO hub_track_external_ids (track_id, service, external_id)
+             VALUES (?1, ?2, ?3)",
+        )
+        .bind(t)
+        .bind(service)
+        .bind(id)
+        .execute(&app.pool)
+        .await
+        .expect("external id");
+    }
+
+    // Preview side: the shared facts loader.
+    let preview = music_hub::preview::top_tagged_tracks(&app.pool, uid, 1)
+        .await
+        .expect("preview tracks");
+    assert_eq!(preview.len(), 1);
+    let facts = &preview[0].facts;
+    assert_eq!(facts.tags, vec!["Deep", "Peak", "Airy", "Zzz"]);
+    assert_eq!(facts.types, vec!["M", "P", "E"]);
+    assert_eq!(facts.source_ids, vec!["sp:sp-1", "sc:sc-1", "yt:yt-1"]);
+    assert_eq!(facts.key.as_deref(), Some("8A"));
+    assert_eq!(facts.bpm, Some(128.0));
+    assert_eq!(facts.energy, Some(6.0));
+
+    // Export side: the same track through the device API.
+    let bp = music_hub::backpacks::create_backpack(&app.pool, uid, "Parity")
+        .await
+        .expect("create backpack");
+    music_hub::backpacks::add_source(&app.pool, bp, music_hub::backpacks::SourceRef::Track(t))
+        .await
+        .expect("add source");
+    let resp = app
+        .client()
+        .get(app.url(&format!("/api/hub/backpacks/{bp}/export")))
+        .header("Authorization", format!("Bearer {PARITY_TOKEN}"))
+        .send()
+        .await
+        .expect("export");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&resp.text().await.expect("body"))
+        .expect("export JSON");
+    let tr = &body["tracks"][0];
+
+    assert_eq!(tr["tags"], serde_json::json!(facts.tags));
+    assert_eq!(tr["types"], serde_json::json!(facts.types));
+    assert_eq!(tr["source_ids"], serde_json::json!(facts.source_ids));
+    assert_eq!(tr["key"], serde_json::json!(facts.key));
+    assert_eq!(tr["bpm"], serde_json::json!(facts.bpm));
+    assert_eq!(tr["energy"], serde_json::json!(facts.energy));
+}
+
+/// Acceptance #690: a track without tags has empty tags/types/source_ids in
+/// the preview facts (no marker invented).
+#[tokio::test]
+async fn preview_untagged_track_has_empty_facts() {
+    let app = common::spawn().await;
+    let (uid, _cookie) = app.user_with_password("cp-empty", "1234").await;
+    let t = track(&app, "e2", "Untagged").await;
+
+    let preview = music_hub::preview::top_tagged_tracks(&app.pool, uid, 5)
+        .await
+        .expect("preview tracks");
+    assert!(preview.is_empty(), "untagged track is not a preview row");
+
+    let tags = music_hub::tag_export::resolved_tags_typed(&app.pool, t)
+        .await
+        .expect("tags");
+    assert!(tags.is_empty());
+    assert!(music_hub::tag_export::type_marker(&tags).is_empty());
+}
