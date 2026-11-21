@@ -10,58 +10,6 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
-- feat: **Live-Vorschau beim Bearbeiten einer Vorlage** (#681, Slice C8) — auf
-  `/comment-templates` ist das Body-Feld jeder bearbeitbaren Vorlage jetzt per
-  htmx an `POST /comment-templates/{id}/preview` angebunden
-  (`hx-trigger="keyup changed delay:400ms"`, Ziel `#preview-ct-{id}`): die
-  Vorschau aktualisiert sich beim Tippen ohne Reload und rendert den
-  **gerade eingegebenen** Body, nicht den gespeicherten. Die Seite rendert die
-  Vorschau nach dem Speichern serverseitig mit, der „Vorschau“-Knopf bleibt als
-  echtes POST-Formular (funktioniert ohne JavaScript). Quelle und Renderer sind
-  unverändert die aus C6 (`preview.rs`, `_partials/comment_preview.html`); ein
-  Test vergleicht die Hub- und die Kellner-Route gegen denselben Seed.
-- feat: **Vorschau zeigt Top-3 getaggte Tracks** (#678, Slice C6) — die Vorschau der
-  Comment-Vorlage speist sich jetzt aus den **eigenen getaggten Tracks** des Nutzers
-  statt aus der Union der aktiven Backpacks: bis zu **3** Tracks (`PREVIEW_LIMIT = 3`)
-  in Rangfolge (`tag_count DESC`, `last_tagged_at DESC`, `track_id ASC`), Zähler
-  `3 von N` (N = Anzahl der getaggten Tracks, dedupliziert über `track_id`). Die
-  Routen `POST /kellner/{id}/template/preview` und `POST /comment-templates/{id}/preview`
-  bleiben unverändert. Ohne getaggten Track erscheint der Hinweis „Keine getaggten
-  Tracks — Vorschau nicht möglich.". Daten weiterhin ausschließlich aus dem Hub
-  (`hub_track_resolved_tags` + `hub_tags`, `hub_track_audio`), **kein Netzwerk-Call,
-  kein `MUSIC_API_TOKEN`**; Vorschau == geschriebene Datei (byte-identisch).
-- feat: **Comment-Vorlagen-Vorschau** (#670, Slice C4) — unter der Vorlagen-Auswahl
-  rendert der Hub eine **Vorschau der ersten 10 Tracks** (Union der **aktiven**
-  Backpacks des Geräts, in Export-Reihenfolge, globales Dedup über `track_id`) inkl.
-  `10 von N`, Zeichenzähler `n/512` und sichtbarem Kürzungsmarker (`...`).
-  Neue Routen `POST /kellner/{id}/template/preview` (gewählte Vorlage bzw.
-  Legacy-Freitext) und `POST /comment-templates/{id}/preview` (Bibliotheksseite).
-  Geteilte Kernlogik in `music-hub/src/preview.rs` (`PREVIEW_LIMIT = 10`); Daten
-  ausschließlich aus dem Hub (`hub_track_resolved_tags` + `hub_tags`,
-  `hub_track_audio`), **kein Netzwerk-Call, kein `MUSIC_API_TOKEN`**. Ohne aktives
-  Backpack erscheint ein Hinweis statt einer leeren Liste; Vorschau == geschriebene
-  Datei (byte-identisch).
-- feat: **Geräte referenzieren eine Comment-Vorlage** (#669, Slice C3) — additive
-  Migration `067_hub_device_settings_template_ref.sql` (`comment_template_id`,
-  `ON DELETE SET NULL`). Die Auflösung passiert an einer Stelle und folgt
-  **Vorlage → Legacy-Freitext → `DEFAULT_TEMPLATE`**; eine gelöschte oder nicht
-  mehr sichtbare Vorlage fällt auf die nächste Stufe zurück. `/kellner` bekommt
-  ein Auswahlfeld (eigene / geteilte / System-Vorlagen) plus eine Vorschauzeile;
-  das alte Freitextfeld bleibt als „Eigene Vorlage (alt)“ sichtbar, daneben
-  „Kopie erstellen“. Der Backpack-Export liefert den **aufgelösten** Body plus
-  `comment_template_name` fürs Log. Explizites Abwählen geht über
-  `clear_comment_template: true` (JSON) bzw. die Form-Option `value="0"`; beides
-  zusammen mit einer ID ist ein `400` ohne Write.
-- feat: **Comment-Vorlagen-Bibliothek** (#668, Slice C2) — named, user-managed
-  Comment bodies for the deterministic `comment-template` semantics (#664). New
-  page `/comment-templates` with grouped visibility (System / Meine / Geteilt von
-  anderen), CRUD routes `create` / `rename` / `body` / `share` (toggle) /
-  `duplicate` / `delete`. Bodies are validated against the placeholder whitelist
-  (`{tags}`, `{bpm}`, `{key}`, `{energy}`) on every write; a foreign private
-  template is `404`, a foreign shared or system template is `403` (system is
-  read-only except for admins); a copy belongs to the copier and is editable.
-  Additive migration `066_hub_comment_templates.sql` (table + per-owner NOCASE
-  unique index + system seeds „Standard“ / „Nur Tags“).
 - feat: **Tag hygiene — rename, merge similar tags, suggestions** (#456) — a tag
   detail page (`/tag/{id}`) now surfaces owner-only **suggestions** for similar
   own tags (`tags::similar_tags`; ranked by normalised-equal > small edit
@@ -123,6 +71,88 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   `hub_track_audio`-Read-Model, der hinterherhinkt (gedeckter Backfill, `ORDER BY id`, 7-Tage-TTL
   für „no data"), und zeigte deshalb „—", während die Track-Page den Vault-Wert hatte. Beide
   lesen jetzt denselben `resolved`-Block über `music_api::resolved_audio`.
+
+## [0.34.0] — 2026-11-21
+
+**comment-template** — Comment-Vorlagen sind **benannte, teilbare Objekte im Hub**
+statt eines Freitextfelds pro Gerät: Vorlagen anlegen (privat oder geteilt), für 10
+Tracks sofort das Ergebnis sehen und einem Kellner zuweisen (ADR-085).
+
+### Added
+
+- feat: **Live-Vorschau beim Bearbeiten einer Vorlage** (#681, Slice C8) — auf
+  `/comment-templates` ist das Body-Feld jeder bearbeitbaren Vorlage jetzt per
+  htmx an `POST /comment-templates/{id}/preview` angebunden
+  (`hx-trigger="keyup changed delay:400ms"`, Ziel `#preview-ct-{id}`): die
+  Vorschau aktualisiert sich beim Tippen ohne Reload und rendert den
+  **gerade eingegebenen** Body, nicht den gespeicherten. Die Seite rendert die
+  Vorschau nach dem Speichern serverseitig mit, der „Vorschau“-Knopf bleibt als
+  echtes POST-Formular (funktioniert ohne JavaScript). Quelle und Renderer sind
+  unverändert die aus C6 (`preview.rs`, `_partials/comment_preview.html`); ein
+  Test vergleicht die Hub- und die Kellner-Route gegen denselben Seed.
+- feat: **Vorschau zeigt Top-3 getaggte Tracks** (#678, Slice C6) — die Vorschau der
+  Comment-Vorlage speist sich jetzt aus den **eigenen getaggten Tracks** des Nutzers
+  statt aus der Union der aktiven Backpacks: bis zu **3** Tracks (`PREVIEW_LIMIT = 3`)
+  in Rangfolge (`tag_count DESC`, `last_tagged_at DESC`, `track_id ASC`), Zähler
+  `3 von N` (N = Anzahl der getaggten Tracks, dedupliziert über `track_id`). Die
+  Routen `POST /kellner/{id}/template/preview` und `POST /comment-templates/{id}/preview`
+  bleiben unverändert. Ohne getaggten Track erscheint der Hinweis „Keine getaggten
+  Tracks — Vorschau nicht möglich.". Daten weiterhin ausschließlich aus dem Hub
+  (`hub_track_resolved_tags` + `hub_tags`, `hub_track_audio`), **kein Netzwerk-Call,
+  kein `MUSIC_API_TOKEN`**; Vorschau == geschriebene Datei (byte-identisch).
+- feat: **Comment-Vorlagen-Vorschau** (#670, Slice C4) — unter der Vorlagen-Auswahl
+  rendert der Hub eine **Vorschau der ersten 10 Tracks** (Union der **aktiven**
+  Backpacks des Geräts, in Export-Reihenfolge, globales Dedup über `track_id`) inkl.
+  `10 von N`, Zeichenzähler `n/512` und sichtbarem Kürzungsmarker (`...`).
+  Neue Routen `POST /kellner/{id}/template/preview` (gewählte Vorlage bzw.
+  Legacy-Freitext) und `POST /comment-templates/{id}/preview` (Bibliotheksseite).
+  Geteilte Kernlogik in `music-hub/src/preview.rs` (`PREVIEW_LIMIT = 10`); Daten
+  ausschließlich aus dem Hub (`hub_track_resolved_tags` + `hub_tags`,
+  `hub_track_audio`), **kein Netzwerk-Call, kein `MUSIC_API_TOKEN`**. Ohne aktives
+  Backpack erscheint ein Hinweis statt einer leeren Liste; Vorschau == geschriebene
+  Datei (byte-identisch).
+- feat: **Geräte referenzieren eine Comment-Vorlage** (#669, Slice C3) — additive
+  Migration `067_hub_device_settings_template_ref.sql` (`comment_template_id`,
+  `ON DELETE SET NULL`). Die Auflösung passiert an einer Stelle und folgt
+  **Vorlage → Legacy-Freitext → `DEFAULT_TEMPLATE`**; eine gelöschte oder nicht
+  mehr sichtbare Vorlage fällt auf die nächste Stufe zurück. `/kellner` bekommt
+  ein Auswahlfeld (eigene / geteilte / System-Vorlagen) plus eine Vorschauzeile;
+  das alte Freitextfeld bleibt als „Eigene Vorlage (alt)“ sichtbar, daneben
+  „Kopie erstellen“. Der Backpack-Export liefert den **aufgelösten** Body plus
+  `comment_template_name` fürs Log. Explizites Abwählen geht über
+  `clear_comment_template: true` (JSON) bzw. die Form-Option `value="0"`; beides
+  zusammen mit einer ID ist ein `400` ohne Write.
+- feat: **Comment-Vorlagen-Bibliothek** (#668, Slice C2) — named, user-managed
+  Comment bodies for the deterministic `comment-template` semantics (#664). New
+  page `/comment-templates` with grouped visibility (System / Meine / Geteilt von
+  anderen), CRUD routes `create` / `rename` / `body` / `share` (toggle) /
+  `duplicate` / `delete`. Bodies are validated against the placeholder whitelist
+  (`{tags}`, `{bpm}`, `{key}`, `{energy}`) on every write; a foreign private
+  template is `404`, a foreign shared or system template is `403` (system is
+  read-only except for admins); a copy belongs to the copier and is editable.
+  Additive migration `066_hub_comment_templates.sql` (table + per-owner NOCASE
+  unique index + system seeds „Standard“ / „Nur Tags“).
+
+### Changed
+
+- changed: **Geteilte Crate `comment-template`** (#664, Slice C1) — die
+  Render-/Validierungs-Semantik (Platzhalter-Whitelist, `DEFAULT_TEMPLATE`,
+  Token-/Comment-Deckel, Slugging, Fallback) lebt jetzt **einmal** in der Crate
+  `comment-template/`; Hub (Validierung) und kellner (Schreiben) benutzen sie.
+  Verhaltensneutraler Move, Golden-Fixture als Vertrag. **No migration.**
+- changed: **Desktop-Dichte** (#679, Slice C7) — `main` auf `max-width: 80rem`
+  zentriert, Formularfelder auf `32rem` gedeckelt, Karten-Grids begrenzt; `/kellner`
+  ab `64rem` zweispaltig (links Einstellungen, rechts Vorschau), `/comment-templates`
+  ab `64rem` kompakte Zeilen statt Karten. Nur CSS-in-`<style>` + minimale
+  Markup-Wrapper, **kein externes CSS**; mobil gestapelt.
+
+### Fixed
+
+- fix: **Hub-Deploy entpackt `comment-template`** (#676) — `continuous-deploy.sh`
+  entpackte per `git archive FETCH_HEAD music-hub` nur das Hub-Subtree; seit #664
+  die Pfad-Dependency `comment-template = { path = "../comment-template" }` fehlte
+  → Build scheiterte, Deploy hing. Jetzt wird die Schwester-Crate zusätzlich
+  entpackt, fail-closed wie die anderen Schritte.
 
 ## [0.33.0] — 2026-11-20
 
