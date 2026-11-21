@@ -84,6 +84,24 @@ const shots = [
     width: 390,
     height: 844,
   },
+  {
+    name: "hub-comment-templates-desktop.png",
+    url: "/comment-templates",
+    width: 1280,
+    height: 900,
+  },
+  {
+    name: "hub-kellner-template-desktop.png",
+    url: "/kellner",
+    width: 1280,
+    height: 900,
+  },
+  {
+    name: "hub-kellner-template-mobile.png",
+    url: "/kellner",
+    width: 390,
+    height: 844,
+  },
 ];
 
 (async () => {
