@@ -1,0 +1,243 @@
+{
+  "render": [
+    {
+      "name": "empty_template_falls_back_to_default",
+      "template": "   ",
+      "facts": {
+        "tags": [
+          "Techno"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "Techno"
+    },
+    {
+      "name": "empty_tag_list_keeps_bpm",
+      "template": "{tags} {bpm} {key} {energy}",
+      "facts": {
+        "tags": [],
+        "bpm": 120,
+        "key": null,
+        "energy": null
+      },
+      "expected": "BPM-120"
+    },
+    {
+      "name": "missing_bpm_key_energy",
+      "template": "{tags} {bpm} {key} {energy}",
+      "facts": {
+        "tags": [
+          "Techno"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "Techno"
+    },
+    {
+      "name": "tag_with_space_is_slugged",
+      "template": "{tags} {bpm} {key} {energy}",
+      "facts": {
+        "tags": [
+          "Hard Techno"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "Hard-Techno"
+    },
+    {
+      "name": "long_token_capped_at_48_with_ellipsis",
+      "template": "{tags} {bpm} {key} {energy}",
+      "facts": {
+        "tags": [
+          "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx..."
+    },
+    {
+      "name": "comment_over_512_capped_with_ellipsis",
+      "template": "{tags} x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x ",
+      "facts": {
+        "tags": [
+          "Techno"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "Techno x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x ..."
+    },
+    {
+      "name": "unknown_placeholder_falls_back_to_default",
+      "template": "{title} {tags}",
+      "facts": {
+        "tags": [
+          "Techno"
+        ],
+        "bpm": 128,
+        "key": null,
+        "energy": null
+      },
+      "expected": "Techno BPM-128"
+    },
+    {
+      "name": "double_brace_falls_back_to_default",
+      "template": "{{tags}}",
+      "facts": {
+        "tags": [
+          "Techno"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "Techno"
+    },
+    {
+      "name": "all_placeholders_render_one_token_each",
+      "template": "{tags} {bpm} {key} {energy}",
+      "facts": {
+        "tags": [
+          "Techno"
+        ],
+        "bpm": 128,
+        "key": "8A",
+        "energy": 7
+      },
+      "expected": "Techno BPM-128 KEY-8A ENERGY-7"
+    },
+    {
+      "name": "fractional_bpm",
+      "template": "{tags} {bpm} {key} {energy}",
+      "facts": {
+        "tags": [],
+        "bpm": 127.5,
+        "key": null,
+        "energy": null
+      },
+      "expected": "BPM-127.5"
+    },
+    {
+      "name": "separator_with_empty_placeholders",
+      "template": "{tags} | {bpm} | {key} | {energy}",
+      "facts": {
+        "tags": [
+          "Techno"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "Techno"
+    },
+    {
+      "name": "unicode_tag_slugs_to_empty",
+      "template": "{tags} {bpm} {key} {energy}",
+      "facts": {
+        "tags": [
+          "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": ""
+    }
+  ],
+  "validate": [
+    {
+      "name": "default",
+      "template": "{tags} {bpm} {key} {energy}",
+      "ok": true
+    },
+    {
+      "name": "single",
+      "template": "{tags}",
+      "ok": true
+    },
+    {
+      "name": "subset",
+      "template": "{bpm} {key} {energy}",
+      "ok": true
+    },
+    {
+      "name": "literal_plus_placeholder",
+      "template": "tags: {tags}",
+      "ok": true
+    },
+    {
+      "name": "empty",
+      "template": "",
+      "ok": true
+    },
+    {
+      "name": "whitespace",
+      "template": "   ",
+      "ok": true
+    },
+    {
+      "name": "double_open",
+      "template": "{{",
+      "ok": true
+    },
+    {
+      "name": "double_brace_tags",
+      "template": "{{tags}}",
+      "ok": true
+    },
+    {
+      "name": "double_brace_mid",
+      "template": "a {{ b",
+      "ok": true
+    },
+    {
+      "name": "triple_wrapped",
+      "template": "{{{tags}}}",
+      "ok": true
+    },
+    {
+      "name": "close_only",
+      "template": "}",
+      "ok": true
+    },
+    {
+      "name": "unclosed_open",
+      "template": "{tags",
+      "ok": true
+    },
+    {
+      "name": "no_braces",
+      "template": "no braces",
+      "ok": true
+    },
+    {
+      "name": "unknown_title",
+      "template": "{title}",
+      "ok": false,
+      "error_contains": [
+        "{title}",
+        "{tags}",
+        "{bpm}",
+        "{key}",
+        "{energy}"
+      ]
+    },
+    {
+      "name": "unknown_after_valid",
+      "template": "{tags} {artist}",
+      "ok": false,
+      "error_contains": [
+        "{artist}"
+      ]
+    }
+  ]
+}
