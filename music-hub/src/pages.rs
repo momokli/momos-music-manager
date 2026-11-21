@@ -5001,9 +5001,10 @@ struct BackpacksPage {
 }
 
 /// GET `/backpacks` (#332): read-only overview of the caller's backpacks, each
-/// with its source count, live track count (unclamped resolve) and labelled
-/// sources. No session -> `/login`. Reads the flash set by the mutating
-/// handlers (#328) from the `hub_flash` cookie.
+/// with its source count, materialised track count (read from
+/// `hub_backpack_item_tracks`, #682) and labelled sources. No session ->
+/// `/login`. Reads the flash set by the mutating handlers (#328) from the
+/// `hub_flash` cookie.
 async fn backpacks_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "backpacks").await else {
         return Redirect::to("/login").into_response();
