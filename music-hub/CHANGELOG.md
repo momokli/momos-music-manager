@@ -10,6 +10,16 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Live-Vorschau beim Bearbeiten einer Vorlage** (#681, Slice C8) — auf
+  `/comment-templates` ist das Body-Feld jeder bearbeitbaren Vorlage jetzt per
+  htmx an `POST /comment-templates/{id}/preview` angebunden
+  (`hx-trigger="keyup changed delay:400ms"`, Ziel `#preview-ct-{id}`): die
+  Vorschau aktualisiert sich beim Tippen ohne Reload und rendert den
+  **gerade eingegebenen** Body, nicht den gespeicherten. Die Seite rendert die
+  Vorschau nach dem Speichern serverseitig mit, der „Vorschau“-Knopf bleibt als
+  echtes POST-Formular (funktioniert ohne JavaScript). Quelle und Renderer sind
+  unverändert die aus C6 (`preview.rs`, `_partials/comment_preview.html`); ein
+  Test vergleicht die Hub- und die Kellner-Route gegen denselben Seed.
 - feat: **Vorschau zeigt Top-3 getaggte Tracks** (#678, Slice C6) — die Vorschau der
   Comment-Vorlage speist sich jetzt aus den **eigenen getaggten Tracks** des Nutzers
   statt aus der Union der aktiven Backpacks: bis zu **3** Tracks (`PREVIEW_LIMIT = 3`)

@@ -161,6 +161,9 @@ music-hub/
 │   ├── web.rs             auth, sessions, dashboard, /me/playlists, /track/{id}, /
 │   ├── pages.rs           ALL other HTML pages: /search /overlap /tags /groups
 │   │                      /collectives /digging /sql /admin /settings /user /playlist
+│   │                      /comment-templates (CRUD + live preview)
+│   ├── comment_templates.rs  /comment-templates storage + visibility rules
+│   ├── preview.rs         shared Comment preview (top tagged tracks, partial)
 │   ├── ui.rs              shared nav (crate::ui::nav) + shell bits
 │   ├── db/                connect + migrate; db/testing.rs = Playwright/test seeds
 │   ├── spotify.rs         OAuth client + sync

@@ -38,6 +38,8 @@
         <p><code>{{ c.body }}</code></p>
         {% if c.editable %}
         {% include "comment_template_fields.html" %}
+        {% else %}
+        <div id="preview-ct-{{ c.id }}" class="hub-preview">{{ c.preview|safe }}</div>
         {% endif %}
         <form method="post" action="/comment-templates/{{ c.id }}/duplicate" style="display: inline">
             <button type="submit" class="secondary">Kopie anlegen</button>
@@ -86,6 +88,7 @@
             <button type="submit" class="secondary">Kopie anlegen</button>
         </form>
         {% include "_partials/comment_preview_trigger.html" %}
+        <div id="preview-ct-{{ c.id }}" class="hub-preview">{{ c.preview|safe }}</div>
     </article>
     {% endfor %}
 </div>

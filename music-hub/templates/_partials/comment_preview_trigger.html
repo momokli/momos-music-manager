@@ -1,13 +1,15 @@
-{# htmx comment-template preview trigger + target (issue #670). Expects `c` in
-   scope (one template card). #}
-<button
-    type="button"
-    class="secondary outline"
-    hx-post="/comment-templates/{{ c.id }}/preview"
-    hx-trigger="click"
-    hx-target="#preview-ct-{{ c.id }}"
-    hx-swap="innerHTML"
->
-    Vorschau
-</button>
-<div id="preview-ct-{{ c.id }}" class="hub-preview"></div>
+{# Comment-template preview trigger (issue #670; no-JS fallback #681). Expects
+   `c` in scope (one template card). The surrounding form makes the button work
+   without JavaScript; htmx upgrades it to an in-place fragment swap. #}
+<form method="post" action="/comment-templates/{{ c.id }}/preview" style="display: inline">
+    <button
+        type="submit"
+        class="secondary outline"
+        hx-post="/comment-templates/{{ c.id }}/preview"
+        hx-trigger="click"
+        hx-target="#preview-ct-{{ c.id }}"
+        hx-swap="innerHTML"
+    >
+        Vorschau
+    </button>
+</form>

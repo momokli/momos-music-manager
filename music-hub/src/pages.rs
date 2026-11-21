@@ -5447,6 +5447,9 @@ struct CommentTemplateCard {
     owner_slug: String,
     is_shared: bool,
     editable: bool,
+    /// Server-side rendered preview fragment (#681), so the preview is visible
+    /// immediately after the post-save redirect instead of only after a click.
+    preview: String,
 }
 
 #[derive(Template)]
@@ -5478,6 +5481,14 @@ struct CommentTemplateBodyForm {
     body: String,
 }
 
+/// htmx live-preview form (#681): the body currently typed into the input.
+/// Absent for the no-JS `Vorschau` button, which falls back to the stored body.
+#[derive(Deserialize, Default)]
+struct CommentTemplatePreviewForm {
+    #[serde(default)]
+    body: Option<String>,
+}
+
 /// GET `/comment-templates` (#668): the caller's own templates, foreign shared
 /// ones and the system templates, grouped. No session -> `/login`.
 async fn comment_templates_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
@@ -5497,10 +5508,23 @@ async fn comment_templates_page(State(st): State<AppState>, headers: HeaderMap) 
         }
     };
 
+    // The preview source is the caller's top tagged tracks (#678). Load it once
+    // per page and render each template body against the same rows (#681).
+    let preview_total = crate::preview::count_tagged_tracks(&st.pool, nav.id)
+        .await
+        .unwrap_or(0);
+    let preview_tracks =
+        crate::preview::top_tagged_tracks(&st.pool, nav.id, crate::preview::PREVIEW_LIMIT)
+            .await
+            .unwrap_or_default();
+
     let mut system = Vec::new();
     let mut mine = Vec::new();
     let mut shared = Vec::new();
     for v in views {
+        let preview = crate::preview::build_from(&preview_tracks, preview_total, &v.body)
+            .render()
+            .unwrap_or_default();
         let card = CommentTemplateCard {
             id: v.id,
             name: v.name,
@@ -5508,6 +5532,7 @@ async fn comment_templates_page(State(st): State<AppState>, headers: HeaderMap) 
             owner_slug: v.owner_slug,
             is_shared: v.is_shared,
             editable: v.editable,
+            preview,
         };
         if v.is_system {
             system.push(card);
@@ -5674,6 +5699,7 @@ async fn comment_template_preview(
     State(st): State<AppState>,
     Path(id): Path<i64>,
     headers: HeaderMap,
+    Form(f): Form<CommentTemplatePreviewForm>,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "comment-templates").await else {
         return Redirect::to("/login").into_response();
@@ -5683,7 +5709,10 @@ async fn comment_template_preview(
         _ => return not_found("Vorlage nicht gefunden."),
     };
 
-    match crate::preview::comment_preview(&st.pool, nav.id, &tpl.body).await {
+    // Live typing wins over the stored body; the no-JS button posts no body.
+    let body = f.body.as_deref().unwrap_or(&tpl.body);
+
+    match crate::preview::comment_preview(&st.pool, nav.id, body).await {
         Ok(p) => render(&p),
         Err(e) => {
             tracing::warn!("comment template preview failed for user {}: {e:#}", nav.id);

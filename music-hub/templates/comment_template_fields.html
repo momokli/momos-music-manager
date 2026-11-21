@@ -20,9 +20,16 @@
         aria-label="Body"
         size="40"
         required
+        hx-post="/comment-templates/{{ c.id }}/preview"
+        hx-trigger="keyup changed delay:400ms"
+        hx-target="#preview-ct-{{ c.id }}"
+        hx-swap="innerHTML"
     />
     <button type="submit">Body speichern</button>
 </form>
+
+{# Live preview (#681): server-rendered on load, updated by htmx while typing. #}
+<div id="preview-ct-{{ c.id }}" class="hub-preview">{{ c.preview|safe }}</div>
 
 <form method="post" action="/comment-templates/{{ c.id }}/share" style="display: inline">
     {% if c.is_shared %}
