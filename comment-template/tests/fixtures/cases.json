@@ -14,6 +14,175 @@
       "expected": "Techno"
     },
     {
+      "name": "default_types_and_tags",
+      "template": "",
+      "facts": {
+        "types": [
+          "M",
+          "G",
+          "P",
+          "E"
+        ],
+        "tags": [
+          "Hard Techno",
+          "Euphoric"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "[MGPE] Hard-Techno Euphoric"
+    },
+    {
+      "name": "types_token_bracket_wrapped",
+      "template": "{types}",
+      "facts": {
+        "types": [
+          "M",
+          "G",
+          "P",
+          "E"
+        ],
+        "tags": [],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "[MGPE]"
+    },
+    {
+      "name": "types_filter_invalid_entries",
+      "template": "{types}",
+      "facts": {
+        "types": [
+          "M",
+          "",
+          "x y",
+          "M2"
+        ],
+        "tags": [],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "[MM2]"
+    },
+    {
+      "name": "empty_types_drops_token_no_double_space",
+      "template": "{types} {tags}",
+      "facts": {
+        "types": [],
+        "tags": [
+          "Techno"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "Techno"
+    },
+    {
+      "name": "source_ids_space_joined_without_slugging",
+      "template": "{source_ids}",
+      "facts": {
+        "tags": [],
+        "source_ids": [
+          "sp:abc",
+          "sc:def"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "sp:abc sc:def"
+    },
+    {
+      "name": "empty_source_ids_drops_token",
+      "template": "{source_ids} {tags}",
+      "facts": {
+        "tags": [
+          "Techno"
+        ],
+        "source_ids": [
+          "",
+          "  "
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "Techno"
+    },
+    {
+      "name": "tags_keep_input_order",
+      "template": "{tags}",
+      "facts": {
+        "tags": [
+          "zebra",
+          "Alpha"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "zebra Alpha"
+    },
+    {
+      "name": "tags_dedup_keeps_first",
+      "template": "{tags}",
+      "facts": {
+        "tags": [
+          "a",
+          "A"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "a"
+    },
+    {
+      "name": "tags_slugged_with_single_space",
+      "template": "{tags}",
+      "facts": {
+        "tags": [
+          "Hard Techno",
+          "Euphoric"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "Hard-Techno Euphoric"
+    },
+    {
+      "name": "tags_umlaut_transliteration",
+      "template": "{tags}",
+      "facts": {
+        "tags": [
+          "Zu späßen",
+          "Füße"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "Zu-spaessen Fuesse"
+    },
+    {
+      "name": "tags_umlaut_punctuation",
+      "template": "{tags}",
+      "facts": {
+        "tags": [
+          "Röck & Roll"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "Roeck-Roll"
+    },
+    {
       "name": "empty_tag_list_keeps_bpm",
       "template": "{tags} {bpm} {key} {energy}",
       "facts": {
@@ -38,34 +207,54 @@
       "expected": "Techno"
     },
     {
-      "name": "tag_with_space_is_slugged",
-      "template": "{tags} {bpm} {key} {energy}",
+      "name": "bpm_rounds_up_half",
+      "template": "{bpm}",
       "facts": {
-        "tags": [
-          "Hard Techno"
-        ],
-        "bpm": null,
+        "tags": [],
+        "bpm": 128.5,
         "key": null,
         "energy": null
       },
-      "expected": "Hard-Techno"
+      "expected": "BPM-129"
     },
     {
-      "name": "long_token_capped_at_48_with_ellipsis",
-      "template": "{tags} {bpm} {key} {energy}",
+      "name": "bpm_rounds_high_fraction",
+      "template": "{bpm}",
       "facts": {
-        "tags": [
-          "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-        ],
-        "bpm": null,
+        "tags": [],
+        "bpm": 147.963,
         "key": null,
         "energy": null
       },
-      "expected": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx..."
+      "expected": "BPM-148"
     },
     {
-      "name": "comment_over_512_capped_with_ellipsis",
-      "template": "{tags} x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x ",
+      "name": "bpm_integral",
+      "template": "{bpm}",
+      "facts": {
+        "tags": [],
+        "bpm": 128.0,
+        "key": null,
+        "energy": null
+      },
+      "expected": "BPM-128"
+    },
+    {
+      "name": "key_and_energy_opt_in",
+      "template": "{tags} {bpm} {key} {energy}",
+      "facts": {
+        "tags": [
+          "Techno"
+        ],
+        "bpm": 128,
+        "key": "8A",
+        "energy": 7
+      },
+      "expected": "Techno BPM-128 KEY-8A ENERGY-7"
+    },
+    {
+      "name": "separator_with_empty_placeholders",
+      "template": "{tags} | {bpm} | {key} | {energy}",
       "facts": {
         "tags": [
           "Techno"
@@ -74,7 +263,7 @@
         "key": null,
         "energy": null
       },
-      "expected": "Techno x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x ..."
+      "expected": "Techno"
     },
     {
       "name": "unknown_placeholder_falls_back_to_default",
@@ -87,7 +276,7 @@
         "key": null,
         "energy": null
       },
-      "expected": "Techno BPM-128"
+      "expected": "Techno"
     },
     {
       "name": "double_brace_falls_back_to_default",
@@ -103,32 +292,134 @@
       "expected": "Techno"
     },
     {
-      "name": "all_placeholders_render_one_token_each",
-      "template": "{tags} {bpm} {key} {energy}",
+      "name": "forty_ten_char_tags_fit",
+      "template": "{types} {tags}",
       "facts": {
+        "types": [],
         "tags": [
-          "Techno"
+          "0000000000",
+          "0000000001",
+          "0000000002",
+          "0000000003",
+          "0000000004",
+          "0000000005",
+          "0000000006",
+          "0000000007",
+          "0000000008",
+          "0000000009",
+          "0000000010",
+          "0000000011",
+          "0000000012",
+          "0000000013",
+          "0000000014",
+          "0000000015",
+          "0000000016",
+          "0000000017",
+          "0000000018",
+          "0000000019",
+          "0000000020",
+          "0000000021",
+          "0000000022",
+          "0000000023",
+          "0000000024",
+          "0000000025",
+          "0000000026",
+          "0000000027",
+          "0000000028",
+          "0000000029",
+          "0000000030",
+          "0000000031",
+          "0000000032",
+          "0000000033",
+          "0000000034",
+          "0000000035",
+          "0000000036",
+          "0000000037",
+          "0000000038",
+          "0000000039"
         ],
-        "bpm": 128,
-        "key": "8A",
-        "energy": 7
-      },
-      "expected": "Techno BPM-128 KEY-8A ENERGY-7"
-    },
-    {
-      "name": "fractional_bpm",
-      "template": "{tags} {bpm} {key} {energy}",
-      "facts": {
-        "tags": [],
-        "bpm": 127.5,
+        "bpm": null,
         "key": null,
         "energy": null
       },
-      "expected": "BPM-127.5"
+      "expected": "0000000000 0000000001 0000000002 0000000003 0000000004 0000000005 0000000006 0000000007 0000000008 0000000009 0000000010 0000000011 0000000012 0000000013 0000000014 0000000015 0000000016 0000000017 0000000018 0000000019 0000000020 0000000021 0000000022 0000000023 0000000024 0000000025 0000000026 0000000027 0000000028 0000000029 0000000030 0000000031 0000000032 0000000033 0000000034 0000000035 0000000036 0000000037 0000000038 0000000039"
     },
     {
-      "name": "separator_with_empty_placeholders",
-      "template": "{tags} | {bpm} | {key} | {energy}",
+      "name": "sixty_tags_drop_whole_tags_from_back",
+      "template": "{types} {tags}",
+      "facts": {
+        "types": [],
+        "tags": [
+          "0000000000",
+          "0000000001",
+          "0000000002",
+          "0000000003",
+          "0000000004",
+          "0000000005",
+          "0000000006",
+          "0000000007",
+          "0000000008",
+          "0000000009",
+          "0000000010",
+          "0000000011",
+          "0000000012",
+          "0000000013",
+          "0000000014",
+          "0000000015",
+          "0000000016",
+          "0000000017",
+          "0000000018",
+          "0000000019",
+          "0000000020",
+          "0000000021",
+          "0000000022",
+          "0000000023",
+          "0000000024",
+          "0000000025",
+          "0000000026",
+          "0000000027",
+          "0000000028",
+          "0000000029",
+          "0000000030",
+          "0000000031",
+          "0000000032",
+          "0000000033",
+          "0000000034",
+          "0000000035",
+          "0000000036",
+          "0000000037",
+          "0000000038",
+          "0000000039",
+          "0000000040",
+          "0000000041",
+          "0000000042",
+          "0000000043",
+          "0000000044",
+          "0000000045",
+          "0000000046",
+          "0000000047",
+          "0000000048",
+          "0000000049",
+          "0000000050",
+          "0000000051",
+          "0000000052",
+          "0000000053",
+          "0000000054",
+          "0000000055",
+          "0000000056",
+          "0000000057",
+          "0000000058",
+          "0000000059"
+        ],
+        "bpm": null,
+        "key": null,
+        "energy": null
+      },
+      "expected": "0000000000 0000000001 0000000002 0000000003 0000000004 0000000005 0000000006 0000000007 0000000008 0000000009 0000000010 0000000011 0000000012 0000000013 0000000014 0000000015 0000000016 0000000017 0000000018 0000000019 0000000020 0000000021 0000000022 0000000023 0000000024 0000000025 0000000026 0000000027 0000000028 0000000029 0000000030 0000000031 0000000032 0000000033 0000000034 0000000035 0000000036 0000000037 0000000038 0000000039 0000000040 0000000041 0000000042 0000000043 0000000044 0000000045"
+    },
+    {
+      "name": "literal_over_budget_truncated",
+      "template": "{tags} x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x ",
       "facts": {
         "tags": [
           "Techno"
@@ -137,7 +428,7 @@
         "key": null,
         "energy": null
       },
-      "expected": "Techno"
+      "expected": "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x..."
     },
     {
       "name": "unicode_tag_slugs_to_empty",
@@ -156,12 +447,27 @@
   "validate": [
     {
       "name": "default",
+      "template": "{types} {tags}",
+      "ok": true
+    },
+    {
+      "name": "old_default_still_valid",
       "template": "{tags} {bpm} {key} {energy}",
       "ok": true
     },
     {
-      "name": "single",
-      "template": "{tags}",
+      "name": "types",
+      "template": "{types}",
+      "ok": true
+    },
+    {
+      "name": "source_ids",
+      "template": "{source_ids}",
+      "ok": true
+    },
+    {
+      "name": "all",
+      "template": "{types} {tags} {source_ids} {bpm} {key} {energy}",
       "ok": true
     },
     {
@@ -225,7 +531,9 @@
       "ok": false,
       "error_contains": [
         "{title}",
+        "{types}",
         "{tags}",
+        "{source_ids}",
         "{bpm}",
         "{key}",
         "{energy}"

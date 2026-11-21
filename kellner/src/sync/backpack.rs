@@ -286,7 +286,9 @@ fn retag_existing(
         let rendered = render(
             &dev.comment_template,
             &TrackFacts {
+                types: vec![],
                 tags: dev.tags.clone(),
+                source_ids: vec![],
                 bpm: dev.bpm,
                 key: dev.key.clone(),
                 energy: dev.energy,
@@ -456,7 +458,9 @@ async fn fetch_and_tag(
     let rendered = render(
         &dev.comment_template,
         &TrackFacts {
+            types: vec![],
             tags: dev.tags.clone(),
+            source_ids: vec![],
             bpm: dev.bpm,
             key: dev.key.clone(),
             energy: dev.energy,

@@ -429,7 +429,7 @@ async fn fetches_missing_then_is_idempotent() {
     let m = &sj["backpack_membership"]["DEABC1234567"];
     assert!(m.is_object(), "membership recorded: {sj}");
     assert_eq!(m["backpack_id"], 1);
-    assert_eq!(m["tags_rendered"], "a, b BPM-128 KEY-A-Minor ENERGY-7");
+    assert_eq!(m["tags_rendered"], "b a BPM-128 KEY-A-Minor ENERGY-7");
     assert!(m["content_hash"].as_str().unwrap().len() == 64);
     assert!(m["path"].as_str().unwrap().ends_with("DEABC1234567.flac"));
 
@@ -438,7 +438,7 @@ async fn fetches_missing_then_is_idempotent() {
         use lofty::prelude::*;
         let tagged = lofty::read_from_path(coll.join("DEABC1234567.flac")).unwrap();
         let comment = tagged.primary_tag().and_then(|t| t.comment()).map(|c| c.to_string());
-        assert_eq!(comment.as_deref(), Some("a, b BPM-128 KEY-A-Minor ENERGY-7"));
+        assert_eq!(comment.as_deref(), Some("b a BPM-128 KEY-A-Minor ENERGY-7"));
     }
 
     // (b) second run: nothing ordered or fetched.

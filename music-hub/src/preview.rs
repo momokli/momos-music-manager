@@ -146,7 +146,9 @@ pub async fn top_tagged_tracks(
         out.push(PreviewTrack {
             title,
             facts: TrackFacts {
+                types: vec![],
                 tags,
+                source_ids: vec![],
                 bpm,
                 key,
                 energy,
@@ -201,7 +203,9 @@ mod tests {
         PreviewTrack {
             title: title.to_string(),
             facts: TrackFacts {
+                types: vec![],
                 tags: tags.iter().map(|s| s.to_string()).collect(),
+                source_ids: vec![],
                 bpm,
                 key: None,
                 energy: None,

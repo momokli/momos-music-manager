@@ -1,5 +1,5 @@
 //! Deterministische Comment-Template-Semantik: Platzhalter-Expansion, Slugging,
-//! Whitespace-Normalisierung, Deckel (48/512) und Validierung.
+//! Whitespace-Normalisierung, Deckel (512) und Validierung.
 //!
 //! Vertrag zwischen `music-hub` (Vorschau/Validierung) und `kellner` (Schreiben).
 //!
@@ -18,14 +18,12 @@
 //! entweder die Hub-400-Prüfung oder das kellner-Render-Ergebnis ändern.
 
 /// The placeholders a template may reference (mirrors the hub whitelist).
-pub const ALLOWED_PLACEHOLDERS: [&str; 4] = ["tags", "bpm", "key", "energy"];
+pub const ALLOWED_PLACEHOLDERS: [&str; 6] =
+    ["types", "tags", "source_ids", "bpm", "key", "energy"];
 
-/// Applied when the template is missing/empty (issue #653). It reproduces the
-/// old fixed render in the new token form.
-pub const DEFAULT_TEMPLATE: &str = "{tags} {bpm} {key} {energy}";
+/// Applied when the template is missing/empty (issue #689).
+pub const DEFAULT_TEMPLATE: &str = "{types} {tags}";
 
-/// Longest single placeholder value, in Unicode scalar values.
-pub const TOKEN_MAX_CHARS: usize = 48;
 /// Longest whole Comment, in Unicode scalar values (ID3/MP4 comment fields).
 pub const COMMENT_MAX_CHARS: usize = 512;
 /// Truncation marker (ASCII, so it never itself forces a re-cut).
@@ -34,7 +32,10 @@ const ELLIPSIS: &str = "...";
 /// Faktum eines Tracks, das ein Template referenzieren kann.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TrackFacts {
+    /// Typ-Kürzel in Hub-Reihenfolge, z.B. `["M", "G", "P", "E"]`.
+    pub types: Vec<String>,
     pub tags: Vec<String>,
+    pub source_ids: Vec<String>,
     pub bpm: Option<f64>,
     pub key: Option<String>,
     pub energy: Option<f64>,
@@ -50,8 +51,26 @@ fn fmt_num(v: f64) -> String {
     }
 }
 
+/// German umlaut transliteration, applied before slugging (issue #689).
+fn transliterate(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'ä' => out.push_str("ae"),
+            'ö' => out.push_str("oe"),
+            'ü' => out.push_str("ue"),
+            'ß' => out.push_str("ss"),
+            'Ä' => out.push_str("Ae"),
+            'Ö' => out.push_str("Oe"),
+            'Ü' => out.push_str("Ue"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Slug one tag/key name: every character outside `[A-Za-z0-9_-]` becomes `-`,
-/// runs of `-` collapse to one and the edges are trimmed. Non-ASCII (e.g. `ä`)
+/// runs of `-` collapse to one and the edges are trimmed. Non-ASCII (e.g. `é`)
 /// therefore becomes `-`. An all-separator input slugs to `""`.
 fn slug(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -68,17 +87,53 @@ fn slug(s: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-/// Render the `{tags}` token: trim → slug → drop empties → sort → dedup, joined
-/// with `", "`.
+/// Render the `{tags}` token: trim → umlaut transliteration → slug → drop
+/// empties → case-insensitive dedup keeping the **first** occurrence → join
+/// with a single space. No sorting, no commas (issue #689).
 fn render_tags(tags: &[String]) -> String {
-    let mut names: Vec<String> = tags
+    let mut names: Vec<String> = Vec::with_capacity(tags.len());
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for tag in tags {
+        let slugged = slug(&transliterate(tag.trim()));
+        if slugged.is_empty() {
+            continue;
+        }
+        // Dedup is case-insensitive; the first spelling wins.
+        if seen.insert(slugged.to_lowercase()) {
+            names.push(slugged);
+        }
+    }
+    names.join(" ")
+}
+
+/// Render the `{types}` token: keep entries that are 1–2 ASCII alphanumeric
+/// characters, concatenate them without separators and wrap the result in
+/// literal brackets (`[MGPE]`). No valid entry → the whole token disappears.
+fn render_types(types: &[String]) -> String {
+    let mut out = String::new();
+    for t in types {
+        let t = t.trim();
+        let len = t.chars().count();
+        if (1..=2).contains(&len) && t.chars().all(|c| c.is_ascii_alphanumeric()) {
+            out.push_str(t);
+        }
+    }
+    if out.is_empty() {
+        String::new()
+    } else {
+        format!("[{out}]")
+    }
+}
+
+/// Render the `{source_ids}` token: drop empty/blank entries, join the rest with
+/// a single space. Deliberately **not** slugged (ids contain `:`).
+fn render_source_ids(source_ids: &[String]) -> String {
+    source_ids
         .iter()
-        .map(|t| slug(t.trim()))
-        .filter(|t| !t.is_empty())
-        .collect();
-    names.sort();
-    names.dedup();
-    names.join(", ")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Truncate `s` to `max` Unicode scalar values, ending on `...` when cut.
@@ -136,14 +191,49 @@ fn first_unknown_placeholder(template: &str) -> Option<String> {
     None
 }
 
+/// Expand `template` against `facts`, using `tags` as the tag source.
+fn expand(template: &str, facts: &TrackFacts, tags: &[String]) -> String {
+    let types_token = render_types(&facts.types);
+    let tags_token = render_tags(tags);
+    let source_ids_token = render_source_ids(&facts.source_ids);
+    let bpm_token = facts
+        .bpm
+        .map(|b| format!("BPM-{}", b.round() as i64))
+        .unwrap_or_default();
+    let key_token = facts
+        .key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(|k| format!("KEY-{}", slug(k)))
+        .unwrap_or_default();
+    let energy_token = facts
+        .energy
+        .map(|e| format!("ENERGY-{}", fmt_num(e)))
+        .unwrap_or_default();
+
+    template
+        .replace("{types}", &types_token)
+        .replace("{tags}", &tags_token)
+        .replace("{source_ids}", &source_ids_token)
+        .replace("{bpm}", &bpm_token)
+        .replace("{key}", &key_token)
+        .replace("{energy}", &energy_token)
+}
+
 /// Render the Comment text for one track from a device template.
 ///
-/// Placeholders `{tags}`, `{bpm}`, `{key}` and `{energy}` expand to space-free
-/// tokens (tag names are slugged + `", "`-joined); an unknown placeholder, or a
+/// Placeholders `{types}`, `{tags}`, `{source_ids}`, `{bpm}`, `{key}` and
+/// `{energy}` expand to space-free tokens; an unknown placeholder, or a
 /// missing/blank template, warns on stderr and falls back to
-/// [`DEFAULT_TEMPLATE`]. Empty placeholders disappear, leftover whitespace and
-/// `|` are normalised, each token is capped at [`TOKEN_MAX_CHARS`] and the whole
-/// Comment at [`COMMENT_MAX_CHARS`] with a `...` marker. Deterministic.
+/// [`DEFAULT_TEMPLATE`]. Empty placeholders disappear and leftover whitespace
+/// and `|` are normalised.
+///
+/// Budget instead of a per-token cut (issue #689): if the expanded Comment
+/// exceeds [`COMMENT_MAX_CHARS`], whole tags are dropped from the **back** of
+/// the tag list and the template is re-expanded — never a half tag. Only when
+/// the text is still too long without any tags is it cut at
+/// [`COMMENT_MAX_CHARS`] with a `...` marker. Deterministic.
 ///
 /// Uses the kellner scan ([`first_unknown_placeholder`]) for the fallback, **not**
 /// [`validate`]; see the crate-level note on the two predicates.
@@ -160,44 +250,21 @@ pub fn render(template: &str, facts: &TrackFacts) -> String {
         trimmed
     };
 
-    let tags_token = truncate_chars(&render_tags(&facts.tags), TOKEN_MAX_CHARS);
-    let bpm_token = truncate_chars(
-        &facts
-            .bpm
-            .map(|b| format!("BPM-{}", fmt_num(b)))
-            .unwrap_or_default(),
-        TOKEN_MAX_CHARS,
-    );
-    let key_token = truncate_chars(
-        &facts
-            .key
-            .as_deref()
-            .map(str::trim)
-            .filter(|k| !k.is_empty())
-            .map(|k| format!("KEY-{}", slug(k)))
-            .unwrap_or_default(),
-        TOKEN_MAX_CHARS,
-    );
-    let energy_token = truncate_chars(
-        &facts
-            .energy
-            .map(|e| format!("ENERGY-{}", fmt_num(e)))
-            .unwrap_or_default(),
-        TOKEN_MAX_CHARS,
-    );
-
-    let expanded = tpl
-        .replace("{tags}", &tags_token)
-        .replace("{bpm}", &bpm_token)
-        .replace("{key}", &key_token)
-        .replace("{energy}", &energy_token);
-
-    truncate_chars(&normalise_whitespace(&expanded), COMMENT_MAX_CHARS)
+    let mut tags = facts.tags.clone();
+    loop {
+        let rendered = normalise_whitespace(&expand(tpl, facts, &tags));
+        if rendered.chars().count() <= COMMENT_MAX_CHARS {
+            return rendered;
+        }
+        if tags.pop().is_none() {
+            return truncate_chars(&rendered, COMMENT_MAX_CHARS);
+        }
+    }
 }
 
 /// The comma-separated, brace-wrapped list of allowed placeholders, e.g.
-/// `{tags}, {bpm}, {key}, {energy}` — used in the rejection message so a client
-/// can correct the template without guessing.
+/// `{types}, {tags}, …` — used in the rejection message so a client can correct
+/// the template without guessing.
 fn allowed_placeholder_list() -> String {
     ALLOWED_PLACEHOLDERS
         .iter()
@@ -216,7 +283,7 @@ fn allowed_placeholder_list() -> String {
 /// error names the offending token and lists the allowed placeholders:
 ///
 /// ```text
-/// unknown placeholder {title} (allowed: {tags}, {bpm}, {key}, {energy})
+/// unknown placeholder {title} (allowed: {types}, {tags}, {source_ids}, {bpm}, {key}, {energy})
 /// ```
 ///
 /// This is the *hub* semantics and is intentionally **not** shared with
@@ -256,33 +323,107 @@ pub fn validate(template: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn render_default(tags: &[&str], bpm: Option<f64>, key: Option<&str>, energy: Option<f64>) -> String {
-        let owned: Vec<String> = tags.iter().map(|s| s.to_string()).collect();
-        render(
-            DEFAULT_TEMPLATE,
-            &TrackFacts {
-                tags: owned,
-                bpm,
-                key: key.map(str::to_string),
-                energy,
-            },
-        )
+    fn owned(tags: &[&str]) -> Vec<String> {
+        tags.iter().map(|s| s.to_string()).collect()
     }
 
-    fn facts(tags: &[&str], bpm: Option<f64>, key: Option<&str>, energy: Option<f64>) -> TrackFacts {
+    /// Facts with only the classic fields set; `types`/`source_ids` empty.
+    fn facts(
+        tags: &[&str],
+        bpm: Option<f64>,
+        key: Option<&str>,
+        energy: Option<f64>,
+    ) -> TrackFacts {
         TrackFacts {
-            tags: tags.iter().map(|s| s.to_string()).collect(),
+            types: vec![],
+            tags: owned(tags),
+            source_ids: vec![],
             bpm,
             key: key.map(str::to_string),
             energy,
         }
     }
 
+    fn render_default(
+        tags: &[&str],
+        bpm: Option<f64>,
+        key: Option<&str>,
+        energy: Option<f64>,
+    ) -> String {
+        render(DEFAULT_TEMPLATE, &facts(tags, bpm, key, energy))
+    }
+
+    // ---- {types} ---------------------------------------------------------
+
     #[test]
-    fn bpm_renders_as_token() {
-        assert_eq!(render_default(&[], Some(128.0), None, None), "BPM-128");
-        // Fractional values keep their decimals, still one token.
-        assert_eq!(render_default(&[], Some(127.5), None, None), "BPM-127.5");
+    fn default_template_renders_types_then_tags() {
+        let f = TrackFacts {
+            types: owned(&["M", "G", "P", "E"]),
+            tags: owned(&["Hard Techno", "Euphoric"]),
+            ..Default::default()
+        };
+        assert_eq!(render("", &f), "[MGPE] Hard-Techno Euphoric");
+        assert_eq!(render(DEFAULT_TEMPLATE, &f), "[MGPE] Hard-Techno Euphoric");
+    }
+
+    #[test]
+    fn types_token_is_bracket_wrapped_and_concatenated() {
+        let f = TrackFacts {
+            types: owned(&["M", "G", "P", "E"]),
+            ..Default::default()
+        };
+        assert_eq!(render("{types}", &f), "[MGPE]");
+    }
+
+    #[test]
+    fn types_filters_invalid_entries() {
+        let f = TrackFacts {
+            types: owned(&["M", "", "x y", "M2"]),
+            ..Default::default()
+        };
+        assert_eq!(render("{types}", &f), "[MM2]");
+    }
+
+    #[test]
+    fn empty_types_drops_token_without_double_space() {
+        let f = facts(&["Techno"], None, None, None);
+        assert_eq!(render(DEFAULT_TEMPLATE, &f), "Techno");
+        assert_eq!(render("{types} | {tags}", &f), "Techno");
+        assert_eq!(
+            render("{types} {tags}", &TrackFacts::default()),
+            "",
+            "both empty -> empty comment, no brackets"
+        );
+    }
+
+    // ---- {tags} ----------------------------------------------------------
+
+    #[test]
+    fn tags_keep_input_order_and_join_with_one_space() {
+        assert_eq!(render_default(&["zebra", "Alpha"], None, None, None), "zebra Alpha");
+        assert_eq!(
+            render_default(&["Hard Techno", "Euphoric"], None, None, None),
+            "Hard-Techno Euphoric"
+        );
+    }
+
+    #[test]
+    fn tags_dedup_keeps_first_occurrence() {
+        assert_eq!(render_default(&["a", "A"], None, None, None), "a");
+        assert_eq!(
+            render_default(&["b", "a", "b", "  c "], None, None, None),
+            "b a c"
+        );
+    }
+
+    #[test]
+    fn tags_transliterate_umlauts_before_slugging() {
+        assert_eq!(
+            render_default(&["Zu späßen", "Füße"], None, None, None),
+            "Zu-spaessen Fuesse"
+        );
+        assert_eq!(render_default(&["Röck & Roll"], None, None, None), "Roeck-Roll");
+        assert_eq!(render_default(&["Ä Ö Ü ß"], None, None, None), "Ae-Oe-Ue-ss");
     }
 
     #[test]
@@ -291,36 +432,65 @@ mod tests {
     }
 
     #[test]
-    fn tags_are_trimmed_sorted_deduped_and_slugged() {
+    fn empty_or_all_separator_tags_are_dropped() {
         assert_eq!(
-            render_default(
-                &["b", "a", "b", "  c ", "Hard Techno", "a-b"],
-                None,
-                None,
-                None
-            ),
-            "Hard-Techno, a, a-b, b, c"
+            render("{tags} {bpm}", &facts(&["  ", "!!!"], Some(120.0), None, None)),
+            "BPM-120"
         );
     }
 
+    // ---- {source_ids} ----------------------------------------------------
+
     #[test]
-    fn all_placeholders_render_one_token_each() {
+    fn source_ids_are_space_joined_without_slugging() {
+        let f = TrackFacts {
+            source_ids: owned(&["sp:abc", "sc:def"]),
+            ..Default::default()
+        };
+        assert_eq!(render("{source_ids}", &f), "sp:abc sc:def");
+    }
+
+    #[test]
+    fn empty_source_ids_drop_the_token() {
+        let f = TrackFacts {
+            tags: owned(&["Techno"]),
+            source_ids: owned(&["", "  "]),
+            ..Default::default()
+        };
+        assert_eq!(render("{source_ids} {tags}", &f), "Techno");
+    }
+
+    // ---- {bpm} -----------------------------------------------------------
+
+    #[test]
+    fn bpm_rounds_to_integer() {
+        assert_eq!(render("{bpm}", &facts(&[], Some(147.963), None, None)), "BPM-148");
+        assert_eq!(render("{bpm}", &facts(&[], Some(128.5), None, None)), "BPM-129");
+        assert_eq!(render("{bpm}", &facts(&[], Some(128.0), None, None)), "BPM-128");
+    }
+
+    // ---- {key} / {energy} (opt-in, unchanged) ----------------------------
+
+    #[test]
+    fn key_and_energy_stay_optional_tokens() {
         assert_eq!(
-            render_default(&["Techno"], Some(128.0), Some("8A"), Some(7.0)),
+            render(
+                "{tags} {bpm} {key} {energy}",
+                &facts(&["Techno"], Some(128.0), Some("8A"), Some(7.0))
+            ),
             "Techno BPM-128 KEY-8A ENERGY-7"
+        );
+        assert_eq!(
+            render("{key} / {bpm}", &facts(&[], Some(127.5), Some("A-Minor"), None)),
+            "KEY-A-Minor / BPM-128"
         );
     }
 
     #[test]
     fn empty_placeholders_leave_no_double_space_or_hanging_separator() {
-        // Only tags present -> a single space between tokens, edges trimmed.
-        assert_eq!(render_default(&["Techno"], None, None, None), "Techno");
-        // Explicit separators: empty {key} leaves neither `|  |` nor trailing `|`.
-        let owned = facts(&["Techno"], None, None, None);
-        assert_eq!(
-            render("{tags} | {bpm} | {key} | {energy}", &owned),
-            "Techno"
-        );
+        let f = facts(&["Techno"], None, None, None);
+        assert_eq!(render("{tags}", &f), "Techno");
+        assert_eq!(render("{tags} | {bpm} | {key} | {energy}", &f), "Techno");
         assert_eq!(
             render(
                 "{tags} | {bpm} | {key} | {energy}",
@@ -328,115 +498,103 @@ mod tests {
             ),
             "Techno | BPM-128 | ENERGY-7"
         );
-        // No tags and nothing else -> empty Comment.
-        assert_eq!(render_default(&[], None, None, None), "");
+        assert_eq!(render("{tags}", &TrackFacts::default()), "");
+    }
+
+    // ---- Budget ----------------------------------------------------------
+
+    #[test]
+    fn forty_ten_char_tags_fit_within_the_budget() {
+        let tags: Vec<String> = (0..40).map(|i| format!("{i:0>10}")).collect();
+        let f = TrackFacts {
+            tags,
+            ..Default::default()
+        };
+        let out = render(DEFAULT_TEMPLATE, &f);
+        assert_eq!(out.chars().count(), 40 * 10 + 39, "all tags kept");
+        assert!(out.chars().count() <= COMMENT_MAX_CHARS);
+        assert!(!out.ends_with("..."));
     }
 
     #[test]
-    fn empty_tag_list_drops_the_placeholder() {
-        assert_eq!(render_default(&["  "], Some(120.0), None, None), "BPM-120");
+    fn sixty_tags_drop_whole_tags_from_the_back() {
+        let tags: Vec<String> = (0..60).map(|i| format!("{i:0>10}")).collect();
+        let f = TrackFacts {
+            tags,
+            ..Default::default()
+        };
+        let out = render(DEFAULT_TEMPLATE, &f);
+        assert!(out.chars().count() <= COMMENT_MAX_CHARS, "within budget");
+        assert!(!out.contains("..."), "budget trim is not a cut: {out:?}");
+        // 46 ten-char tags joined by single spaces = 505 chars.
+        let kept: Vec<&str> = out.split(' ').collect();
+        assert_eq!(kept.len(), 46);
+        for (i, token) in kept.iter().enumerate() {
+            assert_eq!(token.len(), 10, "no half tag: {token:?}");
+            assert_eq!(*token, format!("{i:0>10}"));
+        }
     }
 
     #[test]
-    fn long_tag_is_capped_at_48_chars_with_ellipsis() {
-        let long = "x".repeat(80);
-        let out = render_default(&[&long], None, None, None);
-        assert_eq!(out.chars().count(), 48, "capped at the token ceiling");
-        assert!(out.ends_with("..."), "truncated with the marker: {out:?}");
-        assert!(out.starts_with(&"x".repeat(45)));
+    fn literal_over_budget_is_truncated_with_ellipsis() {
+        let tpl = format!("{{tags}} {}", "x ".repeat(300));
+        let out = render(&tpl, &facts(&["Techno"], None, None, None));
+        assert_eq!(out.chars().count(), COMMENT_MAX_CHARS);
+        assert!(out.ends_with("..."));
     }
 
     #[test]
     fn truncation_counts_unicode_scalars_not_bytes() {
-        // `é` is 2 bytes; the cap is measured in scalar values, never mid-char.
-        let long = "é".repeat(80);
-        let out = truncate_chars(&long, 48);
-        assert_eq!(out.chars().count(), 48, "48 scalar values");
+        let long = "é".repeat(600);
+        let out = truncate_chars(&long, COMMENT_MAX_CHARS);
+        assert_eq!(out.chars().count(), COMMENT_MAX_CHARS);
         assert!(out.ends_with("..."));
         assert!(out.is_char_boundary(out.len()), "cut on a char boundary");
-        assert_eq!(out.chars().take(45).collect::<String>(), "é".repeat(45));
+        assert_eq!(
+            out.chars().take(COMMENT_MAX_CHARS - 3).collect::<String>(),
+            "é".repeat(COMMENT_MAX_CHARS - 3)
+        );
     }
 
-    #[test]
-    fn comment_over_512_chars_is_capped_with_ellipsis() {
-        // A template of literal filler pushes the whole Comment past 512 — each
-        // `{tags}` token is itself capped at 48, but literal text is not.
-        let tpl = format!("{{tags}} {}", "x ".repeat(300));
-        let out = render(&tpl, &facts(&["Techno"], None, None, None));
-        assert_eq!(out.chars().count(), 512, "capped at the comment ceiling");
-        assert!(out.ends_with("..."), "truncated with the marker");
-    }
+    // ---- Fallback / determinism -----------------------------------------
 
     #[test]
     fn unknown_placeholder_falls_back_to_default() {
         let out = render("{title} {tags}", &facts(&["Techno"], Some(128.0), None, None));
-        assert_eq!(out, "Techno BPM-128", "default template applied");
+        assert_eq!(out, "Techno", "default template applied");
     }
 
     #[test]
     fn empty_template_falls_back_to_default() {
-        assert_eq!(
-            render("   ", &facts(&["Techno"], None, None, None)),
-            "Techno"
-        );
+        assert_eq!(render("   ", &facts(&["Techno"], None, None, None)), "Techno");
     }
 
     #[test]
-    fn umlauts_and_punctuation_become_dashes() {
-        // Documented rule: everything outside [A-Za-z0-9_-] -> `-`, runs collapse.
-        assert_eq!(render_default(&["Röck & Roll"], None, None, None), "R-ck-Roll");
-        assert_eq!(
-            render_default(&["!!!"], None, None, None),
-            "",
-            "all separators -> dropped"
-        );
-    }
-
-    #[test]
-    fn render_is_deterministic_and_order_independent() {
-        let tags = vec!["zeta".into(), "alpha".into(), "mu".into()];
-        let first = render(
-            DEFAULT_TEMPLATE,
-            &TrackFacts {
-                tags: tags.clone(),
-                bpm: Some(120.0),
-                key: Some("C-Major".into()),
-                energy: Some(5.0),
-            },
-        );
+    fn render_is_deterministic() {
+        let f = TrackFacts {
+            types: owned(&["M", "G"]),
+            tags: owned(&["zeta", "alpha"]),
+            source_ids: owned(&["sp:1"]),
+            bpm: Some(120.0),
+            key: Some("C-Major".into()),
+            energy: Some(5.0),
+        };
+        let first = render("{types} {tags} {source_ids} {bpm} {key} {energy}", &f);
         for _ in 0..10 {
             assert_eq!(
-                render(
-                    DEFAULT_TEMPLATE,
-                    &TrackFacts {
-                        tags: tags.clone(),
-                        bpm: Some(120.0),
-                        key: Some("C-Major".into()),
-                        energy: Some(5.0),
-                    }
-                ),
+                render("{types} {tags} {source_ids} {bpm} {key} {energy}", &f),
                 first
             );
         }
-        let reordered = vec!["mu".into(), "zeta".into(), "alpha".into()];
-        assert_eq!(
-            render(
-                DEFAULT_TEMPLATE,
-                &TrackFacts {
-                    tags: reordered,
-                    bpm: Some(120.0),
-                    key: Some("C-Major".into()),
-                    energy: Some(5.0),
-                }
-            ),
-            first
-        );
     }
+
+    // ---- validate (unchanged semantics) ---------------------------------
 
     #[test]
     fn validate_accepts_allowed_placeholders() {
         for t in [
             DEFAULT_TEMPLATE,
+            "{types} {tags} {source_ids} {bpm} {key} {energy}",
             "{tags}",
             "{bpm} {key} {energy}",
             "tags: {tags}",
@@ -451,14 +609,14 @@ mod tests {
     fn validate_rejects_unknown_placeholder() {
         let err = validate("{title}").unwrap_err();
         assert!(err.contains("{title}"), "names the token: {err}");
-        assert!(err.contains("{tags}"), "lists allowed: {err}");
+        assert!(err.contains("{types}"), "lists allowed: {err}");
+        assert!(err.contains("{source_ids}"), "lists allowed: {err}");
         assert!(err.contains("{energy}"), "lists allowed: {err}");
         assert!(validate("{tags} {artist}").is_err());
     }
 
     #[test]
     fn validate_accepts_double_brace_edge_cases() {
-        // `{{` is an escaped literal, never an unknown placeholder.
         for t in [
             "{{",
             "{{tags}}",
@@ -470,7 +628,6 @@ mod tests {
         ] {
             assert!(validate(t).is_ok(), "{t:?} should be accepted");
         }
-        // A `{name}` after an escaped pair is still validated.
         assert!(validate("{{ {nope}").is_err());
     }
 
@@ -478,13 +635,12 @@ mod tests {
     fn validate_error_message_is_byte_stable() {
         assert_eq!(
             validate("{title}").unwrap_err(),
-            "unknown placeholder {title} (allowed: {tags}, {bpm}, {key}, {energy})"
+            "unknown placeholder {title} (allowed: {types}, {tags}, {source_ids}, {bpm}, {key}, {energy})"
         );
     }
 
     #[test]
     fn render_and_validate_diverge_on_double_brace() {
-        // Documented divergence: validate accepts `{{tags}}`, render falls back.
         assert!(validate("{{tags}}").is_ok());
         assert_eq!(render("{{tags}}", &facts(&["Techno"], None, None, None)), "Techno");
     }
