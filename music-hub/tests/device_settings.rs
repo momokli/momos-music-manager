@@ -733,3 +733,139 @@ async fn kellner_form_saves_template_and_page_previews() {
     assert!(html.contains("Vorschau: {key} / {bpm}"), "preview line: {html}");
 }
 
+/// #669: an explicit clear drops the reference; the resolution chain then falls
+/// back to the legacy free text and, when that is blank too, to the default.
+#[tokio::test]
+async fn resolution_after_clear_falls_back_to_legacy() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("ds-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+    let tid = template(&app, Some(uid), "Mix-Key", "{key} / {bpm}", false).await;
+
+    // Set the reference and a distinct legacy free text; the template body wins.
+    let (status, v) = put(
+        &app,
+        &cookie,
+        did,
+        json!({ "comment_template_id": tid, "comment_template": "legacy {tags}" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["comment_template_id"], tid);
+    assert_eq!(
+        music_hub::device_settings::resolve_effective_comment(&app.pool, did, uid).await,
+        "{key} / {bpm}"
+    );
+
+    // Explicit clear via the JSON API.
+    let (status, v) = put(&app, &cookie, did, json!({ "clear_comment_template": true })).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert!(v["comment_template_id"].is_null(), "reference cleared: {v}");
+
+    // The DB column is really NULL, not merely masked in the response.
+    let stored: Option<i64> =
+        sqlx::query_scalar("SELECT comment_template_id FROM hub_device_settings WHERE device_id = ?1")
+            .bind(did)
+            .fetch_one(&app.pool)
+            .await
+            .expect("row");
+    assert_eq!(stored, None, "column NULL after clear");
+
+    // Resolution falls back to the legacy free text (export + preview use it).
+    assert_eq!(
+        music_hub::device_settings::resolve_effective_comment(&app.pool, did, uid).await,
+        "legacy {tags}",
+        "legacy free text after clear"
+    );
+
+    // And with a blank legacy free text it falls through to the default.
+    let (status, _) = put(&app, &cookie, did, json!({ "comment_template": "" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        music_hub::device_settings::resolve_effective_comment(&app.pool, did, uid).await,
+        music_hub::device_settings::DEFAULT_TEMPLATE,
+        "default when both are empty"
+    );
+}
+
+/// #669: the form's `-- keine --` option posts `comment_template_id=0`, which
+/// clears the stored reference (previously it kept the COALESCE value).
+#[tokio::test]
+async fn kellner_form_clears_reference_with_zero_option() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("ds-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+    let tid = template(&app, Some(uid), "Mix-Key", "{key} / {bpm}", false).await;
+
+    // First select the template via the form.
+    let resp = app
+        .client()
+        .post(app.url(&format!("/kellner/{did}/settings")))
+        .header("Cookie", &cookie)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("preferred_format=flac&comment_template_id={tid}"))
+        .send()
+        .await
+        .expect("form post");
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let (_, v) = get(&app, Some(&cookie), did).await;
+    assert_eq!(v["comment_template_id"], tid);
+
+    // Now post the "none" option (value="0") -> the reference must be dropped.
+    let resp = app
+        .client()
+        .post(app.url(&format!("/kellner/{did}/settings")))
+        .header("Cookie", &cookie)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("preferred_format=flac&comment_template_id=0")
+        .send()
+        .await
+        .expect("form post");
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/kellner"),
+        "success redirect"
+    );
+
+    let (_, v) = get(&app, Some(&cookie), did).await;
+    assert!(v["comment_template_id"].is_null(), "reference cleared: {v}");
+    let stored: Option<i64> =
+        sqlx::query_scalar("SELECT comment_template_id FROM hub_device_settings WHERE device_id = ?1")
+            .bind(did)
+            .fetch_one(&app.pool)
+            .await
+            .expect("row");
+    assert_eq!(stored, None, "column NULL after form clear");
+}
+
+/// #669: sending `clear_comment_template` together with a set id is contradictory
+/// and rejected with 400; nothing is written.
+#[tokio::test]
+async fn clear_and_id_conflict_is_400_without_write() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("ds-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+    let tid = template(&app, Some(uid), "Mix-Key", "{key} / {bpm}", false).await;
+
+    // Seed a reference so we can prove the rejected write left it untouched.
+    let (status, _) = put(&app, &cookie, did, json!({ "comment_template_id": tid })).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, v) = put(
+        &app,
+        &cookie,
+        did,
+        json!({ "clear_comment_template": true, "comment_template_id": tid }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert!(
+        v["error"].as_str().unwrap_or_default().contains("conflict"),
+        "names the conflict: {v}"
+    );
+
+    let (_, v) = get(&app, Some(&cookie), did).await;
+    assert_eq!(v["comment_template_id"], tid, "rejected write leaves the ref");
+}
+

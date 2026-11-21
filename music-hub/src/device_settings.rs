@@ -118,6 +118,11 @@ pub struct SettingsBody {
     /// the stored reference unchanged; a set id must be visible to the caller.
     #[serde(default)]
     pub comment_template_id: Option<i64>,
+    /// Explicitly drop the stored `comment_template_id` (#669). Needed because
+    /// JSON `null`/absent cannot be told apart in `Option<i64>`; `true` clears
+    /// the reference (and must not be combined with a set `comment_template_id`).
+    #[serde(default)]
+    pub clear_comment_template: bool,
     #[serde(default)]
     pub active_backpack_ids: Option<Vec<i64>>,
 }
@@ -297,8 +302,14 @@ pub async fn upsert(
 
     let fmt = patch.preferred_format.unwrap_or(cur_fmt);
     let tpl = patch.comment_template.unwrap_or(cur_tpl);
-    // COALESCE semantics: an absent reference leaves the stored one unchanged.
-    let tpl_ref = patch.comment_template_id.or(cur_ref);
+    // `clear_comment_template` wins: an explicit drop sets the reference to NULL.
+    // Otherwise COALESCE semantics: an absent reference leaves the stored one
+    // unchanged (a set id replaces it).
+    let tpl_ref = if patch.clear_comment_template {
+        None
+    } else {
+        patch.comment_template_id.or(cur_ref)
+    };
 
     sqlx::query(
         "INSERT INTO hub_device_settings
@@ -427,8 +438,17 @@ async fn validate_body(
         None => None,
     };
 
+    // `clear` and a set id are contradictory: reject instead of guessing.
+    if body.clear_comment_template && body.comment_template_id.is_some() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "clear_comment_template conflicts with comment_template_id",
+        ));
+    }
+
     // A set reference must be visible to the caller (mine ∪ shared ∪ system); a
-    // foreign private template is rejected exactly like an unknown one.
+    // foreign private template is rejected exactly like an unknown one. A pure
+    // clear (`Some` absent) skips the lookup.
     if let Some(tid) = body.comment_template_id {
         match crate::comment_templates::get_visible(&st.pool, user_id, tid).await {
             Ok(Some(_)) => {}
@@ -470,6 +490,7 @@ async fn validate_body(
         preferred_format: body.preferred_format,
         comment_template,
         comment_template_id: body.comment_template_id,
+        clear_comment_template: body.clear_comment_template,
         active_backpack_ids,
     })
 }
@@ -665,9 +686,13 @@ async fn form_submit(
     };
 
     // Template reference (`#669`): empty = keep current (COALESCE semantics),
-    // otherwise the id must be visible to the caller.
+    // `"0"` = explicit drop (Legacy/Standard), otherwise the id must be visible.
+    let mut clear = false;
     let raw_tid = first(&fields, "comment_template_id").unwrap_or("").trim();
     let tpl_id = if raw_tid.is_empty() {
+        None
+    } else if raw_tid == "0" {
+        clear = true;
         None
     } else {
         match raw_tid.parse::<i64>() {
@@ -729,6 +754,7 @@ async fn form_submit(
         preferred_format: Some(fmt.to_string()),
         comment_template: Some(tpl),
         comment_template_id: tpl_id,
+        clear_comment_template: clear,
         active_backpack_ids: Some(ids),
     };
 

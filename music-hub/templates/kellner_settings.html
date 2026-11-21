@@ -41,7 +41,7 @@
             <label>
                 Vorlage
                 <select name="comment_template_id" aria-label="Kommentar-Vorlage">
-                    <option value=""{% if c.selected_template_id == 0 %} selected{% endif %}>— keine (Legacy/Standard) —</option>
+                    <option value="0"{% if c.selected_template_id == 0 %} selected{% endif %}>— keine (Legacy/Standard) —</option>
                     {% for t in c.comment_templates %}
                     <option value="{{ t.id }}"{% if t.selected %} selected{% endif %}>{{ t.name }}</option>
                     {% endfor %}
