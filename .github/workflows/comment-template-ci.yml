@@ -1,0 +1,45 @@
+name: Comment-Template CI
+
+# CI for the standalone `comment-template` crate (issue #664). It is a separate
+# crate, not a member of the root workspace, so it builds from its own directory.
+
+on:
+  pull_request:
+    paths:
+      - 'comment-template/**'
+      - '.github/workflows/comment-template-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'comment-template/**'
+      - '.github/workflows/comment-template-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: comment-template-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: comment-template
+
+jobs:
+  build-test:
+    name: Build + Test (comment-template)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: comment-template -> target
+          key: comment-template-ci
+      - name: cargo build
+        run: cargo build --locked
+      - name: cargo test
+        run: cargo test --locked
