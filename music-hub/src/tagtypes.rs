@@ -162,6 +162,24 @@ impl TagType {
         }
     }
 
+    /// Single-letter export marker (#690): one letter per type family, the
+    /// five phase types collapsing to `"P"`.
+    pub fn abbrev(self) -> &'static str {
+        match self {
+            TagType::Mood => "M",
+            TagType::Genre => "G",
+            TagType::Vibe => "V",
+            TagType::Phase1
+            | TagType::Phase2
+            | TagType::Phase3
+            | TagType::Phase4
+            | TagType::Phase5 => "P",
+            TagType::Merkmal => "E",
+            TagType::Setlist => "S",
+            TagType::Rumpelkiste => "R",
+        }
+    }
+
     /// Energy rank for PHASE_n types (1..5), else `None`.
     pub fn phase_num(self) -> Option<i64> {
         match self {
@@ -359,6 +377,29 @@ mod tests {
         // PHASE_1..5 share one key.
         assert_eq!(map[&TagType::Phase3], true);
         assert_eq!(map[&TagType::Genre], true);
+    }
+
+    #[test]
+    fn abbrev_covers_all_types_and_collapses_phases() {
+        assert_eq!(TagType::Mood.abbrev(), "M");
+        assert_eq!(TagType::Genre.abbrev(), "G");
+        assert_eq!(TagType::Vibe.abbrev(), "V");
+        assert_eq!(TagType::Merkmal.abbrev(), "E");
+        assert_eq!(TagType::Setlist.abbrev(), "S");
+        assert_eq!(TagType::Rumpelkiste.abbrev(), "R");
+        for p in [
+            TagType::Phase1,
+            TagType::Phase2,
+            TagType::Phase3,
+            TagType::Phase4,
+            TagType::Phase5,
+        ] {
+            assert_eq!(p.abbrev(), "P");
+        }
+        for name in TYPE_NAMES {
+            let ty = TagType::parse(name).unwrap();
+            assert_eq!(ty.abbrev().chars().count(), 1, "{name} must be one letter");
+        }
     }
 
     #[test]

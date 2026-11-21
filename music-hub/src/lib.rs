@@ -63,6 +63,7 @@ pub mod tags;
 pub mod tagsearch;
 pub mod tagtasks;
 pub mod tagtaskui;
+pub mod tag_export;
 pub mod tagtypes;
 pub mod toast;
 pub mod tonie_history;
