@@ -201,7 +201,7 @@ async fn duplicate_creates_owned_editable_copy() {
     let scopy = ct::duplicate(&pool, alice, sys).await.unwrap();
     let srow = ct::get(&pool, scopy).await.unwrap().unwrap();
     assert_eq!(srow.owner_user_id, Some(alice));
-    assert_eq!(srow.body, "{tags} {bpm} {key} {energy}");
+    assert_eq!(srow.body, "{types} {tags}");
 
     // Duplicating the same source twice yields a distinct name.
     let again = ct::duplicate(&pool, alice, sys).await.unwrap();
@@ -277,7 +277,7 @@ async fn migration_seeds_system_and_is_additive() {
     assert_eq!(sys_count, 2, "two system seeds");
     assert_eq!(
         ct::get(&pool, system_id(&pool, "Standard").await).await.unwrap().unwrap().body,
-        "{tags} {bpm} {key} {energy}"
+        "{types} {tags}"
     );
     assert_eq!(
         ct::get(&pool, system_id(&pool, "Nur Tags").await).await.unwrap().unwrap().body,
@@ -311,14 +311,15 @@ async fn migration_runs_on_existing_db() {
         .await
         .expect("connect");
 
-    // Build a migrations dir holding everything except 066.
+    // Build a migrations dir holding everything except 066 (comment templates)
+    // and 069 (its post-066 default body update).
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let old = tempfile::tempdir().expect("old migrations");
     let mut copied = 0;
     for entry in std::fs::read_dir(&src).expect("read migrations") {
         let entry = entry.expect("dir entry");
         let name = entry.file_name().to_string_lossy().to_string();
-        if !name.ends_with(".sql") || name.starts_with("066") {
+        if !name.ends_with(".sql") || name.starts_with("066") || name.starts_with("069") {
             continue;
         }
         std::fs::copy(entry.path(), old.path().join(&name)).expect("copy migration");
@@ -861,7 +862,7 @@ async fn system_seed_is_idempotent_and_deterministic() {
     assert_eq!(sys.len(), 2, "still exactly two system seeds");
     assert_eq!(sys[0].0, "Nur Tags");
     assert_eq!(sys[1].0, "Standard");
-    assert_eq!(sys[1].1, "{tags} {bpm} {key} {energy}");
+    assert_eq!(sys[1].1, "{types} {tags}");
     assert!(
         sys.iter()
             .all(|(_, _, ts)| ts == "2026-01-01T00:00:00+00:00"),
@@ -878,4 +879,70 @@ async fn system_seed_is_idempotent_and_deterministic() {
     .unwrap();
     assert_eq!(alice_rows, 1);
     assert_eq!(count(&pool).await, 3);
+}
+
+/// Migration `069_comment_template_default.sql` (#690): the legacy default body
+/// moves to `{types} {tags}`; the fixed `updated_at` is applied.
+#[tokio::test]
+async fn migration_069_moves_legacy_standard_body() {
+    let (_dir, pool) = setup().await;
+    let id = system_id(&pool, "Standard").await;
+
+    // Simulate a DB seeded before #690 (the migration ran once in `setup`).
+    sqlx::query(
+        "UPDATE hub_comment_templates
+            SET body = '{tags} {bpm} {key} {energy}', updated_at = '2026-05-05T00:00:00+00:00'
+          WHERE id = ?1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(include_str!("../migrations/069_comment_template_default.sql"))
+        .execute(&pool)
+        .await
+        .expect("run migration 069");
+
+    let row = ct::get(&pool, id).await.unwrap().unwrap();
+    assert_eq!(row.body, "{types} {tags}");
+    assert_eq!(row.updated_at, "2026-01-01T00:00:00+00:00");
+}
+
+/// Migration `069` only rewrites the exact legacy default; an edited body (and
+/// its timestamp) is left untouched.
+#[tokio::test]
+async fn migration_069_keeps_edited_standard_body() {
+    let (_dir, pool) = setup().await;
+    let id = system_id(&pool, "Standard").await;
+
+    sqlx::query(
+        "UPDATE hub_comment_templates
+            SET body = '{types} {bpm} {key}', updated_at = '2026-06-06T00:00:00+00:00'
+          WHERE id = ?1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(include_str!("../migrations/069_comment_template_default.sql"))
+        .execute(&pool)
+        .await
+        .expect("run migration 069");
+
+    let row = ct::get(&pool, id).await.unwrap().unwrap();
+    assert_eq!(row.body, "{types} {bpm} {key}", "edited body untouched");
+    assert_eq!(row.updated_at, "2026-06-06T00:00:00+00:00");
+
+    // A user-owned row named `Standard` is never touched either.
+    let alice = insert_user(&pool, "alice").await;
+    let own = ct::create(&pool, alice, "Standard", "{tags}", false)
+        .await
+        .unwrap();
+    sqlx::query(include_str!("../migrations/069_comment_template_default.sql"))
+        .execute(&pool)
+        .await
+        .expect("run migration 069 again");
+    assert_eq!(ct::get(&pool, own).await.unwrap().unwrap().body, "{tags}");
 }

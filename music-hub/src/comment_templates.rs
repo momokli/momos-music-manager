@@ -49,10 +49,8 @@ pub struct TemplateView {
     pub editable: bool,
 }
 
-/// One seed body used by the tests / docs.
-pub const SYSTEM_STANDARD: &str = "Standard";
 /// The default body of the `Standard` system template.
-pub const DEFAULT_TEMPLATE: &str = "{tags} {bpm} {key} {energy}";
+pub const DEFAULT_TEMPLATE: &str = "{types} {tags}";
 
 /// Validate a body against the hub placeholder whitelist, mapping the crate
 /// error into a user-facing message that names the allowed placeholders.
