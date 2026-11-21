@@ -25,7 +25,7 @@
 //! or unknown `device_id` is indistinguishable and yields a `404` (no existence
 //! leak). The JSON/HTML shapes never contain `token_hash` or any token material.
 
-use axum::extract::{Path, RawForm, State};
+use axum::extract::{Form, Path, RawForm, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -58,6 +58,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/kellner", get(page))
         .route("/kellner/{id}/settings", post(form_submit))
+        .route("/kellner/{id}/template/preview", post(template_preview))
         .with_state(state)
 }
 
@@ -526,6 +527,8 @@ struct DeviceCard {
     legacy_comment: String,
     /// The effective comment after the resolution chain (preview, `#669`).
     resolved_comment: String,
+    /// The pre-rendered `_partials/comment_preview.html` fragment (`#670`).
+    preview_html: String,
     /// Selected template id, or `0` when no template is referenced (`#669`).
     selected_template_id: i64,
     comment_templates: Vec<TemplateOption>,
@@ -613,12 +616,19 @@ async fn page(State(st): State<AppState>, headers: HeaderMap) -> Response {
             })
             .collect();
         let resolved_comment = resolve_effective_comment(&st.pool, d.id, nav.id).await;
+        let preview_html = render_preview_fragment(
+            &st.pool,
+            &settings.active_backpack_ids,
+            &resolved_comment,
+        )
+        .await;
         cards.push(DeviceCard {
             id: d.id,
             name: d.name,
             revoked: d.revoked_at.is_some(),
             legacy_comment: settings.comment_template,
             resolved_comment,
+            preview_html,
             selected_template_id: settings.comment_template_id.unwrap_or(0),
             comment_templates,
             formats,
@@ -764,6 +774,92 @@ async fn form_submit(
         Err(e) => {
             tracing::warn!(error = %e, "kellner form: upsert failed");
             flash_redirect("/kellner", "Fehler: Speichern fehlgeschlagen.".to_string())
+        }
+    }
+}
+
+// ── HTTP: comment-template preview (#670) ───────────────────────────────────
+
+/// Render the `_partials/comment_preview.html` fragment for the `/kellner` card
+/// (`#670`). Advisory: a resolve failure yields the empty hint, never a 500.
+async fn render_preview_fragment(pool: &SqlitePool, backpack_ids: &[i64], body: &str) -> String {
+    match crate::preview::comment_preview(pool, backpack_ids, body).await {
+        Ok(p) => p.render().unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(error = %e, "comment preview failed");
+            String::new()
+        }
+    }
+}
+
+/// The htmx preview form: the selected template id (`"0"` = none/legacy) and,
+/// when shown, the legacy free text. Both optional — a bare request falls back
+/// to `DEFAULT_TEMPLATE`.
+#[derive(Debug, Deserialize, Default)]
+struct PreviewForm {
+    #[serde(default)]
+    comment_template_id: Option<String>,
+    #[serde(default)]
+    comment_template: Option<String>,
+}
+
+/// `POST /kellner/{id}/template/preview` (`#670`) — htmx fragment. Web-session
+/// gated; foreign/unknown device → `404`. The rendered body comes from the
+/// **just-submitted** form value (selected template → legacy free text →
+/// [`DEFAULT_TEMPLATE`]), never the stored selection, so the preview tracks the
+/// form. Track source: the device's active backpacks in `position` order.
+async fn template_preview(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<PreviewForm>,
+) -> Response {
+    let Some((user_id, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+
+    let settings = match get_for_device(&st.pool, id, user_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return (StatusCode::NOT_FOUND, "Unbekanntes Gerät").into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "template preview: settings lookup failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Vorschau fehlgeschlagen").into_response();
+        }
+    };
+
+    // Body: the just-selected template wins; an empty/`"0"` id falls back to the
+    // legacy free text of the form and finally to DEFAULT_TEMPLATE.
+    let raw_tid = f
+        .comment_template_id
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let body = if !raw_tid.is_empty() && raw_tid != "0" {
+        let tid = match raw_tid.parse::<i64>() {
+            Ok(t) => t,
+            Err(_) => return (StatusCode::NOT_FOUND, "Vorlage nicht gefunden.").into_response(),
+        };
+        match crate::comment_templates::get_visible(&st.pool, user_id, tid).await {
+            Ok(Some(t)) => t.body,
+            Ok(None) => {
+                return (StatusCode::NOT_FOUND, "Vorlage nicht gefunden.").into_response()
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "template preview: template lookup failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Vorschau fehlgeschlagen")
+                    .into_response();
+            }
+        }
+    } else {
+        pick_comment(None, f.comment_template.as_deref().unwrap_or(""))
+    };
+
+    match crate::preview::comment_preview(&st.pool, &settings.active_backpack_ids, &body).await {
+        Ok(p) => render(&p),
+        Err(e) => {
+            tracing::warn!(error = %e, "template preview: render failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Vorschau fehlgeschlagen").into_response()
         }
     }
 }

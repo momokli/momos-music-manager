@@ -47,6 +47,7 @@ pub mod music_api;
 pub mod music_ops;
 pub mod nowplaying;
 pub mod pages;
+pub mod preview;
 pub mod recommend;
 pub mod scoring;
 pub mod scope;

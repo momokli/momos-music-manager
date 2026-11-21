@@ -1,0 +1,19 @@
+{# htmx comment-template preview fragment (issue #670, slice C4). #}
+{% if empty %}
+<p class="hub-empty">Keine aktiven Backpacks — Vorschau nicht möglich.</p>
+{% else %}
+{% if rows.is_empty() %}
+<p class="hub-muted">Keine Tracks in den aktiven Backpacks.</p>
+{% else %}
+<ul class="hub-preview-list" style="list-style: none; padding: 0; margin: 0">
+    {% for r in rows %}
+    <li style="margin: 0.25rem 0">
+        <strong>{{ r.title }}</strong>
+        <span class="hub-muted">{{ r.comment }}</span>
+        <span class="hub-muted">{{ r.chars }}/{{ max_chars }}</span>
+    </li>
+    {% endfor %}
+</ul>
+<p class="hub-muted">{{ shown }} von {{ total }}</p>
+{% endif %}
+{% endif %}

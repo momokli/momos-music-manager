@@ -47,6 +47,10 @@ pub fn router(state: AppState) -> Router {
             post(comment_template_duplicate),
         )
         .route("/comment-templates/{id}/delete", post(comment_template_delete))
+        .route(
+            "/comment-templates/{id}/preview",
+            post(comment_template_preview),
+        )
         .route("/tags/create", post(tag_create))
         .route("/tags/smart/create", post(smart_tag_create))
         .route("/tags/search", get(tag_search))
@@ -5659,6 +5663,44 @@ async fn comment_template_delete(
     match crate::comment_templates::delete(&st.pool, nav.id, nav.is_admin, id).await {
         Ok(_) => Redirect::to("/comment-templates").into_response(),
         Err(e) => flash_redirect("/comment-templates", format!("Fehler: {e}")),
+    }
+}
+
+/// POST `/comment-templates/{id}/preview` (`#670`) — htmx fragment. Session
+/// required; a template not visible to the caller (foreign private / unknown)
+/// is a `404` (no cross-user leak). Read-only templates (shared / system) are
+/// previewable. Track source: the union of the caller's **active** backpacks
+/// (`hub_backpacks.is_active = 1`), ordered by backpack id.
+async fn comment_template_preview(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "comment-templates").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let tpl = match crate::comment_templates::get_visible(&st.pool, nav.id, id).await {
+        Ok(Some(t)) => t,
+        _ => return not_found("Vorlage nicht gefunden."),
+    };
+    let backpack_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM hub_backpacks WHERE user_id = ?1 AND is_active = 1 ORDER BY id",
+    )
+    .bind(nav.id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
+    match crate::preview::comment_preview(&st.pool, &backpack_ids, &tpl.body).await {
+        Ok(p) => render(&p),
+        Err(e) => {
+            tracing::warn!("comment template preview failed for user {}: {e:#}", nav.id);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Vorschau fehlgeschlagen",
+            )
+                .into_response()
+        }
     }
 }
 
