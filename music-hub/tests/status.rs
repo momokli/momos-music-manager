@@ -44,9 +44,9 @@ async fn status_shape_and_defaults() {
     assert!(data["startedAt"].is_string(), "startedAt stamped by registry");
     assert!(data["uptimeSecs"].is_number());
 
-    // All seven Hub loops are registered and reported.
+    // All eight Hub loops are registered and reported.
     let workers = data["hub"]["workers"].as_array().expect("workers array");
-    assert_eq!(workers.len(), 7, "seven loops reported");
+    assert_eq!(workers.len(), 8, "eight loops reported");
     for w in workers {
         assert!(w["name"].is_string(), "loop name");
         assert!(w["lastWorked"].is_boolean());

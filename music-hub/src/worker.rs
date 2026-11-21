@@ -32,13 +32,19 @@ const PLAYLIST_POLL_DEFAULT_SECS: u64 = 900;
 /// Lower bound for the configurable cadence (#506).
 const PLAYLIST_POLL_MIN_SECS: u64 = 60;
 
-/// The seven Hub-Owned loop names, in report order (issues #353, #503, #506).
+/// Cadence of the backpack content refresh pass (#682): 30 min, like the
+/// curation/tonies loops.
+const BACKPACK_REFRESH_SECS: u64 = 1800;
+
+/// The eight Hub-Owned loop names, in report order (issues #353, #503, #506,
+/// #682).
 ///
 /// The crawl domain is served by two tasks (vault/order refresh + Spotify
 /// touch-cascade); both report under `"crawl"` so the domain is one visible
 /// loop, matching the plan. `"playlists"` is the listing poll that keeps
 /// `hub_playlists.snapshot_id` fresh without a user clicking "Fetch".
-pub const LOOP_NAMES: [&str; 7] = [
+/// `"backpacks"` materialises backpack item content for the view (#682).
+pub const LOOP_NAMES: [&str; 8] = [
     "enrichment",
     "freqblog",
     "spotify",
@@ -46,6 +52,7 @@ pub const LOOP_NAMES: [&str; 7] = [
     "curation",
     "tonies",
     "playlists",
+    "backpacks",
 ];
 
 /// In-memory health registry for the Hub's background loops (issue #353).
@@ -495,6 +502,29 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) -> WorkerHealth {
                     }
                 }
                 tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
+    // Backpack content refresh (#682): materialise each item's resolved tracks
+    // so `/backpacks` can show counts/availability without live resolution or
+    // any music-api call. Idempotent: unchanged sources write nothing.
+    {
+        let pool = pool.clone();
+        let health = health.clone();
+        tokio::spawn(async move {
+            loop {
+                if health.is_paused("backpacks") {
+                    tokio::time::sleep(IDLE_WAIT).await;
+                    continue;
+                }
+                let r = crate::backpacks::refresh_all(&pool).await;
+                if let Err(e) = &r {
+                    tracing::warn!("backpack refresh pass failed: {e}");
+                }
+                let worked = matches!(r, Ok(n) if n > 0);
+                health.record("backpacks", worked, r.err().map(|e| e.to_string()));
+                tokio::time::sleep(Duration::from_secs(BACKPACK_REFRESH_SECS)).await;
             }
         });
     }
@@ -997,13 +1027,15 @@ mod health_tests {
     }
 
     #[test]
-    fn loop_registry_has_seven_including_playlists() {
-        assert_eq!(LOOP_NAMES.len(), 7);
+    fn loop_registry_has_eight_including_playlists_and_backpacks() {
+        assert_eq!(LOOP_NAMES.len(), 8);
         assert!(LOOP_NAMES.contains(&"playlists"));
+        assert!(LOOP_NAMES.contains(&"backpacks"));
         let h = WorkerHealth::new();
         let snap = h.snapshot();
-        assert_eq!(snap.loops.len(), 7);
+        assert_eq!(snap.loops.len(), 8);
         assert!(snap.loops.iter().any(|l| l.name == "playlists"));
+        assert!(snap.loops.iter().any(|l| l.name == "backpacks"));
         // Pausable like every other registered loop (#350).
         assert!(!h.is_paused("playlists"));
         h.set_paused("playlists", true);

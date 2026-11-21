@@ -160,6 +160,13 @@ pub async fn add_source_with_limit(
         .execute(pool)
         .await?;
 
+    // Materialise the new source immediately (#682) so the view and stats are
+    // correct without waiting for the periodic pass. Best-effort: a failure is
+    // only logged — the worker's `refresh_all` heals it on the next run.
+    if let Err(e) = refresh_item_tracks(pool, id).await {
+        tracing::warn!("backpack item {id} refresh after add failed: {e:#}");
+    }
+
     Ok(id)
 }
 
@@ -735,53 +742,91 @@ async fn resolve_with_limit(
     let mut seen: HashSet<ResolvedSource> = HashSet::new();
 
     for item in &items {
-        let (source, tracks) = match item.source_kind.as_str() {
-            "tag" => {
-                let Some(tag_id) = item.source_tag_id else {
-                    continue;
-                };
-                (ResolvedSource::Tag { tag_id }, tracks_for_tag(pool, tag_id).await?)
-            }
-            "playlist" => {
-                let Some(playlist_id) = item.source_playlist_id else {
-                    continue;
-                };
-                (
-                    ResolvedSource::Playlist { playlist_id },
-                    tracks_for_playlist(pool, playlist_id).await?,
-                )
-            }
-            "lens" => {
-                let lens = item.source_lens.clone().unwrap_or_default();
-                let tracks = tracks_for_lens(pool, user_id, &lens).await?;
-                (ResolvedSource::Lens { lens }, tracks)
-            }
-            "track" => {
-                let Some(track_id) = item.source_track_id else {
-                    continue;
-                };
-                (ResolvedSource::Track { track_id }, vec![track_id])
-            }
-            // The DB CHECK forbids any other kind; skip defensively.
-            _ => continue,
+        // Source identity is the *target* (kind + id/lens key): a repeated target
+        // counts once for scoring (and is materialised once, at its first item).
+        let Some(source) = resolved_source_of(item) else {
+            continue;
         };
-
         if !seen.insert(source.clone()) {
             continue;
         }
-        // Per-source cap (#654): truncate this source's *already ordered* id list
-        // after its own ordering, never a global cut. `Some(n)` with `n > 0`
-        // limits; `None`/`<= 0` means unlimited.
-        let mut tracks = tracks;
-        if let Some(n) = item.max_tracks {
-            if n > 0 {
-                tracks.truncate(n as usize);
-            }
-        }
+        let (_, tracks) = tracks_for_item(pool, user_id, item).await?;
         contributions.push((source, item.position, tracks));
     }
 
     Ok(fold_sources(&contributions, limit))
+}
+
+/// The [`ResolvedSource`] identity of one item, or `None` when the item has no
+/// resolvable target (missing source column / unknown kind).
+fn resolved_source_of(item: &BackpackItem) -> Option<ResolvedSource> {
+    match item.source_kind.as_str() {
+        "tag" => item.source_tag_id.map(|tag_id| ResolvedSource::Tag { tag_id }),
+        "playlist" => item
+            .source_playlist_id
+            .map(|playlist_id| ResolvedSource::Playlist { playlist_id }),
+        "lens" => Some(ResolvedSource::Lens {
+            lens: item.source_lens.clone().unwrap_or_default(),
+        }),
+        "track" => item
+            .source_track_id
+            .map(|track_id| ResolvedSource::Track { track_id }),
+        _ => None,
+    }
+}
+
+/// Resolve exactly one item to `(backend_literal, ordered track ids)`.
+///
+/// `backend` is the materialisation literal: `tag` | `playlist` | `track` |
+/// `lens:<key>`. The item's `max_tracks` cap (#654) is applied after that
+/// source's own ordering, exactly like the resolver, so materialised content
+/// stays consistent with [`resolve_unbounded`]. An item with a missing target,
+/// an unknown kind, or an empty source yields `(backend, vec![])` — never an
+/// error.
+async fn tracks_for_item(
+    pool: &SqlitePool,
+    user_id: i64,
+    item: &BackpackItem,
+) -> Result<(String, Vec<i64>)> {
+    let (backend, mut tracks): (String, Vec<i64>) = match item.source_kind.as_str() {
+        "tag" => (
+            "tag".to_string(),
+            match item.source_tag_id {
+                Some(tag_id) => tracks_for_tag(pool, tag_id).await?,
+                None => vec![],
+            },
+        ),
+        "playlist" => (
+            "playlist".to_string(),
+            match item.source_playlist_id {
+                Some(playlist_id) => tracks_for_playlist(pool, playlist_id).await?,
+                None => vec![],
+            },
+        ),
+        "lens" => {
+            let key = item.source_lens.clone().unwrap_or_default();
+            (
+                format!("lens:{key}"),
+                tracks_for_lens(pool, user_id, &key).await?,
+            )
+        }
+        "track" => (
+            "track".to_string(),
+            match item.source_track_id {
+                Some(track_id) => vec![track_id],
+                None => vec![],
+            },
+        ),
+        // The DB CHECK forbids any other kind; degrade defensively.
+        other => (other.to_string(), vec![]),
+    };
+
+    if let Some(n) = item.max_tracks
+        && n > 0
+    {
+        tracks.truncate(n as usize);
+    }
+    Ok((backend, tracks))
 }
 
 /// Fold per-source contributions into scored, deduped, ordered, limited tracks.
@@ -900,6 +945,180 @@ async fn tracks_for_lens(pool: &SqlitePool, user_id: i64, lens: &str) -> Result<
         }
     };
     Ok(ids)
+}
+
+// ── Materialisation (#682) ────────────────────────────────────────────────────
+
+/// Recompute the materialised track set of one backpack item (#682).
+///
+/// Resolves exactly this item ([`tracks_for_item`]) and writes the result into
+/// `hub_backpack_item_tracks` in a transaction. **Idempotent:** when the desired
+/// `(track_id, backend)` set equals the stored set, nothing is written (no
+/// delete/insert, `computed_at` stays) and `0` is returned. Otherwise the item's
+/// rows are deleted and re-inserted; the return value is the inserted row count.
+/// A missing item, or an item with no resolvable tracks, yields `Ok(0)`.
+pub async fn refresh_item_tracks(pool: &SqlitePool, item_id: i64) -> Result<usize> {
+    let item = sqlx::query_as::<_, BackpackItem>(
+        "SELECT id, backpack_id, source_kind, source_tag_id, source_playlist_id,
+                source_lens, source_track_id, max_tracks, position, added_at
+           FROM hub_backpack_items
+          WHERE id = ?1",
+    )
+    .bind(item_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(item) = item else {
+        return Ok(0);
+    };
+
+    let user_id: Option<i64> = sqlx::query_scalar(
+        "SELECT user_id FROM hub_backpacks WHERE id = ?1",
+    )
+    .bind(item.backpack_id)
+    .fetch_optional(pool)
+    .await?;
+    // An item always belongs to an existing backpack (FK); be defensive anyway.
+    let Some(user_id) = user_id else {
+        return Ok(0);
+    };
+
+    let (backend, track_ids) = tracks_for_item(pool, user_id, &item).await?;
+
+    // Desired set: (track_id, backend), deduped.
+    let desired: HashSet<(i64, String)> = track_ids
+        .iter()
+        .map(|id| (*id, backend.clone()))
+        .collect();
+
+    let current: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT track_id, backend FROM hub_backpack_item_tracks WHERE item_id = ?1",
+    )
+    .bind(item_id)
+    .fetch_all(pool)
+    .await?;
+    let current: HashSet<(i64, String)> = current.into_iter().collect();
+
+    if desired == current {
+        return Ok(0);
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM hub_backpack_item_tracks WHERE item_id = ?1")
+        .bind(item_id)
+        .execute(&mut *tx)
+        .await?;
+    // Deterministic insert order (sorted ids) keeps the table stable across runs.
+    let mut ids: Vec<i64> = desired.iter().map(|(id, _)| *id).collect();
+    ids.sort_unstable();
+    for track_id in &ids {
+        sqlx::query(
+            "INSERT INTO hub_backpack_item_tracks (item_id, track_id, backend, computed_at)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(item_id)
+        .bind(track_id)
+        .bind(&backend)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(ids.len())
+}
+
+/// Recompute the materialised content of **every** backpack item (#682).
+///
+/// Iterates all `hub_backpack_items` (across all backpacks) and calls
+/// [`refresh_item_tracks`]; returns the sum of inserted rows. An empty database
+/// yields `Ok(0)`. Idempotent: a second run over unchanged sources writes
+/// nothing and returns `0`.
+pub async fn refresh_all(pool: &SqlitePool) -> Result<usize> {
+    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM hub_backpack_items ORDER BY id")
+        .fetch_all(pool)
+        .await?;
+    let mut written = 0usize;
+    for id in ids {
+        written += refresh_item_tracks(pool, id).await?;
+    }
+    Ok(written)
+}
+
+/// Per-source content stats of one backpack (#682), read **only** from
+/// materialised tables + `hub_tracks` + `hub_music_state`. No music-api call.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct SourceStat {
+    pub item_id: i64,
+    pub track_count: i64,
+    /// Tracks with a non-empty ISRC whose cached state is `ready`.
+    pub ready: i64,
+    /// Tracks with a non-empty ISRC (the `y` of `x/y verfügbar`).
+    pub with_isrc: i64,
+}
+
+/// Content stats per item of `backpack_id`, ordered `position, id`.
+/// An unknown/empty backpack yields `Ok(vec![])`.
+pub async fn source_stats(pool: &SqlitePool, backpack_id: i64) -> Result<Vec<SourceStat>> {
+    Ok(sqlx::query_as::<_, SourceStat>(
+        "SELECT i.id AS item_id,
+                COUNT(mt.track_id) AS track_count,
+                COALESCE(SUM(CASE
+                    WHEN t.isrc IS NOT NULL AND t.isrc <> '' AND ms.state = 'ready'
+                    THEN 1 ELSE 0 END), 0) AS ready,
+                COALESCE(SUM(CASE
+                    WHEN t.isrc IS NOT NULL AND t.isrc <> ''
+                    THEN 1 ELSE 0 END), 0) AS with_isrc
+           FROM hub_backpack_items i
+           LEFT JOIN hub_backpack_item_tracks mt ON mt.item_id = i.id
+           LEFT JOIN hub_tracks t ON t.id = mt.track_id
+           LEFT JOIN hub_music_state ms ON ms.isrc = t.isrc
+          WHERE i.backpack_id = ?1
+          GROUP BY i.id, i.position
+          ORDER BY i.position, i.id",
+    )
+    .bind(backpack_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Distinct content stats of a whole backpack (#682), read only from
+/// materialised tables + `hub_tracks` + `hub_music_state`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BackpackStats {
+    /// Distinct materialised tracks (`COUNT(DISTINCT track_id)`).
+    pub track_count: i64,
+    /// Distinct tracks with a non-empty ISRC whose cached state is `ready`.
+    pub ready: i64,
+    /// Distinct tracks with a non-empty ISRC (the `y` of `x/y verfügbar`).
+    pub with_isrc: i64,
+}
+
+/// Aggregate distinct content stats of one backpack. `track_count` equals
+/// `resolve_unbounded(backpack).len()` when the materialisation is current.
+/// An unknown/empty backpack yields all-zero stats.
+pub async fn backpack_stats(pool: &SqlitePool, backpack_id: i64) -> Result<BackpackStats> {
+    let row: (i64, i64, i64) = sqlx::query_as(
+        "SELECT COUNT(DISTINCT mt.track_id),
+                COUNT(DISTINCT CASE
+                    WHEN t.isrc IS NOT NULL AND t.isrc <> '' AND ms.state = 'ready'
+                    THEN mt.track_id END),
+                COUNT(DISTINCT CASE
+                    WHEN t.isrc IS NOT NULL AND t.isrc <> ''
+                    THEN mt.track_id END)
+           FROM hub_backpack_items i
+           JOIN hub_backpack_item_tracks mt ON mt.item_id = i.id
+           LEFT JOIN hub_tracks t ON t.id = mt.track_id
+           LEFT JOIN hub_music_state ms ON ms.isrc = t.isrc
+          WHERE i.backpack_id = ?1",
+    )
+    .bind(backpack_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(BackpackStats {
+        track_count: row.0,
+        ready: row.1,
+        with_isrc: row.2,
+    })
 }
 
 // ── Export (#333) ─────────────────────────────────────────────────────────────

@@ -4969,6 +4969,9 @@ struct SourceRow {
     item_id: i64,
     kind: String,
     label: String,
+    track_count: i64,
+    ready: i64,
+    available_total: i64,
 }
 
 /// One backpack card of the `/backpacks` view.
@@ -4977,7 +4980,9 @@ struct BackpackCard {
     name: String,
     is_active: bool,
     source_count: usize,
-    track_count: usize,
+    track_count: i64,
+    ready: i64,
+    available_total: i64,
     sources: Vec<SourceRow>,
 }
 
@@ -5021,21 +5026,38 @@ async fn backpacks_page(State(st): State<AppState>, headers: HeaderMap) -> Respo
         let views = crate::backpacks::list_source_views(&st.pool, bp.id)
             .await
             .unwrap_or_default();
-        let track_count = crate::backpacks::resolve_count(&st.pool, bp.id)
+        // Content stats come exclusively from materialised tables (#682) — no
+        // live resolve, no music-api call while rendering.
+        let stats = crate::backpacks::backpack_stats(&st.pool, bp.id)
             .await
-            .unwrap_or(0);
+            .unwrap_or_default();
+        let per_source: std::collections::HashMap<i64, crate::backpacks::SourceStat> =
+            crate::backpacks::source_stats(&st.pool, bp.id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| (s.item_id, s))
+                .collect();
         cards.push(BackpackCard {
             id: bp.id,
             name: bp.name,
             is_active: bp.is_active != 0,
             source_count: views.len(),
-            track_count,
+            track_count: stats.track_count,
+            ready: stats.ready,
+            available_total: stats.with_isrc,
             sources: views
                 .into_iter()
-                .map(|v| SourceRow {
-                    item_id: v.id,
-                    kind: v.kind,
-                    label: v.label,
+                .map(|v| {
+                    let stat = per_source.get(&v.id);
+                    SourceRow {
+                        item_id: v.id,
+                        kind: v.kind,
+                        label: v.label,
+                        track_count: stat.map(|s| s.track_count).unwrap_or(0),
+                        ready: stat.map(|s| s.ready).unwrap_or(0),
+                        available_total: stat.map(|s| s.with_isrc).unwrap_or(0),
+                    }
                 })
                 .collect(),
         });
