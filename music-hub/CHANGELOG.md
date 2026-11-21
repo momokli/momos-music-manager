@@ -10,6 +10,13 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Backpack-Inhalte materialisiert** (#682, Slice B1) — der aufgelöste
+  Track-Satz jedes Backpack-Items wird in der neuen Tabelle
+  `hub_backpack_item_tracks` persistiert (Migration
+  `068_hub_backpack_item_tracks.sql`, eine Zeile pro Item/Track, `backend` =
+  `tag` | `playlist` | `track` | `lens:<key>`, beide FKs `ON DELETE CASCADE`).
+  `/backpacks` zeigt daraus **pro Quelle N Tracks** und **x/y verfügbar**, ohne
+  live aufzulösen; **kein Netzwerk-Call im Renderpfad**.
 - feat: **Tag hygiene — rename, merge similar tags, suggestions** (#456) — a tag
   detail page (`/tag/{id}`) now surfaces owner-only **suggestions** for similar
   own tags (`tags::similar_tags`; ranked by normalised-equal > small edit
