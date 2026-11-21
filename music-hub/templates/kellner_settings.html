@@ -40,7 +40,14 @@
 
             <label>
                 Vorlage
-                <select name="comment_template_id" aria-label="Kommentar-Vorlage">
+                <select
+                    name="comment_template_id"
+                    aria-label="Kommentar-Vorlage"
+                    hx-post="/kellner/{{ c.id }}/template/preview"
+                    hx-trigger="change delay:400ms"
+                    hx-target="#preview-{{ c.id }}"
+                    hx-swap="innerHTML"
+                >
                     <option value="0"{% if c.selected_template_id == 0 %} selected{% endif %}>— keine (Legacy/Standard) —</option>
                     {% for t in c.comment_templates %}
                     <option value="{{ t.id }}"{% if t.selected %} selected{% endif %}>{{ t.name }}</option>
@@ -57,11 +64,17 @@
                     value="{{ c.legacy_comment }}"
                     placeholder="leer = alphabetische Tag-Liste"
                     aria-label="Eigene Vorlage (alt)"
+                    hx-post="/kellner/{{ c.id }}/template/preview"
+                    hx-trigger="keyup changed delay:400ms"
+                    hx-target="#preview-{{ c.id }}"
+                    hx-swap="innerHTML"
                 />
             </label>
             {% endif %}
 
             <p class="hub-muted">Vorschau: {{ c.resolved_comment }}</p>
+
+            <div id="preview-{{ c.id }}" class="hub-preview">{{ c.preview_html|safe }}</div>
 
             <p class="hub-muted">
                 <a href="/comment-templates">Vorlagen verwalten</a>
