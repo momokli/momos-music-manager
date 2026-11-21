@@ -166,7 +166,8 @@ async fn foreign_and_unknown_device_are_404() {
     let app = common::spawn().await;
     let (alice, alice_cookie) = app.user_with_password("cp-alice", "1234").await;
     let (bob, _bob) = app.user_with_password("cp-bob", "1234").await;
-    let alice_dev = bound_device(&app, alice, "alice-k", &"a".repeat(64)).await;    let bob_dev = bound_device(&app, bob, "bob-k", &"c".repeat(64)).await;
+    let alice_dev = bound_device(&app, alice, "alice-k", &"a".repeat(64)).await;
+    let bob_dev = bound_device(&app, bob, "bob-k", &"c".repeat(64)).await;
 
     // Bob's device is invisible to Alice.
     let (status, _) = post_form(

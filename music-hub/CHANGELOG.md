@@ -10,6 +10,17 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Comment-Vorlagen-Vorschau** (#670, Slice C4) — unter der Vorlagen-Auswahl
+  rendert der Hub eine **Vorschau der ersten 10 Tracks** (Union der **aktiven**
+  Backpacks des Geräts, in Export-Reihenfolge, globales Dedup über `track_id`) inkl.
+  `10 von N`, Zeichenzähler `n/512` und sichtbarem Kürzungsmarker (`...`).
+  Neue Routen `POST /kellner/{id}/template/preview` (gewählte Vorlage bzw.
+  Legacy-Freitext) und `POST /comment-templates/{id}/preview` (Bibliotheksseite).
+  Geteilte Kernlogik in `music-hub/src/preview.rs` (`PREVIEW_LIMIT = 10`); Daten
+  ausschließlich aus dem Hub (`hub_track_resolved_tags` + `hub_tags`,
+  `hub_track_audio`), **kein Netzwerk-Call, kein `MUSIC_API_TOKEN`**. Ohne aktives
+  Backpack erscheint ein Hinweis statt einer leeren Liste; Vorschau == geschriebene
+  Datei (byte-identisch).
 - feat: **Geräte referenzieren eine Comment-Vorlage** (#669, Slice C3) — additive
   Migration `067_hub_device_settings_template_ref.sql` (`comment_template_id`,
   `ON DELETE SET NULL`). Die Auflösung passiert an einer Stelle und folgt
