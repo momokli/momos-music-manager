@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Start · Tonies-Hub{% endblock %}
+{% block content %}
+<h1>Hallo {{ user_slug }}!</h1>
+<div class="card">
+  <p>Deine Tonies werden hier angezeigt, sobald sie verbunden sind.</p>
+  <p class="muted">Dies ist die geschützte Startseite (T2). Die Tonie-Verwaltung folgt in T3.</p>
+  <form method="post" action="/logout">
+    <button type="submit">Abmelden</button>
+  </form>
+</div>
+{% endblock %}
