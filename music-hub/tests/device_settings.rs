@@ -55,6 +55,45 @@ async fn backpack(app: &common::TestApp, user_id: i64, name: &str) -> i64 {
     .expect("insert backpack")
 }
 
+/// Insert a comment template; returns its id. `owner` = `None` is a system row.
+async fn template(
+    app: &common::TestApp,
+    owner: Option<i64>,
+    name: &str,
+    body: &str,
+    shared: bool,
+) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO hub_comment_templates
+            (owner_user_id, name, body, is_shared, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5) RETURNING id",
+    )
+    .bind(owner)
+    .bind(name)
+    .bind(body)
+    .bind(i64::from(shared))
+    .bind(TS)
+    .fetch_one(&app.pool)
+    .await
+    .expect("insert template")
+}
+
+/// Force a settings row's `comment_template_id` directly (bypasses visibility).
+async fn set_ref(app: &common::TestApp, device_id: i64, id: Option<i64>) {
+    sqlx::query(
+        "INSERT INTO hub_device_settings
+            (device_id, preferred_format, comment_template, comment_template_id, updated_at)
+         VALUES (?1, 'flac', '', ?2, ?3)
+         ON CONFLICT(device_id) DO UPDATE SET comment_template_id = excluded.comment_template_id",
+    )
+    .bind(device_id)
+    .bind(id)
+    .bind(TS)
+    .execute(&app.pool)
+    .await
+    .expect("force ref");
+}
+
 async fn json_body(resp: reqwest::Response) -> (StatusCode, Value) {
     let status = resp.status();
     let txt = resp.text().await.expect("body");
@@ -502,3 +541,331 @@ async fn kellner_form_rejects_invalid_format() {
     let (_, v) = get(&app, Some(&cookie), did).await;
     assert_eq!(v["preferred_format"], "flac", "nothing written");
 }
+
+// ── #669: template reference resolution, regression, visibility ─────────────
+
+/// The device's effective comment resolves through the single API: a set,
+/// visible template body wins over the legacy free text.
+#[tokio::test]
+async fn resolution_prefers_template_body() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("ds-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+    let tid = template(&app, Some(uid), "My", "{key} / {bpm}", false).await;
+
+    let (status, v) = put(
+        &app,
+        &cookie,
+        did,
+        json!({ "comment_template_id": tid, "comment_template": "{tags}" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["comment_template_id"], tid);
+
+    let resolved = music_hub::device_settings::resolve_effective_comment(&app.pool, did, uid).await;
+    assert_eq!(resolved, "{key} / {bpm}", "template body wins");
+
+    let (body, name) =
+        music_hub::device_settings::resolve_effective_comment_named(&app.pool, did, uid).await;
+    assert_eq!(body, "{key} / {bpm}");
+    assert_eq!(name.as_deref(), Some("My"));
+}
+
+/// A vanished (deleted) reference falls back to the legacy free text; the same
+/// happens for a reference the device owner may no longer see.
+#[tokio::test]
+async fn resolution_falls_back_to_legacy_when_template_gone_or_invisible() {
+    let app = common::spawn().await;
+    let (alice, alice_cookie) = app.user_with_password("ds-alice", "1234").await;
+    let (bob, _bob_cookie) = app.user_with_password("ds-bob", "1234").await;
+    let did = bound_device(&app, alice, "kellner-1", &"a".repeat(64)).await;
+
+    // (1) A template the owner set, then deleted: ON DELETE SET NULL clears the
+    //     reference and the legacy free text takes over.
+    let tid = template(&app, Some(alice), "Temp", "{key}", false).await;
+    let (status, _) = put(
+        &app,
+        &alice_cookie,
+        did,
+        json!({ "comment_template_id": tid, "comment_template": "legacy {tags}" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        music_hub::device_settings::resolve_effective_comment(&app.pool, did, alice).await,
+        "{key}"
+    );
+    sqlx::query("DELETE FROM hub_comment_templates WHERE id = ?1")
+        .bind(tid)
+        .execute(&app.pool)
+        .await
+        .expect("delete template");
+    assert_eq!(
+        music_hub::device_settings::resolve_effective_comment(&app.pool, did, alice).await,
+        "legacy {tags}",
+        "deleted reference falls back to legacy"
+    );
+
+    // (2) A foreign private template id stored directly is invisible -> legacy.
+    let bob_private = template(&app, Some(bob), "bob-priv", "{energy}", false).await;
+    set_ref(&app, did, Some(bob_private)).await;
+    assert_eq!(
+        music_hub::device_settings::resolve_effective_comment(&app.pool, did, alice).await,
+        "legacy {tags}",
+        "invisible (foreign private) reference falls back to legacy"
+    );
+}
+
+/// Both stages empty resolves to the default template.
+#[tokio::test]
+async fn resolution_empty_falls_back_to_default() {
+    let app = common::spawn().await;
+    let (uid, _cookie) = app.user_with_password("ds-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+
+    let resolved = music_hub::device_settings::resolve_effective_comment(&app.pool, did, uid).await;
+    assert_eq!(resolved, music_hub::device_settings::DEFAULT_TEMPLATE);
+}
+
+/// Regression (v0.33.0): a device with only the legacy free text (no reference)
+/// behaves unchanged; the stored value is never rewritten.
+#[tokio::test]
+async fn legacy_free_text_without_reference_unchanged() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("ds-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+
+    let (status, v) = put(&app, &cookie, did, json!({ "comment_template": "{tags}" })).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert!(v["comment_template_id"].is_null(), "no reference");
+
+    let stored: (Option<i64>, String) = sqlx::query_as(
+        "SELECT comment_template_id, comment_template FROM hub_device_settings WHERE device_id = ?1",
+    )
+    .bind(did)
+    .fetch_one(&app.pool)
+    .await
+    .expect("row");
+    assert_eq!(stored, (None, "{tags}".to_string()), "value not rewritten");
+    assert_eq!(
+        music_hub::device_settings::resolve_effective_comment(&app.pool, did, uid).await,
+        "{tags}"
+    );
+}
+
+/// Visibility: a foreign **shared** template is selectable (`200`), a foreign
+/// **private** one is rejected (`400`) via both the JSON PUT and the form POST.
+#[tokio::test]
+async fn shared_template_selectable_private_rejected() {
+    let app = common::spawn().await;
+    let (alice, alice_cookie) = app.user_with_password("ds-alice", "1234").await;
+    let (bob, _bob_cookie) = app.user_with_password("ds-bob", "1234").await;
+    let did = bound_device(&app, alice, "kellner-1", &"a".repeat(64)).await;
+
+    let shared = template(&app, Some(bob), "bob-shared", "{tags}", true).await;
+    let private = template(&app, Some(bob), "bob-private", "{tags}", false).await;
+
+    // Shared by another user -> selectable.
+    let (status, v) = put(&app, &alice_cookie, did, json!({ "comment_template_id": shared })).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["comment_template_id"], shared);
+
+    // Foreign private -> 400, unchanged.
+    let (status, v) = put(&app, &alice_cookie, did, json!({ "comment_template_id": private })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    let (_, v) = get(&app, Some(&alice_cookie), did).await;
+    assert_eq!(v["comment_template_id"], shared, "rejected write leaves the ref");
+
+    // Unknown id -> 400 too.
+    let (status, _) = put(&app, &alice_cookie, did, json!({ "comment_template_id": 999_999 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Form POST with the foreign private template -> flash error, no write.
+    let resp = app
+        .client()
+        .post(app.url(&format!("/kellner/{did}/settings")))
+        .header("Cookie", &alice_cookie)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("preferred_format=wav&comment_template_id={private}"))
+        .send()
+        .await
+        .expect("form post");
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let (_, v) = get(&app, Some(&alice_cookie), did).await;
+    assert_eq!(v["comment_template_id"], shared, "form reject leaves the ref");
+    assert_eq!(v["preferred_format"], "flac", "nothing written");
+}
+
+/// The form posts the chosen template id and the page renders the select with
+/// the selection + a resolution preview.
+#[tokio::test]
+async fn kellner_form_saves_template_and_page_previews() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("ds-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+    let tid = template(&app, Some(uid), "Mix-Key", "{key} / {bpm}", false).await;
+
+    let resp = app
+        .client()
+        .post(app.url(&format!("/kellner/{did}/settings")))
+        .header("Cookie", &cookie)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("preferred_format=flac&comment_template_id={tid}"))
+        .send()
+        .await
+        .expect("form post");
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let (_, v) = get(&app, Some(&cookie), did).await;
+    assert_eq!(v["comment_template_id"], tid);
+
+    let resp = app
+        .client()
+        .get(app.url("/kellner"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .expect("page");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = resp.text().await.expect("html");
+    assert!(html.contains("name=\"comment_template_id\""), "select rendered");
+    assert!(html.contains("Mix-Key"), "option rendered");
+    assert!(html.contains("Vorschau: {key} / {bpm}"), "preview line: {html}");
+}
+
+/// #669: an explicit clear drops the reference; the resolution chain then falls
+/// back to the legacy free text and, when that is blank too, to the default.
+#[tokio::test]
+async fn resolution_after_clear_falls_back_to_legacy() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("ds-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+    let tid = template(&app, Some(uid), "Mix-Key", "{key} / {bpm}", false).await;
+
+    // Set the reference and a distinct legacy free text; the template body wins.
+    let (status, v) = put(
+        &app,
+        &cookie,
+        did,
+        json!({ "comment_template_id": tid, "comment_template": "legacy {tags}" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["comment_template_id"], tid);
+    assert_eq!(
+        music_hub::device_settings::resolve_effective_comment(&app.pool, did, uid).await,
+        "{key} / {bpm}"
+    );
+
+    // Explicit clear via the JSON API.
+    let (status, v) = put(&app, &cookie, did, json!({ "clear_comment_template": true })).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert!(v["comment_template_id"].is_null(), "reference cleared: {v}");
+
+    // The DB column is really NULL, not merely masked in the response.
+    let stored: Option<i64> =
+        sqlx::query_scalar("SELECT comment_template_id FROM hub_device_settings WHERE device_id = ?1")
+            .bind(did)
+            .fetch_one(&app.pool)
+            .await
+            .expect("row");
+    assert_eq!(stored, None, "column NULL after clear");
+
+    // Resolution falls back to the legacy free text (export + preview use it).
+    assert_eq!(
+        music_hub::device_settings::resolve_effective_comment(&app.pool, did, uid).await,
+        "legacy {tags}",
+        "legacy free text after clear"
+    );
+
+    // And with a blank legacy free text it falls through to the default.
+    let (status, _) = put(&app, &cookie, did, json!({ "comment_template": "" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        music_hub::device_settings::resolve_effective_comment(&app.pool, did, uid).await,
+        music_hub::device_settings::DEFAULT_TEMPLATE,
+        "default when both are empty"
+    );
+}
+
+/// #669: the form's `-- keine --` option posts `comment_template_id=0`, which
+/// clears the stored reference (previously it kept the COALESCE value).
+#[tokio::test]
+async fn kellner_form_clears_reference_with_zero_option() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("ds-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+    let tid = template(&app, Some(uid), "Mix-Key", "{key} / {bpm}", false).await;
+
+    // First select the template via the form.
+    let resp = app
+        .client()
+        .post(app.url(&format!("/kellner/{did}/settings")))
+        .header("Cookie", &cookie)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("preferred_format=flac&comment_template_id={tid}"))
+        .send()
+        .await
+        .expect("form post");
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let (_, v) = get(&app, Some(&cookie), did).await;
+    assert_eq!(v["comment_template_id"], tid);
+
+    // Now post the "none" option (value="0") -> the reference must be dropped.
+    let resp = app
+        .client()
+        .post(app.url(&format!("/kellner/{did}/settings")))
+        .header("Cookie", &cookie)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("preferred_format=flac&comment_template_id=0")
+        .send()
+        .await
+        .expect("form post");
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("/kellner"),
+        "success redirect"
+    );
+
+    let (_, v) = get(&app, Some(&cookie), did).await;
+    assert!(v["comment_template_id"].is_null(), "reference cleared: {v}");
+    let stored: Option<i64> =
+        sqlx::query_scalar("SELECT comment_template_id FROM hub_device_settings WHERE device_id = ?1")
+            .bind(did)
+            .fetch_one(&app.pool)
+            .await
+            .expect("row");
+    assert_eq!(stored, None, "column NULL after form clear");
+}
+
+/// #669: sending `clear_comment_template` together with a set id is contradictory
+/// and rejected with 400; nothing is written.
+#[tokio::test]
+async fn clear_and_id_conflict_is_400_without_write() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("ds-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+    let tid = template(&app, Some(uid), "Mix-Key", "{key} / {bpm}", false).await;
+
+    // Seed a reference so we can prove the rejected write left it untouched.
+    let (status, _) = put(&app, &cookie, did, json!({ "comment_template_id": tid })).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, v) = put(
+        &app,
+        &cookie,
+        did,
+        json!({ "clear_comment_template": true, "comment_template_id": tid }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert!(
+        v["error"].as_str().unwrap_or_default().contains("conflict"),
+        "names the conflict: {v}"
+    );
+
+    let (_, v) = get(&app, Some(&cookie), did).await;
+    assert_eq!(v["comment_template_id"], tid, "rejected write leaves the ref");
+}
+

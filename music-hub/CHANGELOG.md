@@ -10,6 +10,17 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Geräte referenzieren eine Comment-Vorlage** (#669, Slice C3) — additive
+  Migration `067_hub_device_settings_template_ref.sql` (`comment_template_id`,
+  `ON DELETE SET NULL`). Die Auflösung passiert an einer Stelle und folgt
+  **Vorlage → Legacy-Freitext → `DEFAULT_TEMPLATE`**; eine gelöschte oder nicht
+  mehr sichtbare Vorlage fällt auf die nächste Stufe zurück. `/kellner` bekommt
+  ein Auswahlfeld (eigene / geteilte / System-Vorlagen) plus eine Vorschauzeile;
+  das alte Freitextfeld bleibt als „Eigene Vorlage (alt)“ sichtbar, daneben
+  „Kopie erstellen“. Der Backpack-Export liefert den **aufgelösten** Body plus
+  `comment_template_name` fürs Log. Explizites Abwählen geht über
+  `clear_comment_template: true` (JSON) bzw. die Form-Option `value="0"`; beides
+  zusammen mit einer ID ist ein `400` ohne Write.
 - feat: **Comment-Vorlagen-Bibliothek** (#668, Slice C2) — named, user-managed
   Comment bodies for the deterministic `comment-template` semantics (#664). New
   page `/comment-templates` with grouped visibility (System / Meine / Geteilt von

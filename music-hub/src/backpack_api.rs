@@ -156,19 +156,12 @@ async fn export(State(st): State<AppState>, Path(id): Path<i64>, headers: Header
         Err(resp) => return resp,
     };
 
-    // The calling device's comment template (issue #652): per-device settings,
-    // resolved to the default when unset. A settings read failure is not fatal —
-    // fall back to the default rather than failing the export.
-    let comment_template = match crate::device_settings::get_for_device(&st.pool, device_id, user_id)
-        .await
-    {
-        Ok(Some(s)) => crate::device_settings::resolve_template(&s.comment_template),
-        Ok(None) => crate::device_settings::DEFAULT_TEMPLATE.to_string(),
-        Err(e) => {
-            tracing::warn!(error = %e, "backpack api: device settings lookup failed");
-            crate::device_settings::DEFAULT_TEMPLATE.to_string()
-        }
-    };
+    // The calling device's effective comment (#669): template reference → legacy
+    // free text → default, resolved by the single `device_settings` API. A
+    // settings read failure is not fatal — fall back to the default rather than
+    // failing the export.
+    let (comment_template, comment_template_name) =
+        crate::device_settings::resolve_effective_comment_named(&st.pool, device_id, user_id).await;
 
     let backpack = match backpacks::backpack_owned_by(&st.pool, id, user_id).await {
         Ok(Some(b)) => b,
@@ -226,6 +219,7 @@ async fn export(State(st): State<AppState>, Path(id): Path<i64>, headers: Header
     Json(json!({
         "backpack": { "id": backpack.id, "name": backpack.name },
         "comment_template": comment_template,
+        "comment_template_name": comment_template_name,
         "tracks": tracks,
     }))
     .into_response()

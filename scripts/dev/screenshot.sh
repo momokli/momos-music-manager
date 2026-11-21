@@ -160,6 +160,39 @@ curl -fsS -o /dev/null -b "$TMP/cookies.txt" \
   "http://127.0.0.1:$HUB_PORT/backpacks/$BP_ID/sources" \
   || die "playlist source POST failed"
 
+# ── 5c. devices + comment templates (for /kellner) ─────────────────────────
+# /kellner renders per-device settings, so the seed needs a bound device. Two
+# devices on purpose: one references a named template (#669), one still carries
+# the legacy free-text field — the screenshot has to show both paths.
+say "seeding devices + comment templates"
+sqlite3 "$DB" <<SQL
+INSERT INTO hub_comment_templates (owner_user_id, name, body, is_shared, created_at, updated_at)
+VALUES
+  ($UID_, 'Traktor DJ', '{tags} {bpm} {key}', 0,
+   strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  ($UID_, 'Geteilt (Team)', '{tags}', 1,
+   strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+
+INSERT INTO hub_devices (user_id, name, token_hash, created_at, paired_at)
+VALUES ($UID_, 'MacBook', 'demo-token-macbook',
+        strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+INSERT INTO hub_device_settings
+  (device_id, preferred_format, comment_template, comment_template_id, updated_at)
+VALUES
+  ((SELECT id FROM hub_devices WHERE name = 'MacBook'), 'mp3', '',
+   (SELECT id FROM hub_comment_templates WHERE name = 'Traktor DJ'),
+   strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+
+INSERT INTO hub_devices (user_id, name, token_hash, created_at, paired_at)
+VALUES ($UID_, 'Studio', 'demo-token-studio',
+        strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+INSERT INTO hub_device_settings
+  (device_id, preferred_format, comment_template, comment_template_id, updated_at)
+VALUES
+  ((SELECT id FROM hub_devices WHERE name = 'Studio'), 'flac', '{tags} BPM-{bpm}', NULL,
+   strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+SQL
+
 # ── 6. screenshots ─────────────────────────────────────────────────────────
 say "taking screenshots into $OUT_DIR"
 HUB_BASE="http://127.0.0.1:$HUB_PORT" \

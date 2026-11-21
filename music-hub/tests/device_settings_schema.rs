@@ -200,3 +200,64 @@ async fn deleting_device_cascades_settings_and_backpacks() {
     assert_eq!(settings, 0, "settings row cascades on device delete");
     assert_eq!(links, 0, "backpack links cascade on device delete");
 }
+
+// ── 067: comment_template_id reference + ON DELETE SET NULL ──────────────────
+
+#[tokio::test]
+async fn comment_template_ref_fk_visible_and_set_null_on_delete() {
+    let (_dir, pool) = setup().await;
+    let uid = insert_user(&pool, "alice").await;
+    let did = insert_device(&pool, uid, "kellner-1", &"a".repeat(64)).await;
+
+    // The seeded system 'Standard' template (migration 066) is referenceable.
+    let tid: i64 = sqlx::query_scalar(
+        "SELECT id FROM hub_comment_templates WHERE owner_user_id IS NULL AND name = 'Standard'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("system template");
+
+    sqlx::query(
+        "INSERT INTO hub_device_settings
+            (device_id, preferred_format, comment_template, comment_template_id, updated_at)
+         VALUES (?1, 'mp3', '', ?2, ?3)",
+    )
+    .bind(did)
+    .bind(tid)
+    .bind(TS)
+    .execute(&pool)
+    .await
+    .expect("insert with reference");
+
+    let stored: Option<i64> =
+        sqlx::query_scalar("SELECT comment_template_id FROM hub_device_settings WHERE device_id = ?1")
+            .bind(did)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, Some(tid), "reference stored");
+
+    // A dangling id violates the FK.
+    let bad = sqlx::query(
+        "UPDATE hub_device_settings SET comment_template_id = 999999 WHERE device_id = ?1",
+    )
+    .bind(did)
+    .execute(&pool)
+    .await;
+    assert!(bad.is_err(), "FK must reject an unknown template id");
+
+    // Deleting the referenced template nulls the column (ON DELETE SET NULL).
+    sqlx::query("DELETE FROM hub_comment_templates WHERE id = ?1")
+        .bind(tid)
+        .execute(&pool)
+        .await
+        .expect("delete template");
+    let after: Option<i64> =
+        sqlx::query_scalar("SELECT comment_template_id FROM hub_device_settings WHERE device_id = ?1")
+            .bind(did)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(after, None, "ON DELETE SET NULL clears the reference");
+}
+

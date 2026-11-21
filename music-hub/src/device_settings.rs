@@ -73,6 +73,8 @@ pub struct DeviceSettings {
     pub device_id: i64,
     pub preferred_format: String,
     pub comment_template: String,
+    /// Reference into the comment-template library (#669); `None` = no reference.
+    pub comment_template_id: Option<i64>,
     pub active_backpack_ids: Vec<i64>,
     pub updated_at: Option<String>,
 }
@@ -84,6 +86,7 @@ impl DeviceSettings {
             "device_id": self.device_id,
             "preferred_format": self.preferred_format,
             "comment_template": self.comment_template,
+            "comment_template_id": self.comment_template_id,
             "active_backpack_ids": self.active_backpack_ids,
             "updated_at": self.updated_at,
         })
@@ -94,6 +97,7 @@ impl DeviceSettings {
             device_id,
             preferred_format: "flac".to_string(),
             comment_template: String::new(),
+            comment_template_id: None,
             active_backpack_ids: Vec::new(),
             updated_at: None,
         }
@@ -110,6 +114,15 @@ pub struct SettingsBody {
     pub preferred_format: Option<String>,
     #[serde(default)]
     pub comment_template: Option<String>,
+    /// Reference into the comment-template library (#669). `None` (absent) leaves
+    /// the stored reference unchanged; a set id must be visible to the caller.
+    #[serde(default)]
+    pub comment_template_id: Option<i64>,
+    /// Explicitly drop the stored `comment_template_id` (#669). Needed because
+    /// JSON `null`/absent cannot be told apart in `Option<i64>`; `true` clears
+    /// the reference (and must not be combined with a set `comment_template_id`).
+    #[serde(default)]
+    pub clear_comment_template: bool,
     #[serde(default)]
     pub active_backpack_ids: Option<Vec<i64>>,
 }
@@ -146,6 +159,64 @@ pub fn resolve_template(stored: &str) -> String {
     }
 }
 
+/// Static resolution chain (#669): an explicit, visible template body wins; a
+/// blank/absent one falls through to the legacy free text and finally to
+/// [`DEFAULT_TEMPLATE`]. Kept pure so it can be unit-tested without a DB.
+pub fn pick_comment(visible_body: Option<&str>, legacy_free: &str) -> String {
+    match visible_body {
+        Some(b) if !b.trim().is_empty() => b.trim().to_string(),
+        _ => resolve_template(legacy_free),
+    }
+}
+
+/// The single resolution API (#669) used by the export and the `/kellner`
+/// preview. Loads the device settings, checks the referenced template's
+/// visibility (`mine ∪ shared ∪ system` via [`comment_templates::get_visible`])
+/// and applies [`pick_comment`]. A missing/deleted/invisible reference and any
+/// read error fall through to the next stage (best effort — never a `500`).
+///
+/// Returns `(resolved_body, template_name)`, where the name is [`None`] unless
+/// an explicit template was actually used (for logging/display only).
+pub async fn resolve_effective_comment_named(
+    pool: &SqlitePool,
+    device_id: i64,
+    user_id: i64,
+) -> (String, Option<String>) {
+    let settings = match get_for_device(pool, device_id, user_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return (DEFAULT_TEMPLATE.to_string(), None),
+        Err(e) => {
+            tracing::warn!(error = %e, "resolve comment: settings lookup failed");
+            return (DEFAULT_TEMPLATE.to_string(), None);
+        }
+    };
+
+    let mut body: Option<String> = None;
+    let mut name: Option<String> = None;
+    if let Some(tid) = settings.comment_template_id {
+        match crate::comment_templates::get_visible(pool, user_id, tid).await {
+            Ok(Some(t)) => {
+                body = Some(t.body);
+                name = Some(t.name);
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "resolve comment: template lookup failed"),
+        }
+    }
+
+    (pick_comment(body.as_deref(), &settings.comment_template), name)
+}
+
+/// Convenience wrapper around [`resolve_effective_comment_named`] returning only
+/// the resolved body.
+pub async fn resolve_effective_comment(
+    pool: &SqlitePool,
+    device_id: i64,
+    user_id: i64,
+) -> String {
+    resolve_effective_comment_named(pool, device_id, user_id).await.0
+}
+
 // ── queries ─────────────────────────────────────────────────────────────────
 
 async fn load_backpack_ids(pool: &SqlitePool, device_id: i64) -> sqlx::Result<Vec<i64>> {
@@ -173,8 +244,8 @@ pub async fn get_for_device(
     {
         return Ok(None);
     }
-    let row: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT preferred_format, comment_template, updated_at
+    let row: Option<(String, String, Option<i64>, String)> = sqlx::query_as(
+        "SELECT preferred_format, comment_template, comment_template_id, updated_at
            FROM hub_device_settings WHERE device_id = ?1",
     )
     .bind(device_id)
@@ -182,10 +253,11 @@ pub async fn get_for_device(
     .await?;
 
     let mut settings = match row {
-        Some((fmt, tpl, updated)) => DeviceSettings {
+        Some((fmt, tpl, tpl_id, updated)) => DeviceSettings {
             device_id,
             preferred_format: fmt,
             comment_template: tpl,
+            comment_template_id: tpl_id,
             active_backpack_ids: Vec::new(),
             updated_at: Some(updated),
         },
@@ -218,29 +290,41 @@ pub async fn upsert(
     let now = now_iso();
     let mut tx = pool.begin().await?;
 
-    let existing: Option<(String, String)> = sqlx::query_as(
-        "SELECT preferred_format, comment_template
+    let existing: Option<(String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT preferred_format, comment_template, comment_template_id
            FROM hub_device_settings WHERE device_id = ?1",
     )
     .bind(device_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let (cur_fmt, cur_tpl) = existing.unwrap_or_else(|| ("flac".to_string(), String::new()));
+    let (cur_fmt, cur_tpl, cur_ref) = existing
+        .unwrap_or_else(|| ("flac".to_string(), String::new(), None));
 
     let fmt = patch.preferred_format.unwrap_or(cur_fmt);
     let tpl = patch.comment_template.unwrap_or(cur_tpl);
+    // `clear_comment_template` wins: an explicit drop sets the reference to NULL.
+    // Otherwise COALESCE semantics: an absent reference leaves the stored one
+    // unchanged (a set id replaces it).
+    let tpl_ref = if patch.clear_comment_template {
+        None
+    } else {
+        patch.comment_template_id.or(cur_ref)
+    };
 
     sqlx::query(
-        "INSERT INTO hub_device_settings (device_id, preferred_format, comment_template, updated_at)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO hub_device_settings
+             (device_id, preferred_format, comment_template, comment_template_id, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(device_id) DO UPDATE SET
              preferred_format = excluded.preferred_format,
              comment_template = excluded.comment_template,
+             comment_template_id = excluded.comment_template_id,
              updated_at = excluded.updated_at",
     )
     .bind(device_id)
     .bind(&fmt)
     .bind(&tpl)
+    .bind(tpl_ref)
     .bind(&now)
     .execute(&mut *tx)
     .await?;
@@ -270,6 +354,7 @@ pub async fn upsert(
         device_id,
         preferred_format: fmt,
         comment_template: tpl,
+        comment_template_id: tpl_ref,
         active_backpack_ids: Vec::new(),
         updated_at: Some(now),
     };
@@ -352,6 +437,33 @@ async fn validate_body(
         },
         None => None,
     };
+
+    // `clear` and a set id are contradictory: reject instead of guessing.
+    if body.clear_comment_template && body.comment_template_id.is_some() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "clear_comment_template conflicts with comment_template_id",
+        ));
+    }
+
+    // A set reference must be visible to the caller (mine ∪ shared ∪ system); a
+    // foreign private template is rejected exactly like an unknown one. A pure
+    // clear (`Some` absent) skips the lookup.
+    if let Some(tid) = body.comment_template_id {
+        match crate::comment_templates::get_visible(&st.pool, user_id, tid).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "unknown or invisible comment_template_id",
+                ));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "comment template visibility check failed");
+                return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "lookup failed"));
+            }
+        }
+    }
     let active_backpack_ids = match &body.active_backpack_ids {
         Some(ids) => {
             for bid in ids {
@@ -377,6 +489,8 @@ async fn validate_body(
     Ok(SettingsBody {
         preferred_format: body.preferred_format,
         comment_template,
+        comment_template_id: body.comment_template_id,
+        clear_comment_template: body.clear_comment_template,
         active_backpack_ids,
     })
 }
@@ -396,12 +510,25 @@ struct BackpackOption {
     selected: bool,
 }
 
+/// One comment-template option in the `<select>`, with its selection state.
+struct TemplateOption {
+    id: i64,
+    name: String,
+    selected: bool,
+}
+
 /// One device card of the `/kellner` view.
 struct DeviceCard {
     id: i64,
     name: String,
     revoked: bool,
-    comment_template: String,
+    /// The legacy inline template (shown only while non-empty, `#669`).
+    legacy_comment: String,
+    /// The effective comment after the resolution chain (preview, `#669`).
+    resolved_comment: String,
+    /// Selected template id, or `0` when no template is referenced (`#669`).
+    selected_template_id: i64,
+    comment_templates: Vec<TemplateOption>,
     formats: Vec<FormatOption>,
     backpacks: Vec<BackpackOption>,
 }
@@ -450,6 +577,10 @@ async fn page(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let all_backpacks = crate::backpacks::list_backpacks(&st.pool, nav.id)
         .await
         .unwrap_or_default();
+    // Templates visible to the caller (system ∪ own ∪ shared), loaded once.
+    let visible_templates = crate::comment_templates::list_visible(&st.pool, nav.id, nav.is_admin)
+        .await
+        .unwrap_or_default();
 
     let mut cards = Vec::with_capacity(devices.len());
     for d in devices {
@@ -473,11 +604,23 @@ async fn page(State(st): State<AppState>, headers: HeaderMap) -> Response {
                 selected: *f == settings.preferred_format,
             })
             .collect();
+        let comment_templates = visible_templates
+            .iter()
+            .map(|t| TemplateOption {
+                id: t.id,
+                name: t.name.clone(),
+                selected: Some(t.id) == settings.comment_template_id,
+            })
+            .collect();
+        let resolved_comment = resolve_effective_comment(&st.pool, d.id, nav.id).await;
         cards.push(DeviceCard {
             id: d.id,
             name: d.name,
             revoked: d.revoked_at.is_some(),
-            comment_template: settings.comment_template,
+            legacy_comment: settings.comment_template,
+            resolved_comment,
+            selected_template_id: settings.comment_template_id.unwrap_or(0),
+            comment_templates,
             formats,
             backpacks,
         });
@@ -542,6 +685,42 @@ async fn form_submit(
         Err(e) => return flash_redirect("/kellner", format!("Fehler: {e}")),
     };
 
+    // Template reference (`#669`): empty = keep current (COALESCE semantics),
+    // `"0"` = explicit drop (Legacy/Standard), otherwise the id must be visible.
+    let mut clear = false;
+    let raw_tid = first(&fields, "comment_template_id").unwrap_or("").trim();
+    let tpl_id = if raw_tid.is_empty() {
+        None
+    } else if raw_tid == "0" {
+        clear = true;
+        None
+    } else {
+        match raw_tid.parse::<i64>() {
+            Ok(n) => Some(n),
+            Err(_) => {
+                return flash_redirect("/kellner", "Fehler: ungültige Vorlagen-ID.".to_string())
+            }
+        }
+    };
+    if let Some(tid) = tpl_id {
+        match crate::comment_templates::get_visible(&st.pool, user_id, tid).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return flash_redirect(
+                    "/kellner",
+                    "Fehler: unbekannte oder fremde Vorlage.".to_string(),
+                )
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "kellner form: template visibility check failed");
+                return flash_redirect(
+                    "/kellner",
+                    "Fehler: Vorlagen-Prüfung fehlgeschlagen.".to_string(),
+                );
+            }
+        }
+    }
+
     let mut ids: Vec<i64> = Vec::new();
     let mut bad_id = false;
     for (k, v) in &fields {
@@ -574,6 +753,8 @@ async fn form_submit(
     let patch = SettingsBody {
         preferred_format: Some(fmt.to_string()),
         comment_template: Some(tpl),
+        comment_template_id: tpl_id,
+        clear_comment_template: clear,
         active_backpack_ids: Some(ids),
     };
 
@@ -660,11 +841,28 @@ mod tests {
     }
 
     #[test]
+    fn pick_comment_matrix() {
+        // A non-blank visible template body wins.
+        assert_eq!(pick_comment(Some("{key} / {bpm}"), "legacy"), "{key} / {bpm}");
+        assert_eq!(pick_comment(Some("{tags}"), ""), "{tags}");
+        assert_eq!(pick_comment(Some("  {tags}  "), "legacy"), "{tags}");
+        // Absent / blank template -> legacy free text.
+        assert_eq!(pick_comment(None, "legacy"), "legacy");
+        assert_eq!(pick_comment(Some(""), "legacy"), "legacy");
+        assert_eq!(pick_comment(Some("   "), "legacy"), "legacy");
+        // Both empty -> the default template.
+        assert_eq!(pick_comment(None, ""), DEFAULT_TEMPLATE);
+        assert_eq!(pick_comment(None, "   "), DEFAULT_TEMPLATE);
+        assert_eq!(pick_comment(Some("   "), ""), DEFAULT_TEMPLATE);
+    }
+
+    #[test]
     fn to_json_has_exact_keys_and_no_secret() {
         let s = DeviceSettings {
             device_id: 7,
             preferred_format: "mp3".to_string(),
             comment_template: "hi".to_string(),
+            comment_template_id: Some(42),
             active_backpack_ids: vec![3, 5],
             updated_at: Some("2026-01-01T00:00:00+00:00".to_string()),
         };
@@ -677,12 +875,14 @@ mod tests {
             vec![
                 "active_backpack_ids",
                 "comment_template",
+                "comment_template_id",
                 "device_id",
                 "preferred_format",
                 "updated_at"
             ]
         );
         assert_eq!(v["device_id"], 7);
+        assert_eq!(v["comment_template_id"], 42);
         assert_eq!(v["active_backpack_ids"], json!([3, 5]));
         assert!(!v.to_string().contains("token_hash"));
     }
@@ -692,6 +892,7 @@ mod tests {
         let d = DeviceSettings::defaults(1);
         assert_eq!(d.preferred_format, "flac");
         assert_eq!(d.comment_template, "");
+        assert!(d.comment_template_id.is_none());
         assert!(d.active_backpack_ids.is_empty());
         assert!(d.updated_at.is_none());
     }
