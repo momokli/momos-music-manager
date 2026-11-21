@@ -119,7 +119,7 @@ async fn track_meta(pool: &SqlitePool, track_id: i64) -> sqlx::Result<(String, S
 }
 
 // The resolved tag names/types, type markers, source ids and key come from the
-        // shared export helpers so the API and the Comment preview agree (#690).
+// shared export helpers so the API and the Comment preview agree (#690).
 
 /// The track's resolved `bpm` / `musical_key` / `camelot` / `energy`, all
 /// `None` when the row (or any column) is absent.
