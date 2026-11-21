@@ -10,6 +10,16 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Comment-Vorlagen-Bibliothek** (#668, Slice C2) — named, user-managed
+  Comment bodies for the deterministic `comment-template` semantics (#664). New
+  page `/comment-templates` with grouped visibility (System / Meine / Geteilt von
+  anderen), CRUD routes `create` / `rename` / `body` / `share` (toggle) /
+  `duplicate` / `delete`. Bodies are validated against the placeholder whitelist
+  (`{tags}`, `{bpm}`, `{key}`, `{energy}`) on every write; a foreign private
+  template is `404`, a foreign shared or system template is `403` (system is
+  read-only except for admins); a copy belongs to the copier and is editable.
+  Additive migration `066_hub_comment_templates.sql` (table + per-owner NOCASE
+  unique index + system seeds „Standard“ / „Nur Tags“).
 - feat: **Tag hygiene — rename, merge similar tags, suggestions** (#456) — a tag
   detail page (`/tag/{id}`) now surfaces owner-only **suggestions** for similar
   own tags (`tags::similar_tags`; ranked by normalised-equal > small edit
