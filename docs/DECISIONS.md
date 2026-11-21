@@ -2254,48 +2254,54 @@ keine Formalie, sondern ein Defekt.
   neuer Form reproduziert; ein leeres Template schaltet das Comment-Schreiben nicht ab
   (das bleibt `--no-tags`).
 
-## ADR-085: Ein Renderer fuer das Comment-Template (geteilte Crate) + Vorschau im Hub
+## ADR-085: Comment-Vorlagen als Bibliothek im Hub (geteilter Renderer, Vorschau)
 
 **Date**: 2026-11-21
-**Status**: Proposed (Plan `plans/proposed/comment-template-preview.md`; wartet auf Freigabe)
-**Relates**: ADR-084 (Template mit Platzhaltern, space-freie Tokens), #652/#653 (Feld, Export, kellner-Renderer)
+**Status**: Proposed (Plan `plans/proposed/comment-template-library.md`; wartet auf Freigabe)
+**Relates**: ADR-081 (Kellner: Config im Hub), ADR-084 (Template mit Platzhaltern,
+space-freie Tokens), #652/#653 (Feld, Export, kellner-Renderer in v0.33.0)
 
-**Context**: Seit v0.33.0 laesst sich das Comment-Template pro Geraet setzen
-(`hub_device_settings.comment_template`), kellner rendert es beim Schreiben. Zwei Luecken:
-(1) Man sieht das Ergebnis erst, wenn eine Datei geschrieben wird — `kellner backpack
---dry-run` zaehlt nur. (2) Die Template-Semantik existiert doppelt: `ALLOWED_PLACEHOLDERS`
-und `DEFAULT_TEMPLATE` stehen in `music-hub/src/device_settings.rs` **und** in
-`kellner/src/tag/comment.rs`, die Deckel (48 Zeichen pro Token, 512 pro Comment),
-Slugging und Fallback nur in kellner. Eine Vorschau im Hub wuerde daraus die dritte
-Wahrheit machen.
+**Context**: Das Comment-Template ist heute ein **Freitextfeld pro Geraet**
+(`hub_device_settings.comment_template`, Migration 052). Damit ist es weder wiederverwendbar
+(zwei Kellner = zweimal tippen) noch teilbar (es gibt keine Vorlage, nur „die dieses
+Geraets"), und man sieht das Ergebnis erst, wenn kellner eine Datei schreibt
+(`--dry-run` zaehlt nur). Zusaetzlich existiert die Semantik doppelt:
+`ALLOWED_PLACEHOLDERS` und `DEFAULT_TEMPLATE` stehen in `music-hub/src/device_settings.rs`
+**und** in `kellner/src/tag/comment.rs`; Slugging, Deckel (48/512) und Fallback nur in
+kellner.
 
 **Decision**:
 
-1. **Eine Crate `comment-template`** (path-dependency, kein Workspace noetig) haelt die
-   gesamte Semantik: `render(template, &TrackFacts) -> String`, `validate(template)`,
-   `DEFAULT_TEMPLATE`, `ALLOWED_PLACEHOLDERS`, `TOKEN_MAX_CHARS = 48`,
-   `COMMENT_MAX_CHARS = 512`, Slugging, Whitespace-Normalisierung, Fallback bei
-   unbekanntem Platzhalter. `music-hub` und `kellner` benutzen sie; der Umzug ist
-   verhaltensneutral (bestehende Tests wandern mit).
-2. **Golden-Fixture als Vertrag**: `comment-template/tests/fixtures/cases.json` mit
-   Eingabe->Ausgabe-Paaren; beide Seiten testen dagegen. Zusaetzlich ein Test in
-   `kellner`, dass Vorschau und geschriebene Datei **byte-identisch** sind.
-3. **Vorschau im Hub, ohne Netz**: `POST /kellner/{device}/template/preview` rendert die
-   ersten **10** Tracks aus der Vereinigung der aktiven Backpacks des Geraets. Daten aus
-   dem Hub selbst (`hub_track_resolved_tags`, `hub_track_audio` — dieselben Abfragen wie
-   der Backpack-Export). Anzeige mit Zeichenzaehler `n/512` und sichtbarer Kuerzung.
-4. **kellner bekommt `comment --preview`**: dieselbe Ausgabe lokal, offline, ohne Sync —
-   fuer die Arbeit am Mac.
-5. **Kein Template pro Backpack, kein Speichern gerenderter Strings.** Weiterhin pro
-   Geraet, weiterhin bei jedem Request neu gerechnet.
+1. **Vorlagen sind Objekte, keine Strings.** Neue Tabelle `hub_comment_templates`
+   (`owner_user_id` NULL = System, `name`, `body`, `is_shared`). Sichtbarkeit: eigene +
+   geteilte + System. Aendern darf nur der Owner (System: Admin), Nutzer anderer geteilter
+   Vorlagen koennen eine **Kopie** ziehen.
+2. **Geraete referenzieren** eine Vorlage (`hub_device_settings.comment_template_id`,
+   `ON DELETE SET NULL`). **Aufloesungskette an einer Stelle**: Vorlage -> Legacy-Freitext
+   aus v0.33.0 -> `DEFAULT_TEMPLATE`. Bestandsgeraete funktionieren unveraendert.
+3. **Referenz statt Kopie ist der Default**: Aenderungen einer geteilten Vorlage greifen
+   beim naechsten Sync bei allen Nutzern. Ungefaehrlich, weil der Export immer den
+   **aufgeloesten Body** mitschickt (kein halb umgestellter Lauf). Kopie als Ausweg.
+4. **Vorschau im Hub**: 10 Tracks aus der Vereinigung der aktiven Backpacks des Geraets,
+   live unter der Auswahl (htmx, 400 ms). Daten nur aus dem Hub
+   (`hub_track_resolved_tags`, `hub_track_audio` — dieselben Abfragen wie der
+   Backpack-Export). Zeichenzaehler `n/512`, Kuerzung sichtbar.
+5. **Ein Renderer**: Die Semantik (Platzhalter, Slugging, Deckel, Whitespace, Fallback)
+   zieht in die Crate `comment-template`; `music-hub` (Validierung, Vorschau) und
+   `kellner` (Schreiben) benutzen sie. Golden-Fixture als Vertrag plus Test
+   „Vorschau == geschriebene Datei".
+6. **System-Vorlagen** werden mit der Migration geseedet (z. B. „Standard"
+   `{tags} {bpm} {key} {energy}`, „Nur Tags" `{tags}`) und sind schreibgeschuetzt.
+7. **kellner** bekommt `comment --preview [--limit N]` fuer dieselbe Sicht offline.
 
 **Consequences**:
 
-- **Vorschau kann nicht luegen**: beide Seiten rufen dieselbe Funktion auf, der
-  Golden-Test haelt sie zusammen.
-- **Neue Crate = neuer CI-Job** (wie `music-api-client`); dafuer keine dritte
-  Implementierung und keine zwei Listen erlaubter Platzhalter mehr.
-- **Verhalten bleibt**: Platzhalter, Slugging (`Hard Techno` -> `Hard-Techno`), Deckel und
-  Fallback sind unveraendert — der Umzug ist ein Move, keine Neuerung.
-- **Vorschau-Daten koennen vom Sync abweichen**, wenn sich Tags zwischen Vorschau und Lauf
-  aendern; das ist beabsichtigt (Momentaufnahme, kein Cache).
+- **Wiederverwendbar und teilbar**: eine Vorlage, viele Geraete — auch ueber User hinweg.
+- **Vorschau kann nicht luegen**: eine Funktion, ein Golden-Test.
+- **Additive Migration**: `hub_comment_templates` + eine Spalte; der Freitext bleibt als
+  Fallback, nichts bricht.
+- **Neue Crate = neuer CI-Job** (wie `music-api-client`).
+- **Loeschen ist sicher**: `ON DELETE SET NULL` laesst das Geraet auf Legacy/Default
+  zurueckfallen statt in einen kaputten Zustand.
+- **tonies-hub** (eigener Dienst, eigene DB) bekommt eine eigene Bibliothek — bewusst nicht
+  hier mitgebaut.
