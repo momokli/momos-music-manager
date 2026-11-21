@@ -29,7 +29,7 @@
 {% if system.is_empty() %}
 <p class="hub-empty">Keine System-Vorlagen.</p>
 {% else %}
-<div class="hub-backpack-grid">
+<div class="hub-backpack-grid hub-ct-grid">
     {% for c in system %}
     <article class="hub-backpack-card">
         <header>
@@ -52,7 +52,7 @@
 {% if mine.is_empty() %}
 <p class="hub-empty">Noch keine eigenen Vorlagen.</p>
 {% else %}
-<div class="hub-backpack-grid">
+<div class="hub-backpack-grid hub-ct-grid">
     {% for c in mine %}
     <article class="hub-backpack-card">
         <header>
@@ -75,7 +75,7 @@
 {% if shared.is_empty() %}
 <p class="hub-empty">Keine geteilten Vorlagen anderer Nutzer.</p>
 {% else %}
-<div class="hub-backpack-grid">
+<div class="hub-backpack-grid hub-ct-grid">
     {% for c in shared %}
     <article class="hub-backpack-card">
         <header>

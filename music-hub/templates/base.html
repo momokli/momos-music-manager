@@ -245,6 +245,65 @@
       main.container-fluid {
         padding-inline: 0.6rem;
         padding-block: 0.6rem;
+        max-width: 80rem;
+        margin-inline: auto;
+      }
+      /* Desktop density (C7): cap text/select/textarea width inside forms.
+         Checkbox/radio/submit/button/hidden stay untouched. */
+      main form input:not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"]):not([type="hidden"]),
+      main form select,
+      main form textarea {
+        max-width: 32rem;
+      }
+      /* Card grids: keep cards at a readable width instead of stretching. */
+      .hub-backpack-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(20rem, 24rem));
+        gap: 0.6rem;
+        align-items: start;
+      }
+      /* /kellner: two columns from 64rem (settings left, preview right). */
+      .hub-kellner-cols {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 0.8rem;
+        align-items: start;
+      }
+      @media (min-width: 64rem) {
+        .hub-kellner-cols {
+          grid-template-columns: minmax(18rem, 24rem) 1fr;
+        }
+      }
+      /* /comment-templates: compact rows on desktop, cards on mobile. */
+      @media (min-width: 64rem) {
+        .hub-ct-grid {
+          display: block;
+        }
+        .hub-ct-grid .hub-backpack-card {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 0.4rem 0.8rem;
+          padding: 0.4rem 0.6rem;
+          margin: 0 0 0.3rem;
+        }
+        .hub-ct-grid .hub-backpack-card > header {
+          flex: 0 0 12rem;
+          margin: 0;
+        }
+        .hub-ct-grid .hub-backpack-card > header h4 {
+          margin: 0;
+        }
+        .hub-ct-grid .hub-backpack-card > form {
+          margin: 0;
+        }
+        .hub-ct-grid .hub-backpack-card input[type="text"] {
+          max-width: 16rem;
+        }
+        .hub-ct-grid .hub-backpack-card > p,
+        .hub-ct-grid .hub-backpack-card .hub-preview {
+          flex-basis: 100%;
+        }
       }
       .hub-badge {
         display: inline-block;
@@ -595,7 +654,7 @@
       /* Tag-task card queue (#347) */
       .hub-tag-task-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(20rem, 24rem));
         gap: 0.6rem;
         align-items: start;
       }
