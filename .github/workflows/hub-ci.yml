@@ -7,11 +7,13 @@ on:
   pull_request:
     paths:
       - 'music-hub/**'
+      - 'music-api-client/**'
       - '.github/workflows/hub-ci.yml'
   push:
     branches: [main]
     paths:
       - 'music-hub/**'
+      - 'music-api-client/**'
       - '.github/workflows/hub-ci.yml'
 
 permissions:
@@ -37,8 +39,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: music-hub -> target
+          workspaces: |
+            music-hub -> target
+            music-api-client -> target
           key: hub-ci
+      # The hub path-depends on the client, so build/test it first.
+      - name: cargo build + test (music-api-client)
+        working-directory: music-api-client
+        run: cargo build --locked && cargo test --locked
       - name: cargo build
         run: cargo build --locked
       - name: cargo test

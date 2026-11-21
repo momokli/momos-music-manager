@@ -1315,6 +1315,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
+name = "music-api-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "urlencoding",
+]
+
+[[package]]
 name = "music-hub"
 version = "0.33.0"
 dependencies = [
@@ -1327,6 +1338,7 @@ dependencies = [
  "clap",
  "dotenvy",
  "libc",
+ "music-api-client",
  "ort",
  "rand 0.8.8",
  "reqwest",
