@@ -204,7 +204,9 @@ async fn delete_cascades_and_enforces_ownership() {
 // ── HTTP layer ───────────────────────────────────────────────────────────────
 
 fn count_cards(body: &str) -> usize {
-    body.matches("hub-backpack-card").count()
+    // Count the rendered card element, not raw "hub-backpack-card" token occurrences,
+    // so inline CSS selectors in the <style> block cannot inflate the count.
+    body.matches("<article class=\"hub-backpack-card\"").count()
 }
 
 async fn get_backpacks(app: &common::TestApp, cookie: &str) -> String {

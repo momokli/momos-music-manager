@@ -13,7 +13,7 @@
     Noch keine Geräte. Heuere einen Kellner an, um hier Einstellungen zu verwalten.
 </p>
 {% else %}
-<div class="hub-backpack-grid">
+<div class="hub-kellner-grid">
     {% for c in cards %}
     <article class="hub-backpack-card">
         <header>
@@ -24,6 +24,7 @@
             <p class="hub-muted">Gerät #{{ c.id }}</p>
         </header>
 
+        <div class="hub-kellner-cols">
         <form
             method="post"
             action="/kellner/{{ c.id }}/settings"
@@ -72,14 +73,6 @@
             </label>
             {% endif %}
 
-            <p class="hub-muted">Vorschau: {{ c.resolved_comment }}</p>
-
-            <div id="preview-{{ c.id }}" class="hub-preview">{{ c.preview_html|safe }}</div>
-
-            <p class="hub-muted">
-                <a href="/comment-templates">Vorlagen verwalten</a>
-            </p>
-
             <label>
                 Aktive Backpacks
                 {% if c.backpacks.is_empty() %}
@@ -100,6 +93,17 @@
 
             <button type="submit">Speichern</button>
         </form>
+
+        <div class="hub-kellner-preview">
+            <p class="hub-muted">Vorschau: {{ c.resolved_comment }}</p>
+
+            <div id="preview-{{ c.id }}" class="hub-preview">{{ c.preview_html|safe }}</div>
+
+            <p class="hub-muted">
+                <a href="/comment-templates">Vorlagen verwalten</a>
+            </p>
+        </div>
+        </div>
 
         {% if c.selected_template_id != 0 %}
         <form method="post" action="/comment-templates/{{ c.selected_template_id }}/duplicate">
