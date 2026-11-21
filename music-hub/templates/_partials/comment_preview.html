@@ -1,9 +1,9 @@
-{# htmx comment-template preview fragment (issue #670, slice C4). #}
+{# htmx comment-template preview fragment (issue #670, slice C4; source #678, slice C6). #}
 {% if empty %}
-<p class="hub-empty">Keine aktiven Backpacks — Vorschau nicht möglich.</p>
+<p class="hub-empty">Keine getaggten Tracks — Vorschau nicht möglich.</p>
 {% else %}
 {% if rows.is_empty() %}
-<p class="hub-muted">Keine Tracks in den aktiven Backpacks.</p>
+<p class="hub-muted">Keine getaggten Tracks — Vorschau nicht möglich.</p>
 {% else %}
 <ul class="hub-preview-list" style="list-style: none; padding: 0; margin: 0">
     {% for r in rows %}

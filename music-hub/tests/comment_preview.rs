@@ -1,16 +1,17 @@
-//! Integration tests for the comment-template preview (issue #670, slice C4).
+//! Integration tests for the comment-template preview (issue #670, slice C4;
+//! source switched in #678, slice C6).
 //!
 //! Covers the `/kellner/{id}/template/preview` and
 //! `/comment-templates/{id}/preview` htmx fragments against the `common`
-//! harness: session gating, `404` scoping, the union/dedup/export-order track
-//! source, the `10 von N` + `n/512` counters, the `...` cut and the "no active
-//! backpack" hint. No music-api is configured in the harness, so a `200` also
-//! proves the preview never reaches out (acceptance: no network call / no
-//! `MUSIC_API_TOKEN`).
+//! harness: session gating, `404` scoping, the **top tagged tracks** source
+//! (rank `tag_count DESC, last_tagged_at DESC NULLS last, id ASC`,
+//! `PREVIEW_LIMIT = 3`), the `3 von N` + `n/512` counters, the scope of the
+//! caller's own tags, backpack-independence and the empty hint. No music-api is
+//! configured in the harness, so a `200` also proves the preview never reaches
+//! out (acceptance: no network call / no `MUSIC_API_TOKEN`).
 
 mod common;
 
-use music_hub::backpacks::{self, SourceRef};
 use music_hub::devices::hash_token;
 use reqwest::StatusCode;
 
@@ -44,6 +45,16 @@ async fn track(app: &common::TestApp, sid: &str, title: &str) -> i64 {
     .expect("insert track")
 }
 
+/// Set a track's `last_tagged_at` (rank tiebreak input; `None` = NULL).
+async fn set_last_tagged(app: &common::TestApp, track_id: i64, at: Option<&str>) {
+    sqlx::query("UPDATE hub_tracks SET last_tagged_at = ?2 WHERE id = ?1")
+        .bind(track_id)
+        .bind(at)
+        .execute(&app.pool)
+        .await
+        .expect("set last_tagged_at");
+}
+
 async fn tag(app: &common::TestApp, user_id: i64, slug: &str, name: &str) -> i64 {
     sqlx::query_scalar(
         "INSERT INTO hub_tags (owner_user_id, slug, name, created_at)
@@ -67,6 +78,14 @@ async fn resolve_tag(app: &common::TestApp, track_id: i64, tag_id: i64) {
         .expect("resolved tag");
 }
 
+/// Tag `track_id` with `count` fresh, distinct tags owned by `user_id`.
+async fn tag_with(app: &common::TestApp, user_id: i64, track_id: i64, prefix: &str, count: usize) {
+    for i in 0..count {
+        let tg = tag(app, user_id, &format!("{prefix}-{i}"), &format!("Tag {prefix} {i}")).await;
+        resolve_tag(app, track_id, tg).await;
+    }
+}
+
 async fn audio(app: &common::TestApp, track_id: i64, bpm: Option<f64>, key: Option<&str>) {
     sqlx::query("INSERT INTO hub_track_audio (track_id, bpm, musical_key) VALUES (?1, ?2, ?3)")
         .bind(track_id)
@@ -75,35 +94,6 @@ async fn audio(app: &common::TestApp, track_id: i64, bpm: Option<f64>, key: Opti
         .execute(&app.pool)
         .await
         .expect("audio");
-}
-
-/// Create a backpack holding `track_ids` in order (literal track sources).
-async fn backpack_with(app: &common::TestApp, user_id: i64, name: &str, track_ids: &[i64]) -> i64 {
-    let bp = backpacks::create_backpack(&app.pool, user_id, name)
-        .await
-        .expect("create backpack");
-    for t in track_ids {
-        backpacks::add_source(&app.pool, bp, SourceRef::Track(*t))
-            .await
-            .expect("add source");
-    }
-    bp
-}
-
-async fn set_device_backpacks(app: &common::TestApp, device_id: i64, ids: &[i64]) {
-    for (pos, bid) in ids.iter().enumerate() {
-        sqlx::query(
-            "INSERT INTO hub_device_backpacks (device_id, backpack_id, position, added_at)
-             VALUES (?1, ?2, ?3, ?4)",
-        )
-        .bind(device_id)
-        .bind(bid)
-        .bind(pos as i64)
-        .bind(TS)
-        .execute(&app.pool)
-        .await
-        .expect("link device backpack");
-    }
 }
 
 async fn template(
@@ -217,7 +207,7 @@ async fn foreign_private_template_is_404_shared_is_200() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "foreign private → 404");
 
-    let (status, html) = post_form(
+    let (status, _) = post_form(
         &app,
         Some(&alice_cookie),
         &format!("/comment-templates/{shared}/preview"),
@@ -226,7 +216,7 @@ async fn foreign_private_template_is_404_shared_is_200() {
     .await;
     assert_eq!(status, StatusCode::OK, "shared read-only → 200");
 
-    let (status, _) = post_form(
+    let (status, html) = post_form(
         &app,
         Some(&alice_cookie),
         &format!("/comment-templates/{system}/preview"),
@@ -234,57 +224,68 @@ async fn foreign_private_template_is_404_shared_is_200() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "system → 200");
-    assert!(html.contains("Keine aktiven Backpacks"), "no active bp hint");
+    assert!(html.contains("Keine getaggten Tracks"), "no tagged tracks hint");
 }
 
-// ── counters, order, dedup, cut ──────────────────────────────────────────────
+// ── source: top tagged tracks, rank, limit, counter ──────────────────────────
 
 #[tokio::test]
-async fn device_preview_shows_ten_of_n_and_rows() {
+async fn device_preview_shows_three_of_n_in_rank_order() {
     let app = common::spawn().await;
     let (uid, cookie) = app.user_with_password("cp-alice", "1234").await;
     let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
 
-    // 15 + 10 distinct tracks in two active backpacks.
-    let mut t1: Vec<i64> = Vec::new();
-    for i in 0..15 {
-        t1.push(track(&app, &format!("s1{i}"), &format!("T1-{i}")).await);
-    }
-    let mut t2: Vec<i64> = Vec::new();
-    for i in 0..10 {
-        t2.push(track(&app, &format!("s2{i}"), &format!("T2-{i}")).await);
-    }
-    let bpa = backpack_with(&app, uid, "real-a", &t1).await;
-    let bpb = backpack_with(&app, uid, "real-b", &t2).await;
-    set_device_backpacks(&app, did, &[bpa, bpb]).await;
+    // Five tagged tracks with strictly decreasing tag counts (ids ascending):
+    // rank must be Alpha (5), Bravo (4), Charlie (3), Delta (2), Echo (1).
+    let alpha = track(&app, "r1", "Alpha").await;
+    let bravo = track(&app, "r2", "Bravo").await;
+    let charlie = track(&app, "r3", "Charlie").await;
+    let delta = track(&app, "r4", "Delta").await;
+    let echo = track(&app, "r5", "Echo").await;
+    tag_with(&app, uid, alpha, "a", 5).await;
+    tag_with(&app, uid, bravo, "b", 4).await;
+    tag_with(&app, uid, charlie, "c", 3).await;
+    tag_with(&app, uid, delta, "d", 2).await;
+    tag_with(&app, uid, echo, "e", 1).await;
 
     let (status, html) = post_form(
         &app,
         Some(&cookie),
         &format!("/kellner/{did}/template/preview"),
-        "comment_template_id=0&comment_template={tags}",
+        "comment_template_id=0&comment_template={tags} {bpm}",
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(html.contains("10 von 25"), "counter: {html}");
-    assert!(html.contains("T1-0"), "first track listed");
+    assert!(html.contains("3 von 5"), "counter: {html}");
     assert!(html.contains("/512"), "char counter shown");
-    assert!(!html.contains("T1-11"), "only the first ten rendered");
+
+    let a = html.find("Alpha").expect("Alpha present");
+    let b = html.find("Bravo").expect("Bravo present");
+    let c = html.find("Charlie").expect("Charlie present");
+    assert!(a < b && b < c, "rank order tag_count DESC: {html}");
+    assert!(!html.contains("Delta"), "only the top three rendered");
+    assert!(!html.contains("Echo"), "only the top three rendered");
 }
 
 #[tokio::test]
-async fn union_dedups_and_keeps_export_order() {
+async fn rank_tiebreak_last_tagged_at_then_id() {
     let app = common::spawn().await;
     let (uid, cookie) = app.user_with_password("cp-alice", "1234").await;
     let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
 
-    let t1 = track(&app, "u1", "Erste").await;
-    let t2 = track(&app, "u2", "Zweite").await;
-    let t3 = track(&app, "u3", "Dritte").await;
-    // bp1 = [t1, t2]; bp2 = [t2, t3]; t2 must appear exactly once.
-    let bpa = backpack_with(&app, uid, "u-a", &[t1, t2]).await;
-    let bpb = backpack_with(&app, uid, "u-b", &[t2, t3]).await;
-    set_device_backpacks(&app, did, &[bpa, bpb]).await;
+    // Four tracks, one tag each (equal tag_count). Order by last_tagged_at DESC
+    // (NULLs last), then id ASC: Bravo (newest), Alpha, then the NULL pair by id.
+    let alpha = track(&app, "t1", "Alpha").await;
+    let bravo = track(&app, "t2", "Bravo").await;
+    let charlie = track(&app, "t3", "Charlie").await;
+    let delta = track(&app, "t4", "Delta").await;
+    tag_with(&app, uid, alpha, "a", 1).await;
+    tag_with(&app, uid, bravo, "b", 1).await;
+    tag_with(&app, uid, charlie, "c", 1).await;
+    tag_with(&app, uid, delta, "d", 1).await;
+    set_last_tagged(&app, alpha, Some("2026-02-01T00:00:00+00:00")).await;
+    set_last_tagged(&app, bravo, Some("2026-03-01T00:00:00+00:00")).await;
+    // charlie, delta both NULL → id ascending puts charlie (lower id) first.
 
     let (status, html) = post_form(
         &app,
@@ -294,12 +295,114 @@ async fn union_dedups_and_keeps_export_order() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(html.contains("3 von 3"), "deduped total: {html}");
-    let first = html.find("Erste").expect("Erste present");
-    let second = html.find("Zweite").expect("Zweite present");
-    let third = html.find("Dritte").expect("Dritte present");
-    assert!(first < second && second < third, "export order preserved");
-    assert_eq!(html.matches("Zweite").count(), 1, "t2 not duplicated");
+    assert!(html.contains("3 von 4"), "counter: {html}");
+
+    let b = html.find("Bravo").expect("Bravo present");
+    let a = html.find("Alpha").expect("Alpha present");
+    let c = html.find("Charlie").expect("Charlie present");
+    assert!(b < a && a < c, "tiebreak order newest-then-id: {html}");
+    assert!(!html.contains("Delta"), "id tiebreak kept Delta out");
+}
+
+#[tokio::test]
+async fn scope_ignores_foreign_tag() {
+    let app = common::spawn().await;
+    let (alice, cookie) = app.user_with_password("cp-alice", "1234").await;
+    let (bob, _bob) = app.user_with_password("cp-bob", "1234").await;
+    let did = bound_device(&app, alice, "alice-k", &"a".repeat(64)).await;
+
+    // A track carrying only Bob's tag must stay invisible to Alice.
+    let foreign = track(&app, "f1", "ForeignOnly").await;
+    let bob_tag = tag(&app, bob, "bobtag", "BobTag").await;
+    resolve_tag(&app, foreign, bob_tag).await;
+
+    // A track carrying Alice's own tag is visible.
+    let own = track(&app, "o1", "OwnTrack").await;
+    let alice_tag = tag(&app, alice, "alicetag", "AliceTag").await;
+    resolve_tag(&app, own, alice_tag).await;
+
+    let (status, html) = post_form(
+        &app,
+        Some(&cookie),
+        &format!("/kellner/{did}/template/preview"),
+        "comment_template_id=0&comment_template={tags}",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("OwnTrack"), "own tag visible: {html}");
+    assert!(html.contains("AliceTag"), "own tag rendered");
+    assert!(!html.contains("ForeignOnly"), "foreign tag hidden: {html}");
+    assert!(html.contains("1 von 1"), "foreign track not counted: {html}");
+}
+
+#[tokio::test]
+async fn tagged_tracks_shown_without_backpack() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("cp-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+
+    // No backpack at all — the source is the user's tagged tracks.
+    let t1 = track(&app, "n1", "NoBackpack").await;
+    tag_with(&app, uid, t1, "n", 2).await;
+
+    let (status, html) = post_form(
+        &app,
+        Some(&cookie),
+        &format!("/kellner/{did}/template/preview"),
+        "comment_template_id=0&comment_template={tags}",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("NoBackpack"), "tagged track without bp: {html}");
+    assert!(html.contains("1 von 1"), "counter: {html}");
+}
+
+#[tokio::test]
+async fn library_preview_uses_users_tagged_tracks() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("cp-alice", "1234").await;
+
+    let t1 = track(&app, "l1", "Lib-Track").await;
+    let tg = tag(&app, uid, "house", "House").await;
+    resolve_tag(&app, t1, tg).await;
+
+    let tid = template(&app, Some(uid), "Lib", "{tags}", false).await;
+
+    let (status, html) = post_form(
+        &app,
+        Some(&cookie),
+        &format!("/comment-templates/{tid}/preview"),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Lib-Track"), "tagged track: {html}");
+    assert!(html.contains("House"), "rendered tag");
+    assert!(html.contains("1 von 1"), "counter: {html}");
+}
+
+// ── render: facts join, cut, empty hint ──────────────────────────────────────
+
+#[tokio::test]
+async fn preview_renders_tags_and_audio_from_hub() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("cp-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+
+    let t1 = track(&app, "r1", "Rendered").await;
+    let tg = tag(&app, uid, "techno", "Techno").await;
+    resolve_tag(&app, t1, tg).await;
+    audio(&app, t1, Some(128.0), Some("8A")).await;
+
+    let (status, html) = post_form(
+        &app,
+        Some(&cookie),
+        &format!("/kellner/{did}/template/preview"),
+        "comment_template_id=0&comment_template={tags} {bpm} {key}",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Techno BPM-128 KEY-8A"), "rendered facts: {html}");
 }
 
 #[tokio::test]
@@ -309,8 +412,8 @@ async fn over_512_chars_is_cut_with_marker() {
     let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
 
     let t1 = track(&app, "c1", "Long").await;
-    let bp = backpack_with(&app, uid, "c-bp", &[t1]).await;
-    set_device_backpacks(&app, did, &[bp]).await;
+    let tg = tag(&app, uid, "long", "LongTag").await;
+    resolve_tag(&app, t1, tg).await;
 
     // A 600-char literal body pushes the rendered Comment past 512.
     let body = format!("{} {{tags}}", "x".repeat(600));
@@ -329,70 +432,14 @@ async fn over_512_chars_is_cut_with_marker() {
     assert!(!html.contains(&"x".repeat(600)), "the filler was cut");
 }
 
-// ── tag/audio join + library variant union ──────────────────────────────────
-
 #[tokio::test]
-async fn preview_renders_tags_and_audio_from_hub() {
+async fn device_without_tagged_tracks_shows_hint() {
     let app = common::spawn().await;
     let (uid, cookie) = app.user_with_password("cp-alice", "1234").await;
     let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
 
-    let t1 = track(&app, "r1", "Rendered").await;
-    let tg = tag(&app, uid, "techno", "Techno").await;
-    resolve_tag(&app, t1, tg).await;
-    audio(&app, t1, Some(128.0), Some("8A")).await;
-    let bp = backpack_with(&app, uid, "r-bp", &[t1]).await;
-    set_device_backpacks(&app, did, &[bp]).await;
-
-    let (status, html) = post_form(
-        &app,
-        Some(&cookie),
-        &format!("/kellner/{did}/template/preview"),
-        "comment_template_id=0&comment_template={tags} {bpm} {key}",
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(html.contains("Techno BPM-128 KEY-8A"), "rendered facts: {html}");
-}
-
-#[tokio::test]
-async fn library_preview_uses_active_backpacks_of_user() {
-    let app = common::spawn().await;
-    let (uid, cookie) = app.user_with_password("cp-alice", "1234").await;
-
-    let t1 = track(&app, "l1", "Lib-Track").await;
-    let bp_active = backpack_with(&app, uid, "lib-active", &[t1]).await;
-    // A second, non-active backpack must not contribute.
-    let t2 = track(&app, "l2", "Ignored").await;
-    let _bp_idle = backpack_with(&app, uid, "lib-idle", &[t2]).await;
-    backpacks::set_active(&app.pool, uid, bp_active)
-        .await
-        .expect("set active");
-
-    let tid = template(&app, Some(uid), "Lib", "{tags}", false).await;
-    // Give t1 a tag so the row is non-empty.
-    let tg = tag(&app, uid, "house", "House").await;
-    resolve_tag(&app, t1, tg).await;
-
-    let (status, html) = post_form(
-        &app,
-        Some(&cookie),
-        &format!("/comment-templates/{tid}/preview"),
-        "",
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(html.contains("Lib-Track"), "active backpack track: {html}");
-    assert!(html.contains("House"), "rendered tag");
-    assert!(!html.contains("Ignored"), "idle backpack excluded");
-    assert!(html.contains("1 von 1"), "counter: {html}");
-}
-
-#[tokio::test]
-async fn device_without_active_backpack_shows_hint() {
-    let app = common::spawn().await;
-    let (uid, cookie) = app.user_with_password("cp-alice", "1234").await;
-    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+    // A track exists but carries no tag → nothing to preview.
+    let _t = track(&app, "e1", "Untagged").await;
 
     let (status, html) = post_form(
         &app,
@@ -403,6 +450,9 @@ async fn device_without_active_backpack_shows_hint() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(html.contains("hub-empty"), "hint rendered: {html}");
-    assert!(html.contains("Keine aktiven Backpacks"), "hint text: {html}");
+    assert!(
+        html.contains("Keine getaggten Tracks — Vorschau nicht möglich."),
+        "hint text: {html}"
+    );
     assert!(!html.contains("<li"), "no rows");
 }

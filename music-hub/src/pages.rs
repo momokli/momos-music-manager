@@ -5669,8 +5669,7 @@ async fn comment_template_delete(
 /// POST `/comment-templates/{id}/preview` (`#670`) — htmx fragment. Session
 /// required; a template not visible to the caller (foreign private / unknown)
 /// is a `404` (no cross-user leak). Read-only templates (shared / system) are
-/// previewable. Track source: the union of the caller's **active** backpacks
-/// (`hub_backpacks.is_active = 1`), ordered by backpack id.
+/// previewable. Track source: the caller's top tagged tracks (`#678`).
 async fn comment_template_preview(
     State(st): State<AppState>,
     Path(id): Path<i64>,
@@ -5683,15 +5682,8 @@ async fn comment_template_preview(
         Ok(Some(t)) => t,
         _ => return not_found("Vorlage nicht gefunden."),
     };
-    let backpack_ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT id FROM hub_backpacks WHERE user_id = ?1 AND is_active = 1 ORDER BY id",
-    )
-    .bind(nav.id)
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default();
 
-    match crate::preview::comment_preview(&st.pool, &backpack_ids, &tpl.body).await {
+    match crate::preview::comment_preview(&st.pool, nav.id, &tpl.body).await {
         Ok(p) => render(&p),
         Err(e) => {
             tracing::warn!("comment template preview failed for user {}: {e:#}", nav.id);

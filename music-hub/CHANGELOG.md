@@ -10,6 +10,16 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Vorschau zeigt Top-3 getaggte Tracks** (#678, Slice C6) — die Vorschau der
+  Comment-Vorlage speist sich jetzt aus den **eigenen getaggten Tracks** des Nutzers
+  statt aus der Union der aktiven Backpacks: bis zu **3** Tracks (`PREVIEW_LIMIT = 3`)
+  in Rangfolge (`tag_count DESC`, `last_tagged_at DESC`, `track_id ASC`), Zähler
+  `3 von N` (N = Anzahl der getaggten Tracks, dedupliziert über `track_id`). Die
+  Routen `POST /kellner/{id}/template/preview` und `POST /comment-templates/{id}/preview`
+  bleiben unverändert. Ohne getaggten Track erscheint der Hinweis „Keine getaggten
+  Tracks — Vorschau nicht möglich.". Daten weiterhin ausschließlich aus dem Hub
+  (`hub_track_resolved_tags` + `hub_tags`, `hub_track_audio`), **kein Netzwerk-Call,
+  kein `MUSIC_API_TOKEN`**; Vorschau == geschriebene Datei (byte-identisch).
 - feat: **Comment-Vorlagen-Vorschau** (#670, Slice C4) — unter der Vorlagen-Auswahl
   rendert der Hub eine **Vorschau der ersten 10 Tracks** (Union der **aktiven**
   Backpacks des Geräts, in Export-Reihenfolge, globales Dedup über `track_id`) inkl.
