@@ -4,8 +4,9 @@
 //!
 //! * **Download priority** — every touched track is ordered at music-api by ISRC
 //!   with a priority derived from its references (liked / playlist count /
-//!   now-playing). Re-ordering is a cheap no-op, and [`order_pending`] only
-//!   re-orders on a real change (tracked in `hub_order_state`).
+//!   backpack membership / now-playing). Re-ordering is a cheap no-op, and
+//!   [`order_pending`] only re-orders on a real change (tracked in
+//!   `hub_order_state`).
 //! * **Touch-cascade** — a bounded, TTL'd Spotify crawl: touched artists →
 //!   `GET /artists/{id}/albums` (all release groups) → `hub_albums`; each album →
 //!   `GET /albums/{id}/tracks` → `hub_tracks`; plus `GET /artists/{id}/top-tracks`
@@ -64,8 +65,30 @@ pub async fn requests_per_pass(pool: &SqlitePool) -> usize {
 
 // ── download priority ────────────────────────────────────────────────────────
 
-/// Download priority for one track from its references (plan §2):
-/// `(liked ? 1 : 0) + playlist_refs`. `0` when the track has no reference.
+/// Bonus added to a track's download priority when it is a member of **any**
+/// backpack (#683). Backpack members outrank playlist-only tracks but stay
+/// below the deliberate `PLAYLIST_PRIORITY` bump. Every backpack counts —
+/// active or not (no `is_active` filter).
+pub const BACKPACK_BONUS: i32 = 2;
+
+/// SQL fragment for the download priority over a track aliased `t` (#683):
+/// `liked(0/1) + playlist_refs + backpack_membership * BACKPACK_BONUS`.
+///
+/// One definition, shared by [`priorities`] (the value source) and
+/// [`order_pending`] (the change detector), so the two can never drift.
+fn priority_expr() -> String {
+    format!(
+        "(CASE WHEN EXISTS (SELECT 1 FROM hub_liked_tracks l WHERE l.track_id = t.id)
+               THEN 1 ELSE 0 END)
+         + (SELECT COUNT(*) FROM hub_playlist_tracks pt WHERE pt.track_id = t.id)
+         + ((CASE WHEN EXISTS (SELECT 1 FROM hub_backpack_item_tracks bt WHERE bt.track_id = t.id)
+                  THEN 1 ELSE 0 END) * {BACKPACK_BONUS})"
+    )
+}
+
+/// Download priority for one track from its references (plan §2, #683):
+/// `(liked ? 1 : 0) + playlist_refs + backpack_bonus`. `0` when the track has
+/// no reference.
 pub async fn priority_of(pool: &SqlitePool, track_id: i64) -> i32 {
     priorities(pool, &[track_id])
         .await
@@ -79,10 +102,8 @@ pub async fn priorities(pool: &SqlitePool, ids: &[i64]) -> HashMap<i64, i32> {
     let mut out = HashMap::new();
     for chunk in ids.chunks(CHUNK) {
         let sql = format!(
-            "SELECT t.id AS id,
-                    (SELECT COUNT(*) FROM hub_liked_tracks l WHERE l.track_id = t.id) AS likes,
-                    (SELECT COUNT(*) FROM hub_playlist_tracks pt WHERE pt.track_id = t.id) AS pl_refs
-               FROM hub_tracks t WHERE t.id IN ({})",
+            "SELECT t.id AS id, {} AS prio FROM hub_tracks t WHERE t.id IN ({})",
+            priority_expr(),
             in_clause(chunk.len())
         );
         let mut q = sqlx::query(&sql);
@@ -91,10 +112,8 @@ pub async fn priorities(pool: &SqlitePool, ids: &[i64]) -> HashMap<i64, i32> {
         }
         for r in q.fetch_all(pool).await.unwrap_or_default() {
             let id: i64 = r.get("id");
-            let likes: i64 = r.get("likes");
-            let pl_refs: i64 = r.get("pl_refs");
-            let liked = i64::from(likes > 0);
-            out.insert(id, (liked + pl_refs) as i32);
+            let prio: i64 = r.get("prio");
+            out.insert(id, prio as i32);
         }
     }
     out
@@ -191,36 +210,35 @@ pub async fn order_pending(pool: &SqlitePool, cfg: &Config, limit: usize) -> Res
     if !flag_setting(pool, settings::CRAWL_ORDER_ON_TOUCH, true).await {
         return Ok(0);
     }
-    let rows = sqlx::query(
-        "SELECT t.id AS id, t.isrc AS isrc,
-                (CASE WHEN EXISTS (SELECT 1 FROM hub_liked_tracks l WHERE l.track_id = t.id)
-                      THEN 1 ELSE 0 END)
-                + (SELECT COUNT(*) FROM hub_playlist_tracks pt WHERE pt.track_id = t.id) AS prio
+    // Candidates: tracks with an ISRC referenced by a like, a playlist **or a
+    // backpack** (#683) whose recorded priority is stale. The priority formula
+    // lives once in `priority_expr()`; the value actually sent comes from
+    // `priorities()` (the single source), so the two can never disagree.
+    let sql = format!(
+        "SELECT t.id AS id, t.isrc AS isrc
            FROM hub_tracks t
            LEFT JOIN hub_order_state o ON o.track_id = t.id
           WHERE t.isrc IS NOT NULL AND TRIM(t.isrc) <> ''
             AND (EXISTS (SELECT 1 FROM hub_liked_tracks l WHERE l.track_id = t.id)
-                 OR EXISTS (SELECT 1 FROM hub_playlist_tracks pt WHERE pt.track_id = t.id))
-            AND (o.track_id IS NULL OR o.priority <> (
-                 (CASE WHEN EXISTS (SELECT 1 FROM hub_liked_tracks l WHERE l.track_id = t.id)
-                       THEN 1 ELSE 0 END)
-                 + (SELECT COUNT(*) FROM hub_playlist_tracks pt WHERE pt.track_id = t.id)))
+                 OR EXISTS (SELECT 1 FROM hub_playlist_tracks pt WHERE pt.track_id = t.id)
+                 OR EXISTS (SELECT 1 FROM hub_backpack_item_tracks bt WHERE bt.track_id = t.id))
+            AND (o.track_id IS NULL OR o.priority <> ({}))
           ORDER BY t.first_seen_at DESC, t.id DESC
           LIMIT ?1",
-    )
-    .bind(limit as i64)
-    .fetch_all(pool)
-    .await?;
+        priority_expr()
+    );
+    let rows = sqlx::query(&sql).bind(limit as i64).fetch_all(pool).await?;
     if rows.is_empty() {
         return Ok(0);
     }
     let mut by_id: HashMap<i64, String> = HashMap::new();
-    let mut prio: HashMap<i64, i32> = HashMap::new();
+    let mut ids: Vec<i64> = Vec::new();
     for r in &rows {
         let id: i64 = r.get("id");
         by_id.insert(id, r.get::<String, _>("isrc"));
-        prio.insert(id, r.get::<i64, _>("prio") as i32);
+        ids.push(id);
     }
+    let prio = priorities(pool, &ids).await;
     order_grouped(pool, cfg, &by_id, &prio).await
 }
 

@@ -91,6 +91,7 @@ topbar nav + user menu). The dashboard is `/`.
 | `/user/{slug}`      | A user's likes + playlists                                                       |
 | `/playlist/{id}`    | One playlist's tracks                                                            |
 | `/settings`         | Account + Spotify connect/sync/disconnect                                        |
+| `/backpacks`        | Backpacks aus Tags/Playlists/Linsen/Tracks; pro Karte **„Fehlende priorisieren“** (ordert die noch nicht geladenen Tracks mit `BACKPACK_PRIORITY`) |
 | `/comment-templates`| Comment-Vorlagen (CRUD, Teilen) mit Live-Vorschau beim Tippen (htmx)            |
 | `/sql`              | Read-only SQL console with presets                                               |
 | `/login`, `/signup` | Minimal auth shell                                                               |

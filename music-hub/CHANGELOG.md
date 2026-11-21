@@ -10,6 +10,17 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Jede Backpack-Mitgliedschaft ordert und priorisiert** (#683, Slice B2) —
+  die Download-Prioritaet zaehlt jetzt auch Backpacks: `crawl::priorities()` =
+  `liked + playlist_refs + backpack_bonus` mit der neuen Konstante
+  `crawl::BACKPACK_BONUS` (= 2). **Jedes** Backpack zaehlt, auch ein inaktives
+  (kein `is_active`-Filter). `crawl::order_pending()` nutzt dieselbe Formel (eine
+  Definition, kein SQL-Duplikat) und ordert jetzt auch **Backpack-only-Tracks**
+  (WHERE zusaetzlich `OR EXISTS(… hub_backpack_item_tracks …)`). Neu: `POST
+  /backpacks/{id}/prioritize` („Fehlende priorisieren“, `BACKPACK_PRIORITY`)
+  ordert die noch nicht `ready` Tracks eines Backpacks; das Hinzufuegen einer
+  Quelle (`POST /backpacks/{id}/sources`) ordert deren fehlende Tracks sofort mit.
+  **Keine Migration, kein Version-Bump.**
 - feat: **Backpack-Inhalte materialisiert** (#682, Slice B1) — der aufgelöste
   Track-Satz jedes Backpack-Items wird in der neuen Tabelle
   `hub_backpack_item_tracks` persistiert (Migration

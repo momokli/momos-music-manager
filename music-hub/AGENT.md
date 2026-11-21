@@ -298,6 +298,14 @@ sources·base_sources + shared·shared_factor + candidate·candidate_factor`.
   `/…/{id}/progress` every 10s).
 - **Order only missing**: `order_missing` refreshes `hub_music_state` (cache of per-ISRC state,
   migration 025) then orders only ISRCs not yet `ready` (`POST /orders`).
+- **Backpack priority (#683)**: `crawl::priorities()` = `liked + playlist_refs +
+  backpack_bonus` (`crawl::BACKPACK_BONUS = 2`); **every** backpack counts (even inactive).
+  `crawl::order_pending()` uses the same formula and also orders backpack-only tracks.
+  `POST /backpacks/{id}/sources` (`backpack_source_add`) orders the new source's missing
+  tracks immediately; `POST /backpacks/{id}/prioritize` (`backpack_prioritize`, button
+  „Fehlende priorisieren“) orders the backpack's not-yet-`ready` tracks with
+  `pages::BACKPACK_PRIORITY` (>= 5). Owner-scoped via `backpacks::backpack_owned_by`;
+  without a token a clean flash, no order.
 - **Download**: `zip_for` → `build_playlist_zip` fetches every ready track (`GET /isrc/{isrc}/{format}`,
   misses skipped) into a ZIP, then streams it (tmp unlinked before streaming — Linux fd stays valid).
   Single track: `GET /track/{id}/download?format=…`. `format` ∈ flac/mp3/wav/m4a.
