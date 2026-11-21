@@ -31,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/backpacks/{id}/delete", post(backpack_delete))
         .route("/backpacks/{id}/active", post(backpack_toggle_active))
         .route("/backpacks/{id}/sources", post(backpack_source_add))
+        .route("/backpacks/{id}/prioritize", post(backpack_prioritize))
         .route(
             "/backpacks/{id}/sources/{item_id}/delete",
             post(backpack_source_delete),
@@ -860,6 +861,11 @@ async fn playlist_order(
 
 /// Priority bump for the whole-playlist queue (`higher = earlier`).
 const PLAYLIST_PRIORITY: i32 = 10;
+
+/// Priority bump used when ordering a backpack's missing tracks (#683).
+/// `>= 5` per the issue; equal to [`PLAYLIST_PRIORITY`] so a backpack order is
+/// not starved behind an unprompted order.
+const BACKPACK_PRIORITY: i32 = 10;
 
 /// `POST /playlist/{id}/prioritize` — (re-)order every ISRC of the playlist with
 /// an elevated priority so music-api downloads it ahead of unprompted orders.
@@ -5293,9 +5299,110 @@ async fn backpack_source_add(
     };
 
     match crate::backpacks::add_source_with_limit(&st.pool, id, src, max_tracks).await {
-        Ok(_) => flash_redirect("/backpacks", "Quelle hinzugefügt".to_string()),
+        Ok(item_id) => {
+            // Immediate order (#683): the materialised tracks of the new source
+            // are ordered at music-api with `BACKPACK_PRIORITY` so they download
+            // ahead of unprompted orders. Without a token only a flash is shown.
+            let msg = backpack_order_item(&st, item_id).await;
+            flash_redirect("/backpacks", msg)
+        }
         Err(e) => flash_redirect("/backpacks", format!("Fehler: {e}")),
     }
+}
+
+/// Order the not-yet-`ready` tracks of one materialised backpack item with
+/// [`BACKPACK_PRIORITY`] (#683). Refreshes the `hub_music_state` cache first,
+/// then orders only the missing ISRCs. Returns a flash message; without a
+/// music-api token this is a hint and **no** order is issued.
+async fn backpack_order_item(st: &AppState, item_id: i64) -> String {
+    if st.cfg.music_api_token.is_none() {
+        return "Quelle hinzugefügt (music-api nicht konfiguriert)".to_string();
+    }
+    let isrcs = backpack_item_isrcs(&st.pool, item_id).await;
+    if isrcs.is_empty() {
+        return "Quelle hinzugefügt".to_string();
+    }
+    let _ = crate::music_api::refresh_states(&st.pool, &st.cfg, &isrcs, 300).await;
+    let missing = crate::music_api::missing_isrcs(&st.pool, &isrcs).await;
+    if missing.is_empty() {
+        return "Quelle hinzugefügt (alles bereits vorhanden)".to_string();
+    }
+    match crate::music_api::order_with_priority(&st.cfg, &missing, BACKPACK_PRIORITY).await {
+        Ok(oid) => format!(
+            "Quelle hinzugefügt, {} fehlende bestellt (Order {oid})",
+            missing.len()
+        ),
+        Err(e) => format!("Quelle hinzugefügt, music-api Fehler: {e}"),
+    }
+}
+
+/// Distinct, non-empty ISRCs of one materialised backpack item (#683).
+async fn backpack_item_isrcs(pool: &sqlx::SqlitePool, item_id: i64) -> Vec<String> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT t.isrc AS isrc
+           FROM hub_backpack_item_tracks mt
+           JOIN hub_tracks t ON t.id = mt.track_id
+          WHERE mt.item_id = ?1 AND t.isrc IS NOT NULL AND TRIM(t.isrc) <> ''",
+    )
+    .bind(item_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    rows_isrcs(&rows)
+}
+
+/// POST `/backpacks/{id}/prioritize` (#683): (re-)order every not-yet-`ready`
+/// track of the caller's backpack with [`BACKPACK_PRIORITY`] so music-api
+/// downloads it ahead of unprompted orders. Owner scoping via
+/// [`crate::backpacks::backpack_owned_by`]; a foreign/unknown backpack is a
+/// `404`. Without a music-api token a clean flash is shown and no order issued.
+async fn backpack_prioritize(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "backpacks").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(_bp) = crate::backpacks::backpack_owned_by(&st.pool, id, nav.id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return not_found("Backpack nicht gefunden.");
+    };
+    if st.cfg.music_api_token.is_none() {
+        return flash_redirect("/backpacks", "music-api nicht konfiguriert".to_string());
+    }
+    let isrcs = backpack_missing_isrcs(&st.pool, id).await;
+    if isrcs.is_empty() {
+        return flash_redirect("/backpacks", "Keine fehlenden ISRCs".to_string());
+    }
+    let msg = match crate::music_api::order_with_priority(&st.cfg, &isrcs, BACKPACK_PRIORITY).await {
+        Ok(oid) => format!("{} priorisiert (Order {oid})", isrcs.len()),
+        Err(e) => format!("music-api Fehler: {e}"),
+    };
+    flash_redirect("/backpacks", msg)
+}
+
+/// Distinct ISRCs of a backpack's materialised tracks whose cached state is not
+/// `ready` (missing from the cache = not ready) (#683).
+async fn backpack_missing_isrcs(pool: &sqlx::SqlitePool, backpack_id: i64) -> Vec<String> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT t.isrc AS isrc
+           FROM hub_backpack_items i
+           JOIN hub_backpack_item_tracks mt ON mt.item_id = i.id
+           JOIN hub_tracks t ON t.id = mt.track_id
+           LEFT JOIN hub_music_state ms ON ms.isrc = t.isrc
+          WHERE i.backpack_id = ?1
+            AND t.isrc IS NOT NULL AND TRIM(t.isrc) <> ''
+            AND (ms.state IS NULL OR ms.state <> 'ready')",
+    )
+    .bind(backpack_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    rows_isrcs(&rows)
 }
 
 /// POST `/backpacks/{id}/sources/{item_id}/delete` (#651): remove one source

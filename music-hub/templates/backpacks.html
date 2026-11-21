@@ -65,6 +65,16 @@
             <button type="submit" class="secondary outline">Löschen</button>
         </form>
 
+        <form method="post" action="/backpacks/{{ c.id }}/prioritize" style="display: inline">
+            <button
+                type="submit"
+                class="secondary outline"
+                title="Fehlende Tracks dieses Backpacks bei music-api vorziehen"
+            >
+                Fehlende priorisieren
+            </button>
+        </form>
+
         <p class="hub-muted" style="margin-top: 0.6rem">Export</p>
         <div style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center">
             <a
