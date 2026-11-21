@@ -96,6 +96,16 @@ fi
 git -C "$SRC" archive FETCH_HEAD music-hub | tar -x -C "$TREE" --strip-components=1 \
   || { log "FEHLER sync"; exit 3; }
 
+# `music-hub` deklariert seit #664 `comment-template = { path = "../comment-template" }`.
+# Der Tree oben traegt nur music-hub/, also muss die Schwester-Crate daneben
+# liegen - sonst scheitert cargo mit
+#   "unable to update /home/momo/comment-template: No such file or directory".
+# Reihenfolge egal: erst nach dem Entpacken liegt die neue music-hub/Cargo.toml.
+mkdir -p "$HOME/comment-template"
+git -C "$SRC" archive FETCH_HEAD comment-template \
+  | tar -x -C "$HOME/comment-template" --strip-components=1 \
+  || { log "FEHLER sync comment-template"; exit 3; }
+
 cp -a "$TREE/target/release/music-hub" "$HOME/music-hub.prev" 2>/dev/null || true
 if ! ( cd "$TREE" && GIT_SHA="$SHORT" GIT_DESCRIBE="$DESC" "$CARGO" build --release --locked \
         >/tmp/hub-deploy-build.log 2>&1 ); then
