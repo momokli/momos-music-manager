@@ -184,7 +184,14 @@ async fn backpacks_page_renders_cards_with_counts_and_labels() {
     assert!(body.contains("tag"), "source kind is shown");
     assert!(body.contains("Deep House"), "playlist label is shown");
     // Union of tag {t_all,t_two} + playlist {t_all,t_pl} = 3 distinct tracks.
-    assert!(body.contains("3 Tracks (live)"), "live track count without clamp");
+    assert!(
+        body.contains("2 Quellen · 3 Tracks"),
+        "card header shows materialised distinct count"
+    );
+    assert!(!body.contains("Tracks (live)"), "no live count anymore");
+    // Per-source counts are materialised too.
+    assert!(body.contains("Moody · 2 Tracks"), "tag source count");
+    assert!(body.contains("Deep House · 2 Tracks"), "playlist source count");
     assert!(body.contains("Alles"), "second card renders");
     // Nav marks the page current.
     assert!(body.contains("aria-current=\"page\""));
@@ -245,10 +252,101 @@ async fn track_count_exceeds_old_500_clamp() {
 
     let count = backpacks::resolve_count(&app.pool, bp).await.unwrap();
     assert!(count > 500, "resolver count exceeds the old clamp: {count}");
+    let stats = backpacks::backpack_stats(&app.pool, bp).await.unwrap();
+    assert_eq!(stats.track_count as usize, count, "materialised count matches resolver");
 
     let body = get(&app, "/backpacks", &cookie).await;
     assert!(
-        body.contains(&format!("{count} Tracks (live)")),
-        "unclamped live count renders ({count})"
+        body.contains(&format!("1 Quellen · {count} Tracks")),
+        "unclamped materialised count renders in the card header ({count})"
     );
+    assert!(
+        body.contains(&format!("Neueste im Hub · {count} Tracks")),
+        "per-source count exceeds the old clamp ({count})"
+    );
+}
+
+// ── No-network rendering (#682) ─────────────────────────────────────────────
+
+/// A music-api stub that rejects every request and counts hits.
+#[derive(Clone, Default)]
+struct HitCounter(std::sync::Arc<std::sync::Mutex<usize>>);
+
+impl HitCounter {
+    fn count(&self) -> usize {
+        *self.0.lock().unwrap()
+    }
+}
+
+async fn reject_everything(
+    axum::extract::State(hits): axum::extract::State<HitCounter>,
+) -> axum::http::StatusCode {
+    *hits.0.lock().unwrap() += 1;
+    axum::http::StatusCode::INTERNAL_SERVER_ERROR
+}
+
+/// Boot a rejecting music-api stub and return `(base, hits)`.
+async fn rejecting_music_api() -> (String, HitCounter) {
+    let hits = HitCounter::default();
+    let app = axum::Router::new()
+        .fallback(reject_everything)
+        .with_state(hits.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), hits)
+}
+
+#[tokio::test]
+async fn backpacks_page_never_calls_music_api() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = format!("sqlite:{}/hub.db", dir.path().display());
+    let mut cfg = music_hub::config::Config::for_test(url);
+    let (base, hits) = rejecting_music_api().await;
+    cfg.music_api_base = base;
+    let app = common::spawn_with(dir, cfg).await;
+    let (owner, cookie) = app.user_with_password("offline", "pw").await;
+
+    // 5 tracks in a tag; 2 have a ready ISRC state.
+    let mut tracks = Vec::new();
+    for i in 0..5 {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO hub_tracks (service, service_track_id, title, artists, isrc, first_seen_at)
+             VALUES ('spotify', ?1, 'Offline', 'X', ?2, ?3) RETURNING id",
+        )
+        .bind(format!("offline-{i}"))
+        .bind(format!("ISRC-{i}"))
+        .bind(TS)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        tracks.push(id);
+    }
+    for isrc in ["ISRC-0", "ISRC-1"] {
+        sqlx::query("INSERT INTO hub_music_state (isrc, state, checked_at) VALUES (?1, 'ready', ?2)")
+            .bind(isrc)
+            .bind(TS)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+    }
+    let tag = insert_tag(&app.pool, owner, "offline-tag", "Offline").await;
+    for t in &tracks {
+        sqlx::query("INSERT INTO hub_track_resolved_tags (track_id, tag_id) VALUES (?1, ?2)")
+            .bind(t)
+            .bind(tag)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+    }
+    let bp = insert_backpack(&app.pool, owner, "Ohne Netz", TS).await;
+    backpacks::add_source(&app.pool, bp, SourceRef::Tag(tag)).await.unwrap();
+
+    let body = get(&app, "/backpacks", &cookie).await;
+
+    assert!(body.contains("1 Quellen · 5 Tracks · 2/5 verfügbar"), "card header");
+    assert!(body.contains("Offline · 5 Tracks · 2/5 verfügbar"), "source row");
+    assert_eq!(hits.count(), 0, "rendering must not call music-api");
 }

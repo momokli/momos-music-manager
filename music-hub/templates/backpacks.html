@@ -34,7 +34,7 @@
                 {% if c.is_active %}<span class="hub-badge hub-badge-ok">Aktiv</span>{% endif %}
             </h3>
             <p class="hub-muted">
-                {{ c.source_count }} Quellen · {{ c.track_count }} Tracks (live)
+                {{ c.source_count }} Quellen · {{ c.track_count }} Tracks{% if c.available_total > 0 %} · {{ c.ready }}/{{ c.available_total }} verfügbar{% endif %}
             </p>
         </header>
 
@@ -159,7 +159,7 @@
             {% for s in c.sources %}
             <li>
                 <span class="hub-badge">{{ s.kind }}</span>
-                {{ s.label }}
+                {{ s.label }} · {{ s.track_count }} Tracks{% if s.track_count > 0 && s.available_total > 0 %} · {{ s.ready }}/{{ s.available_total }} verfügbar{% endif %}
                 <form
                     method="post"
                     action="/backpacks/{{ c.id }}/sources/{{ s.item_id }}/delete"
