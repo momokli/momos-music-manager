@@ -18,15 +18,23 @@ fn fixture() -> Value {
     serde_json::from_str(raw).expect("cases.json is valid JSON")
 }
 
+fn string_list(v: &Value, field: &str) -> Vec<String> {
+    v.get(field)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|t| t.as_str().expect("list item is a string").to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn facts_from(v: &Value) -> TrackFacts {
-    let tags = v["tags"]
-        .as_array()
-        .expect("facts.tags is an array")
-        .iter()
-        .map(|t| t.as_str().expect("tag is a string").to_string())
-        .collect();
     TrackFacts {
-        tags,
+        types: string_list(v, "types"),
+        tags: string_list(v, "tags"),
+        source_ids: string_list(v, "source_ids"),
         bpm: v["bpm"].as_f64(),
         key: v["key"].as_str().map(str::to_string),
         energy: v["energy"].as_f64(),

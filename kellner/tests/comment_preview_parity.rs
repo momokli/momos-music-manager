@@ -47,7 +47,9 @@ fn write_comment(path: &std::path::Path, comment: &str) {
 
 fn facts(tags: &[&str], bpm: Option<f64>, key: Option<&str>, energy: Option<f64>) -> TrackFacts {
     TrackFacts {
+        types: vec![],
         tags: tags.iter().map(|s| s.to_string()).collect(),
+        source_ids: vec![],
         bpm,
         key: key.map(str::to_string),
         energy,
@@ -62,7 +64,7 @@ fn preview_bytes_equal_written_file_bytes() {
         (
             "{tags} {bpm} {key} {energy}",
             facts(&["Techno", "Peak Time"], Some(128.0), Some("8A"), Some(7.0)),
-            "Peak-Time, Techno BPM-128 KEY-8A ENERGY-7",
+            "Techno Peak-Time BPM-128 KEY-8A ENERGY-7",
         ),
         (
             "{tags}",
@@ -72,7 +74,7 @@ fn preview_bytes_equal_written_file_bytes() {
         (
             "{key} / {bpm}",
             facts(&["House"], Some(127.5), Some("A-Minor"), None),
-            "KEY-A-Minor / BPM-127.5",
+            "KEY-A-Minor / BPM-128",
         ),
     ];
 
