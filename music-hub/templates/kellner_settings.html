@@ -39,15 +39,33 @@
             </label>
 
             <label>
-                Kommentar-Vorlage
+                Vorlage
+                <select name="comment_template_id" aria-label="Kommentar-Vorlage">
+                    <option value=""{% if c.selected_template_id == 0 %} selected{% endif %}>— keine (Legacy/Standard) —</option>
+                    {% for t in c.comment_templates %}
+                    <option value="{{ t.id }}"{% if t.selected %} selected{% endif %}>{{ t.name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+
+            {% if !c.legacy_comment.is_empty() %}
+            <label>
+                Eigene Vorlage (alt)
                 <input
                     type="text"
                     name="comment_template"
-                    value="{{ c.comment_template }}"
+                    value="{{ c.legacy_comment }}"
                     placeholder="leer = alphabetische Tag-Liste"
-                    aria-label="Kommentar-Vorlage"
+                    aria-label="Eigene Vorlage (alt)"
                 />
             </label>
+            {% endif %}
+
+            <p class="hub-muted">Vorschau: {{ c.resolved_comment }}</p>
+
+            <p class="hub-muted">
+                <a href="/comment-templates">Vorlagen verwalten</a>
+            </p>
 
             <label>
                 Aktive Backpacks
@@ -69,6 +87,12 @@
 
             <button type="submit">Speichern</button>
         </form>
+
+        {% if c.selected_template_id != 0 %}
+        <form method="post" action="/comment-templates/{{ c.selected_template_id }}/duplicate">
+            <button type="submit">Kopie erstellen</button>
+        </form>
+        {% endif %}
     </article>
     {% endfor %}
 </div>

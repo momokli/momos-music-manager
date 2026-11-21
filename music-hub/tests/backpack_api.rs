@@ -248,6 +248,7 @@ async fn export_has_exact_shape_with_tags_and_audio() {
         json!({
             "backpack": { "id": bp, "name": "Mix" },
             "comment_template": "{tags} {bpm} {key} {energy}",
+            "comment_template_name": Value::Null,
             "tracks": [
                 {
                     "track_id": t1,
@@ -298,6 +299,7 @@ async fn empty_backpack_exports_empty_tracks() {
         json!({
             "backpack": { "id": bp, "name": "Leer" },
             "comment_template": "{tags} {bpm} {key} {energy}",
+            "comment_template_name": Value::Null,
             "tracks": []
         })
     );
@@ -364,6 +366,65 @@ async fn export_includes_device_comment_template() {
     )
     .await;
     assert_eq!(v["comment_template"], "{tags} {bpm} {key} {energy}");
+    assert!(v["comment_template_name"].is_null());
+    assert!(
+        v.get("comment_template_id").is_none(),
+        "the export must carry the resolved body, never the id"
+    );
+}
+
+#[tokio::test]
+async fn export_delivers_resolved_template_body_not_id() {
+    let app = common::spawn().await;
+    let did = bound_device(&app, app.seed.alice, "alice-box", ALICE_TOKEN).await;
+    let bp = backpacks::create_backpack(&app.pool, app.seed.alice, "Mix")
+        .await
+        .expect("create");
+
+    // A named template owned by alice, referenced by her device; the legacy free
+    // text would resolve differently, so this proves the template body wins.
+    let tid: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_comment_templates
+            (owner_user_id, name, body, is_shared, created_at, updated_at)
+         VALUES (?1, 'Mix-Key', '{key} / {bpm}', 0, ?2, ?2) RETURNING id",
+    )
+    .bind(app.seed.alice)
+    .bind("2026-01-01T00:00:00+00:00")
+    .fetch_one(&app.pool)
+    .await
+    .expect("insert template");
+    sqlx::query(
+        "INSERT INTO hub_device_settings
+            (device_id, preferred_format, comment_template, comment_template_id, updated_at)
+         VALUES (?1, 'flac', '{tags}', ?2, ?3)",
+    )
+    .bind(did)
+    .bind(tid)
+    .bind("2026-01-01T00:00:00+00:00")
+    .execute(&app.pool)
+    .await
+    .expect("insert settings");
+
+    let (status, v) = json_body(
+        app.client()
+            .get(app.url(&format!("/api/hub/backpacks/{bp}/export")))
+            .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+            .send()
+            .await
+            .expect("export"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["comment_template"], "{key} / {bpm}", "template body wins");
+    assert_eq!(v["comment_template_name"], "Mix-Key");
+    assert!(
+        v.get("comment_template_id").is_none(),
+        "no id in the export: {v}"
+    );
+    assert!(
+        !v["comment_template"].as_str().unwrap().contains("{tags}"),
+        "not the legacy free text"
+    );
 }
 
 #[tokio::test]
