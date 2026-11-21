@@ -66,33 +66,19 @@ async fn track_title(pool: &SqlitePool, track_id: i64) -> sqlx::Result<String> {
     Ok(row.map(|(t,)| t).unwrap_or_default())
 }
 
-/// The track's tag names, alphabetical (`ORDER BY h.name`); mirrors
-/// `backpack_api.rs:122`.
-async fn track_tags(pool: &SqlitePool, track_id: i64) -> sqlx::Result<Vec<String>> {
-    sqlx::query_scalar(
-        "SELECT h.name
-           FROM hub_track_resolved_tags rt
-           JOIN hub_tags h ON h.id = rt.tag_id
-          WHERE rt.track_id = ?1
-          ORDER BY h.name",
-    )
-    .bind(track_id)
-    .fetch_all(pool)
-    .await
-}
-
-/// The track's resolved `bpm` / `musical_key` / `energy`; mirrors
-/// `backpack_api.rs:137`. All `None` when the row (or any column) is absent.
+/// The track's resolved `bpm` / `musical_key` / `camelot` / `energy`; mirrors
+/// `backpack_api.rs`. All `None` when the row (or any column) is absent.
 async fn track_audio(
     pool: &SqlitePool,
     track_id: i64,
-) -> sqlx::Result<(Option<f64>, Option<String>, Option<f64>)> {
-    let row: Option<(Option<f64>, Option<String>, Option<f64>)> =
-        sqlx::query_as("SELECT bpm, musical_key, energy FROM hub_track_audio WHERE track_id = ?1")
-            .bind(track_id)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.unwrap_or((None, None, None)))
+) -> sqlx::Result<(Option<f64>, Option<String>, Option<String>, Option<f64>)> {
+    let row: Option<(Option<f64>, Option<String>, Option<String>, Option<f64>)> = sqlx::query_as(
+        "SELECT bpm, musical_key, camelot, energy FROM hub_track_audio WHERE track_id = ?1",
+    )
+    .bind(track_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.unwrap_or((None, None, None, None)))
 }
 
 /// `N` — the number of the user's tagged tracks (a track counts once however
@@ -141,14 +127,19 @@ pub async fn top_tagged_tracks(
     let mut out: Vec<PreviewTrack> = Vec::with_capacity(ids.len());
     for track_id in ids {
         let title = track_title(pool, track_id).await?;
-        let tags = track_tags(pool, track_id).await?;
-        let (bpm, key, energy) = track_audio(pool, track_id).await?;
+        // Same helpers as the backpack export — one read path (#690).
+        let tags_typed = crate::tag_export::resolved_tags_typed(pool, track_id).await?;
+        let types = crate::tag_export::type_marker(&tags_typed);
+        let tags: Vec<String> = tags_typed.iter().map(|(n, _)| n.clone()).collect();
+        let source_ids = crate::tag_export::source_ids(pool, track_id).await?;
+        let (bpm, musical_key, camelot, energy) = track_audio(pool, track_id).await?;
+        let key = crate::tag_export::display_key(camelot.as_deref(), musical_key.as_deref());
         out.push(PreviewTrack {
             title,
             facts: TrackFacts {
-                types: vec![],
+                types,
                 tags,
-                source_ids: vec![],
+                source_ids,
                 bpm,
                 key,
                 energy,

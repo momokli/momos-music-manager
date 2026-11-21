@@ -67,6 +67,46 @@ async fn resolve_tag(app: &common::TestApp, track_id: i64, tag_id: i64) {
         .expect("insert resolved tag");
 }
 
+/// Set the typed classification of a tag (`hub_tags.type`).
+async fn set_tag_type(app: &common::TestApp, tag_id: i64, ty: &str) {
+    sqlx::query("UPDATE hub_tags SET type = ?2 WHERE id = ?1")
+        .bind(tag_id)
+        .bind(ty)
+        .execute(&app.pool)
+        .await
+        .expect("set tag type");
+}
+
+/// Insert an external id for a track.
+async fn external_id(app: &common::TestApp, track_id: i64, service: &str, external_id: &str) {
+    sqlx::query(
+        "INSERT INTO hub_track_external_ids (track_id, service, external_id)
+         VALUES (?1, ?2, ?3)",
+    )
+    .bind(track_id)
+    .bind(service)
+    .bind(external_id)
+    .execute(&app.pool)
+    .await
+    .expect("insert external id");
+}
+
+/// Insert `hub_track_audio` including the Camelot value.
+async fn audio_with_camelot(
+    app: &common::TestApp,
+    track_id: i64,
+    musical_key: Option<&str>,
+    camelot: Option<&str>,
+) {
+    sqlx::query("INSERT INTO hub_track_audio (track_id, musical_key, camelot) VALUES (?1, ?2, ?3)")
+        .bind(track_id)
+        .bind(musical_key)
+        .bind(camelot)
+        .execute(&app.pool)
+        .await
+        .expect("insert audio");
+}
+
 async fn audio(
     app: &common::TestApp,
     track_id: i64,
@@ -256,6 +296,8 @@ async fn export_has_exact_shape_with_tags_and_audio() {
                     "title": "Alpha",
                     "artists": "Aaa",
                     "tags": ["Alpha", "Zeta"],
+                    "types": [],
+                    "source_ids": [],
                     "bpm": 128.0,
                     "key": "A-Minor",
                     "energy": 7.0,
@@ -266,6 +308,8 @@ async fn export_has_exact_shape_with_tags_and_audio() {
                     "title": "Beta",
                     "artists": "Bbb",
                     "tags": [],
+                    "types": [],
+                    "source_ids": [],
                     "bpm": null,
                     "key": null,
                     "energy": null,
@@ -274,6 +318,147 @@ async fn export_has_exact_shape_with_tags_and_audio() {
         }),
         "exact export shape: {v}"
     );
+}
+
+/// Acceptance #690: typed tags in `TYPE_NAMES` order (phase types in fixed
+/// order, name-sorted within a family), untyped alphabetically last; `types`
+/// carries one marker per family; `key` prefers Camelot; `source_ids` are
+/// prefixed per service in fixed order and skip unknown services.
+#[tokio::test]
+async fn export_typed_tags_types_camelot_and_source_ids() {
+    let app = common::spawn().await;
+    bound_device(&app, app.seed.alice, "alice-box", ALICE_TOKEN).await;
+
+    let t = track(&app, "s10", "DEAAA0000010", "Typed", "Zz").await;
+
+    // Insert deliberately scrambled: type order must win over insertion order.
+    let merkmal = tag(&app, app.seed.alice, "airy", "Airy").await;
+    let phase = tag(&app, app.seed.alice, "peak", "Peak").await;
+    let mood_b = tag(&app, app.seed.alice, "bass", "Bass").await;
+    let mood = tag(&app, app.seed.alice, "deep", "Deep").await;
+    let loose = tag(&app, app.seed.alice, "zzz", "Zzz").await;
+    set_tag_type(&app, merkmal, "MERKMAL").await;
+    set_tag_type(&app, phase, "PHASE_2").await;
+    set_tag_type(&app, mood_b, "MOOD").await;
+    set_tag_type(&app, mood, "MOOD").await;
+    for tg in [loose, merkmal, phase, mood_b, mood] {
+        resolve_tag(&app, t, tg).await;
+    }
+
+    // Camelot wins over the musical key.
+    audio_with_camelot(&app, t, Some("G-Minor"), Some("8A")).await;
+    external_id(&app, t, "youtube", "yt-1").await;
+    external_id(&app, t, "spotify", "sp-2").await;
+    external_id(&app, t, "soundcloud", "sc-1").await;
+    external_id(&app, t, "spotify", "sp-1").await;
+    external_id(&app, t, "tidal", "td-1").await;
+
+    let bp = backpacks::create_backpack(&app.pool, app.seed.alice, "Typed")
+        .await
+        .expect("create");
+    backpacks::add_source(&app.pool, bp, SourceRef::Track(t))
+        .await
+        .expect("add t");
+
+    let (status, v) = json_body(
+        app.client()
+            .get(app.url(&format!("/api/hub/backpacks/{bp}/export")))
+            .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+            .send()
+            .await
+            .expect("export"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let tr = &v["tracks"][0];
+    assert_eq!(tr["tags"], json!(["Bass", "Deep", "Peak", "Airy", "Zzz"]));
+    assert_eq!(tr["types"], json!(["M", "P", "E"]));
+    assert_eq!(tr["key"], json!("8A"));
+    assert_eq!(
+        tr["source_ids"],
+        json!(["sp:sp-1", "sp:sp-2", "sc:sc-1", "yt:yt-1"])
+    );
+}
+
+/// Acceptance #690: PHASE_1 + PHASE_4 collapse to a single `P`.
+#[tokio::test]
+async fn export_collapses_multiple_phases_to_one_marker() {
+    let app = common::spawn().await;
+    bound_device(&app, app.seed.alice, "alice-box", ALICE_TOKEN).await;
+
+    let t = track(&app, "s11", "DEAAA0000011", "Phases", "Pp").await;
+    let p1 = tag(&app, app.seed.alice, "p1", "Warmup").await;
+    let p4 = tag(&app, app.seed.alice, "p4", "Peak").await;
+    set_tag_type(&app, p1, "PHASE_1").await;
+    set_tag_type(&app, p4, "PHASE_4").await;
+    resolve_tag(&app, t, p1).await;
+    resolve_tag(&app, t, p4).await;
+
+    let bp = backpacks::create_backpack(&app.pool, app.seed.alice, "Phases")
+        .await
+        .expect("create");
+    backpacks::add_source(&app.pool, bp, SourceRef::Track(t))
+        .await
+        .expect("add t");
+
+    let (status, v) = json_body(
+        app.client()
+            .get(app.url(&format!("/api/hub/backpacks/{bp}/export")))
+            .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+            .send()
+            .await
+            .expect("export"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let tr = &v["tracks"][0];
+    assert_eq!(tr["types"], json!(["P"]));
+    assert_eq!(tr["tags"], json!(["Warmup", "Peak"]));
+    assert_eq!(tr["key"], Value::Null, "no audio row → null key");
+    assert_eq!(tr["source_ids"], json!([]));
+}
+
+/// Acceptance #690: with a musical key but no Camelot the key is normalised;
+/// Camelot with surrounding whitespace still wins.
+#[tokio::test]
+async fn export_key_falls_back_to_normalised_musical_key() {
+    let app = common::spawn().await;
+    bound_device(&app, app.seed.alice, "alice-box", ALICE_TOKEN).await;
+
+    let t1 = track(&app, "s12", "DEAAA0000012", "Musical", "Mm").await;
+    let t2 = track(&app, "s13", "DEAAA0000013", "Spaced", "Ss").await;
+    audio_with_camelot(&app, t1, Some("G -- Minor"), None).await;
+    audio_with_camelot(&app, t2, Some("A-Minor"), Some(" 8A ")).await;
+
+    let bp = backpacks::create_backpack(&app.pool, app.seed.alice, "Keys")
+        .await
+        .expect("create");
+    backpacks::add_source(&app.pool, bp, SourceRef::Track(t1))
+        .await
+        .expect("add t1");
+    backpacks::add_source(&app.pool, bp, SourceRef::Track(t2))
+        .await
+        .expect("add t2");
+
+    let (status, v) = json_body(
+        app.client()
+            .get(app.url(&format!("/api/hub/backpacks/{bp}/export")))
+            .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+            .send()
+            .await
+            .expect("export"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let tracks = v["tracks"].as_array().expect("tracks array");
+    let by_id = |id: i64| {
+        tracks
+            .iter()
+            .find(|t| t["track_id"] == json!(id))
+            .expect("track present")
+    };
+    assert_eq!(by_id(t1)["key"], json!("G-Minor"));
+    assert_eq!(by_id(t2)["key"], json!("8A"));
 }
 
 #[tokio::test]

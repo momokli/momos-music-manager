@@ -118,33 +118,22 @@ async fn track_meta(pool: &SqlitePool, track_id: i64) -> sqlx::Result<(String, S
     Ok(row.unwrap_or_default())
 }
 
-/// The track's tag names, alphabetical (`ORDER BY name`).
-async fn track_tags(pool: &SqlitePool, track_id: i64) -> sqlx::Result<Vec<String>> {
-    sqlx::query_scalar(
-        "SELECT h.name
-           FROM hub_track_resolved_tags rt
-           JOIN hub_tags h ON h.id = rt.tag_id
-          WHERE rt.track_id = ?1
-          ORDER BY h.name",
-    )
-    .bind(track_id)
-    .fetch_all(pool)
-    .await
-}
+// The resolved tag names/types, type markers, source ids and key come from the
+// shared export helpers so the API and the Comment preview agree (#690).
 
-/// The track's resolved `bpm` / `musical_key` / `energy`, all `None` when the
-/// row (or any column) is absent.
+/// The track's resolved `bpm` / `musical_key` / `camelot` / `energy`, all
+/// `None` when the row (or any column) is absent.
 async fn track_audio(
     pool: &SqlitePool,
     track_id: i64,
-) -> sqlx::Result<(Option<f64>, Option<String>, Option<f64>)> {
-    let row: Option<(Option<f64>, Option<String>, Option<f64>)> = sqlx::query_as(
-        "SELECT bpm, musical_key, energy FROM hub_track_audio WHERE track_id = ?1",
+) -> sqlx::Result<(Option<f64>, Option<String>, Option<String>, Option<f64>)> {
+    let row: Option<(Option<f64>, Option<String>, Option<String>, Option<f64>)> = sqlx::query_as(
+        "SELECT bpm, musical_key, camelot, energy FROM hub_track_audio WHERE track_id = ?1",
     )
     .bind(track_id)
     .fetch_optional(pool)
     .await?;
-    Ok(row.unwrap_or((None, None, None)))
+    Ok(row.unwrap_or((None, None, None, None)))
 }
 
 /// `GET /api/hub/backpacks/{id}/export` — resolved tracks + metadata, in
@@ -189,20 +178,30 @@ async fn export(State(st): State<AppState>, Path(id): Path<i64>, headers: Header
                 return err(StatusCode::INTERNAL_SERVER_ERROR, "track metadata failed");
             }
         };
-        let tags = match track_tags(&st.pool, t.track_id).await {
+        let tags_typed = match crate::tag_export::resolved_tags_typed(&st.pool, t.track_id).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error = %e, "backpack api: track tags failed");
                 return err(StatusCode::INTERNAL_SERVER_ERROR, "track tags failed");
             }
         };
-        let (bpm, key, energy) = match track_audio(&st.pool, t.track_id).await {
+        let tags: Vec<String> = tags_typed.iter().map(|(n, _)| n.clone()).collect();
+        let types = crate::tag_export::type_marker(&tags_typed);
+        let source_ids = match crate::tag_export::source_ids(&st.pool, t.track_id).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "backpack api: track source ids failed");
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "track source ids failed");
+            }
+        };
+        let (bpm, musical_key, camelot, energy) = match track_audio(&st.pool, t.track_id).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error = %e, "backpack api: track audio failed");
                 return err(StatusCode::INTERNAL_SERVER_ERROR, "track audio failed");
             }
         };
+        let key = crate::tag_export::display_key(camelot.as_deref(), musical_key.as_deref());
 
         tracks.push(json!({
             "track_id": t.track_id,
@@ -210,6 +209,8 @@ async fn export(State(st): State<AppState>, Path(id): Path<i64>, headers: Header
             "title": title,
             "artists": artists,
             "tags": tags,
+            "types": types,
+            "source_ids": source_ids,
             "bpm": bpm,
             "key": key,
             "energy": energy,

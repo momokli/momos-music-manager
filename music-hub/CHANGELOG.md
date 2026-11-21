@@ -70,6 +70,14 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Changed
 
+- **Tag-Export: Typen, Camelot, Source-IDs** (#690, Slice T2) — der Backpack-Export
+  und die Comment-Preview lesen Tags jetzt über **einen** Pfad (`tag_export`): getypte
+  Tags in `TYPE_NAMES`-Reihenfolge (PHASE_1..5 fest), danach ungetypte alphabetisch.
+  Neu im Export-JSON: `types` (ein Kürzel pro Familie, `P` für alle Phasen) und
+  `source_ids` (`sp:`/`sc:`/`yt:`). `key` bevorzugt Camelot und normalisiert sonst den
+  musikalischen Key. Die System-Vorlage `Standard` nutzt per Migration
+  `069_comment_template_default.sql` den Default `{types} {tags}` (nur wenn unverändert).
+
 - **Track-page download UX** (#460): the bare `FLAC laden` / `MP3 laden` links are gone.
   The `Download`-Bucket offers **one button per format the vault says is ready**
   („FLAC", „MP3 320", „MP3 128") and a **passive hint** while nothing is ready — no dead
