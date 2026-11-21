@@ -193,6 +193,48 @@ VALUES
    strftime('%Y-%m-%dT%H:%M:%SZ','now'));
 SQL
 
+# ── 5d. tracks for the comment-template preview (#670) ──────────────────────
+# The preview renders the union of the device's active backpacks. Give the
+# active backpack ("Demo-Quellen") twelve resolved tracks with tags + audio, so
+# the shot shows a real list, `10 von 12` and the `n/512` counter instead of the
+# "Keine aktiven Backpacks" hint.
+say "seeding 12 preview tracks (tags + audio) into the active backpack"
+sqlite3 "$DB" <<SQL
+INSERT INTO hub_tracks (service, service_track_id, title, artists, first_seen_at) VALUES
+  ('spotify','demo-preview-01','Preview Track 01','Demo Artist',strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  ('spotify','demo-preview-02','Preview Track 02','Demo Artist',strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  ('spotify','demo-preview-03','Preview Track 03','Demo Artist',strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  ('spotify','demo-preview-04','Preview Track 04','Demo Artist',strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  ('spotify','demo-preview-05','Preview Track 05','Demo Artist',strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  ('spotify','demo-preview-06','Preview Track 06','Demo Artist',strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  ('spotify','demo-preview-07','Preview Track 07','Demo Artist',strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  ('spotify','demo-preview-08','Preview Track 08','Demo Artist',strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  ('spotify','demo-preview-09','Preview Track 09','Demo Artist',strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  ('spotify','demo-preview-10','Preview Track 10','Demo Artist',strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  ('spotify','demo-preview-11','Preview Track 11','Demo Artist',strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  ('spotify','demo-preview-12','Preview Track 12','Demo Artist',strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+
+INSERT OR IGNORE INTO hub_track_resolved_tags (track_id, tag_id)
+SELECT t.id, (SELECT id FROM hub_tags WHERE owner_user_id = $UID_ AND slug = 'demo-fokus')
+FROM hub_tracks t WHERE t.service = 'spotify' AND t.service_track_id LIKE 'demo-preview-%';
+
+INSERT OR REPLACE INTO hub_track_audio (track_id, bpm, musical_key, camelot, energy, source, updated_at)
+SELECT t.id, 120 + (CAST(substr(t.service_track_id, 14) AS INTEGER) % 20), 'A-Minor', '8A', 0.6,
+       'demo', strftime('%Y-%m-%dT%H:%M:%SZ','now')
+FROM hub_tracks t WHERE t.service = 'spotify' AND t.service_track_id LIKE 'demo-preview-%';
+
+INSERT INTO hub_backpack_items (backpack_id, source_kind, source_track_id, position, added_at)
+SELECT (SELECT id FROM hub_backpacks WHERE user_id = $UID_ AND name = 'Demo-Quellen'),
+       'track', t.id, 10 + CAST(substr(t.service_track_id, 14) AS INTEGER),
+       strftime('%Y-%m-%dT%H:%M:%SZ','now')
+FROM hub_tracks t WHERE t.service = 'spotify' AND t.service_track_id LIKE 'demo-preview-%';
+
+INSERT INTO hub_device_backpacks (device_id, backpack_id, position, added_at)
+VALUES ((SELECT id FROM hub_devices WHERE user_id = $UID_ AND name = 'MacBook'),
+        (SELECT id FROM hub_backpacks WHERE user_id = $UID_ AND name = 'Demo-Quellen'),
+        0, strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+SQL
+
 # ── 6. screenshots ─────────────────────────────────────────────────────────
 say "taking screenshots into $OUT_DIR"
 HUB_BASE="http://127.0.0.1:$HUB_PORT" \
