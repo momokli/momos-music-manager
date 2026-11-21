@@ -27,7 +27,8 @@ use crate::client::hub::HubClient;
 use crate::state::{self, MembershipRecord, SyncState};
 use crate::sync::backup::canonicalise;
 use crate::sync::downloads::{choose_format, write_atomic};
-use crate::tag::comment::{render_from_template, write_comment};
+use crate::tag::comment::write_comment;
+use comment_template::{TrackFacts, render};
 
 /// Subdirectory (under the collection root) that receives soft-pruned files.
 pub const TRASH_DIR: &str = ".kellner-trash";
@@ -242,12 +243,14 @@ fn retag_existing(
         let Some(path) = existing_file(&opts.root, isrc) else {
             continue;
         };
-        let rendered = render_from_template(
+        let rendered = render(
             &dev.comment_template,
-            &dev.tags,
-            dev.bpm,
-            dev.key.as_deref(),
-            dev.energy,
+            &TrackFacts {
+                tags: dev.tags.clone(),
+                bpm: dev.bpm,
+                key: dev.key.clone(),
+                energy: dev.energy,
+            },
         );
         match write_comment(&path, &rendered) {
             Ok(true) => {
@@ -410,12 +413,14 @@ async fn fetch_and_tag(
     let dev = desired
         .get(isrc)
         .ok_or_else(|| anyhow!("{isrc} vanished from the desired set"))?;
-    let rendered = render_from_template(
+    let rendered = render(
         &dev.comment_template,
-        &dev.tags,
-        dev.bpm,
-        dev.key.as_deref(),
-        dev.energy,
+        &TrackFacts {
+            tags: dev.tags.clone(),
+            bpm: dev.bpm,
+            key: dev.key.clone(),
+            energy: dev.energy,
+        },
     );
     let tagged = if opts.write_tags {
         write_comment(&path, &rendered)

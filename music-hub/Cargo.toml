@@ -31,6 +31,8 @@ roxmltree = "0.20"
 # AES-256-GCM + `SystemRandom` for the Tonies refresh-token at rest (#499).
 # Already vendored via rustls, so no network fetch is required.
 ring = "0.17"
+# Deterministic comment-template render/validate semantics (issue #664).
+comment-template = { path = "../comment-template" }
 
 # EffNet audio embeddings (Discogs-EffNet via ONNX Runtime). Optional so the
 # default/CI build stays light; enable with `--features effnet`.

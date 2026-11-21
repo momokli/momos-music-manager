@@ -24,6 +24,8 @@ directories = "5"
 rand = "0.8"
 hex = "0.4"
 url = "2"
+# Deterministic comment-template render/validate semantics (issue #664).
+comment-template = { path = "../comment-template" }
 # Optional GUI backend for the tray/menu-bar widget (`--features tray`).
 tray-icon = { version = "0.26", optional = true }
 # Library backup (#365): canonicalise (clear Comment) + SHA-256 object key.

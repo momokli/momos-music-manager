@@ -44,13 +44,11 @@ pub const FORMATS: [&str; 4] = ["flac", "mp3", "wav", "m4a"];
 /// Longest accepted `comment_template`, measured in Unicode scalar values.
 pub const MAX_TEMPLATE_CHARS: usize = 1024;
 
-/// The placeholders a `comment_template` may reference. Anything else inside a
-/// `{...}` token is rejected on save (issue #652).
-pub const ALLOWED_PLACEHOLDERS: [&str; 4] = ["tags", "bpm", "key", "energy"];
-
-/// The template applied when the stored value is empty (issue #652): a device
-/// without settings, or one that saved `""`, resolves to this default.
-pub const DEFAULT_TEMPLATE: &str = "{tags} {bpm} {key} {energy}";
+/// The placeholders a `comment_template` may reference, and the template applied
+/// when the stored value is empty (issue #652). Re-exported from the
+/// `comment-template` crate (issue #664) so the Hub and kellner share one
+/// definition.
+pub use comment_template::{ALLOWED_PLACEHOLDERS, DEFAULT_TEMPLATE};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -123,54 +121,6 @@ pub fn valid_format(s: &str) -> bool {
     FORMATS.contains(&s)
 }
 
-/// The comma-separated, brace-wrapped list of allowed placeholders, e.g.
-/// `{tags}, {bpm}, {key}, {energy}` — used in the rejection message so a client
-/// can correct the template without guessing.
-pub fn allowed_placeholder_list() -> String {
-    ALLOWED_PLACEHOLDERS
-        .iter()
-        .map(|p| format!("{{{p}}}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Reject any `{name}` token whose `name` is not in [`ALLOWED_PLACEHOLDERS`].
-///
-/// A doubled brace (`{{`) is treated as an escaped literal and skipped, so
-/// templates that contain `{{`-like sequences are accepted. An unclosed `{`
-/// (no following `}`) is treated as literal text and accepted. The returned
-/// error names the offending token and lists the allowed placeholders.
-pub fn validate_placeholders(s: &str) -> Result<(), String> {
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] != '{' {
-            i += 1;
-            continue;
-        }
-        // `{{` is an escaped literal brace — skip both, not a placeholder.
-        if i + 1 < chars.len() && chars[i + 1] == '{' {
-            i += 2;
-            continue;
-        }
-        match chars[i + 1..].iter().position(|&c| c == '}') {
-            Some(rel) => {
-                let name: String = chars[i + 1..i + 1 + rel].iter().collect();
-                if !ALLOWED_PLACEHOLDERS.contains(&name.as_str()) {
-                    return Err(format!(
-                        "unknown placeholder {{{name}}} (allowed: {})",
-                        allowed_placeholder_list()
-                    ));
-                }
-                i += 1 + rel + 1;
-            }
-            // Unclosed `{` → literal text.
-            None => i += 1,
-        }
-    }
-    Ok(())
-}
-
 /// Trim `s`, enforce the length cap and validate the placeholders. `""` is
 /// valid: it means "use [`DEFAULT_TEMPLATE`]" (resolved on read/export).
 pub fn clean_template(s: &str) -> Result<String, String> {
@@ -180,7 +130,7 @@ pub fn clean_template(s: &str) -> Result<String, String> {
             "comment_template too long (max {MAX_TEMPLATE_CHARS} characters)"
         ));
     }
-    validate_placeholders(t)?;
+    comment_template::validate(t)?;
     Ok(t.to_string())
 }
 
@@ -692,13 +642,13 @@ mod tests {
     }
 
     #[test]
-    fn validate_placeholders_accepts_double_brace_edge_cases() {
+    fn clean_template_accepts_double_brace_edge_cases() {
         // `{{` is an escaped literal, never an unknown placeholder.
         for t in ["{{", "{{tags}}", "a {{ b", "{{{tags}}}", "}", "{tags", "no braces"] {
-            assert!(validate_placeholders(t).is_ok(), "{t:?} should be accepted");
+            assert!(clean_template(t).is_ok(), "{t:?} should be accepted");
         }
         // A `{name}` after an escaped pair is still validated.
-        assert!(validate_placeholders("{{ {nope}").is_err());
+        assert!(clean_template("{{ {nope}").is_err());
     }
 
     #[test]

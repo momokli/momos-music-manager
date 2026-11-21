@@ -1,0 +1,10 @@
+[package]
+name = "comment-template"
+version = "0.1.0"
+edition = "2024"
+description = "Deterministic Comment-template rendering + validation (issue #664)"
+
+[dependencies]
+
+[dev-dependencies]
+serde_json = "1"
