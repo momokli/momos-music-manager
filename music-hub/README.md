@@ -21,7 +21,8 @@ same tech stack (axum + sqlx + SQLite), but its own crate, its own schema, its o
   their items (`/playlists/{id}/items`). **Followed** playlists are stored as
   metadata only (the post-Feb-2026 API returns no `items` for them).
 - `serve` – web UI + JSON API + read-only SQL console, and spawns the background
-  sync worker.
+  sync worker; `/comment-templates` edits named Comment bodies with a live
+  preview of the caller's top tagged tracks.
 - `query` – run read-only SQL against the hub DB from the terminal.
 
 ## Accounts & sessions
@@ -90,6 +91,7 @@ topbar nav + user menu). The dashboard is `/`.
 | `/user/{slug}`      | A user's likes + playlists                                                       |
 | `/playlist/{id}`    | One playlist's tracks                                                            |
 | `/settings`         | Account + Spotify connect/sync/disconnect                                        |
+| `/comment-templates`| Comment-Vorlagen (CRUD, Teilen) mit Live-Vorschau beim Tippen (htmx)            |
 | `/sql`              | Read-only SQL console with presets                                               |
 | `/login`, `/signup` | Minimal auth shell                                                               |
 

@@ -456,3 +456,108 @@ async fn device_without_tagged_tracks_shows_hint() {
     );
     assert!(!html.contains("<li"), "no rows");
 }
+
+// ── live preview on /comment-templates (#681, slice C8) ──────────────────────
+
+/// The body field posts its current value to the preview route, so the fragment
+/// must render the **typed** body, not the stored one.
+#[tokio::test]
+async fn library_preview_uses_submitted_body() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("cp-alice", "1234").await;
+
+    let t1 = track(&app, "lp1", "LiveTrack").await;
+    let tg = tag(&app, uid, "house", "House").await;
+    resolve_tag(&app, t1, tg).await;
+    audio(&app, t1, Some(128.0), Some("8A")).await;
+
+    // Stored body renders tags; the submitted body renders BPM instead.
+    let tid = template(&app, Some(uid), "Live", "{tags}", false).await;
+
+    let (status, html) = post_form(
+        &app,
+        Some(&cookie),
+        &format!("/comment-templates/{tid}/preview"),
+        "body=%7Bbpm%7D",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("BPM-128"), "typed body rendered: {html}");
+    assert!(!html.contains("House"), "stored body ignored: {html}");
+}
+
+/// After a save the page renders the preview server-side (no click needed) and
+/// the preview button is a real POST form, so it works without JavaScript.
+#[tokio::test]
+async fn library_page_renders_initial_preview_and_noscript_form() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("cp-alice", "1234").await;
+
+    let t1 = track(&app, "pg1", "PageTrack").await;
+    let tg = tag(&app, uid, "house", "House").await;
+    resolve_tag(&app, t1, tg).await;
+
+    let tid = template(&app, Some(uid), "Paged", "{tags}", false).await;
+
+    let resp = app
+        .client()
+        .get(app.url("/comment-templates"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .expect("get page");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = resp.text().await.expect("page body");
+
+    assert!(html.contains("PageTrack"), "preview rendered on load: {html}");
+    assert!(html.contains("1 von 1"), "counter on load: {html}");
+    assert!(
+        html.contains(&format!("action=\"/comment-templates/{tid}/preview\"")),
+        "no-JS button is a real form: {html}"
+    );
+    assert!(
+        html.contains(&format!("hx-post=\"/comment-templates/{tid}/preview\"")),
+        "live input is wired to htmx: {html}"
+    );
+    assert!(
+        html.contains("hx-trigger=\"keyup changed delay:400ms\""),
+        "live typing debounce: {html}"
+    );
+}
+
+/// Same seed, same source: the kellner route with the stored template and the
+/// library route must produce the same fragment (#681 acceptance).
+#[tokio::test]
+async fn kellner_and_library_preview_match_same_seed() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("cp-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+
+    let t1 = track(&app, "par1", "Parity-A").await;
+    let t2 = track(&app, "par2", "Parity-B").await;
+    tag_with(&app, uid, t1, "pa", 2).await;
+    tag_with(&app, uid, t2, "pb", 1).await;
+    audio(&app, t1, Some(128.0), Some("8A")).await;
+
+    let tid = template(&app, Some(uid), "Parity", "{tags} {bpm} {key}", false).await;
+
+    let (status, kellner) = post_form(
+        &app,
+        Some(&cookie),
+        &format!("/kellner/{did}/template/preview"),
+        &format!("comment_template_id={tid}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, library) = post_form(
+        &app,
+        Some(&cookie),
+        &format!("/comment-templates/{tid}/preview"),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(kellner, library, "both routes render the same fragment");
+}
