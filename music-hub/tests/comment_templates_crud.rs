@@ -653,3 +653,229 @@ async fn http_auth_gate_redirects_to_login() {
     assert_eq!(create.status(), reqwest::StatusCode::SEE_OTHER);
     assert_eq!(location(&create), "/login");
 }
+
+// ── cross-cutting hardening (Tester, #668) ───────────────────────────────────
+
+/// Duplicating a foreign *private* template must be indistinguishable from a
+/// missing one: `404`, no copy written, source untouched.
+#[tokio::test]
+async fn http_duplicate_foreign_private_is_404_and_writes_nothing() {
+    let app = common::spawn().await;
+    let (_alice_id, alice_cookie) = app.user_with_password("ct-dup-a", "pw").await;
+    let (bob_id, _bob_cookie) = app.user_with_password("ct-dup-b", "pw").await;
+    let private = insert_template(&app.pool, Some(bob_id), "BobsGeheim", "{tags}", 0).await;
+
+    let total = |pool: SqlitePool| async move {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM hub_comment_templates")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = total(app.pool.clone()).await;
+
+    let resp = app
+        .client()
+        .post(app.url(&format!("/comment-templates/{private}/duplicate")))
+        .header("Cookie", &alice_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "duplicate foreign private -> 404"
+    );
+    assert_eq!(total(app.pool.clone()).await, before, "no copy written");
+    assert!(
+        ct::get(&app.pool, private).await.unwrap().is_some(),
+        "source untouched"
+    );
+
+    // And it never shows up on the caller's page.
+    let page = get_page(&app, &alice_cookie).await;
+    assert!(!page.contains("BobsGeheim"), "foreign private not listed");
+}
+
+/// Copying a shared template whose name already exists in the copier's own
+/// library must resolve to a clean, unique name (303 + new row), never a 500 —
+/// and the same collision handling is deterministic on repetition.
+#[tokio::test]
+async fn http_duplicate_name_collision_resolves_cleanly() {
+    let app = common::spawn().await;
+    let (alice_id, alice_cookie) = app.user_with_password("ct-col-a", "pw").await;
+    let (bob_id, _bob_cookie) = app.user_with_password("ct-col-b", "pw").await;
+
+    // Alice already owns "Track"; Bob shares a template of the same name.
+    insert_template(&app.pool, Some(alice_id), "Track", "{tags}", 0).await;
+    let shared = insert_template(&app.pool, Some(bob_id), "Track", "{bpm} {key}", 1).await;
+
+    for attempt in 0..2 {
+        let resp = app
+            .client()
+            .post(app.url(&format!("/comment-templates/{shared}/duplicate")))
+            .header("Cookie", &alice_cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::SEE_OTHER,
+            "attempt {attempt}: collision resolves via 303, not 500"
+        );
+        assert_eq!(location(&resp), "/comment-templates");
+    }
+
+    // Alice now has "Track", "Track (Kopie)" and "Track (Kopie 2)", all her own.
+    let mut names: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM hub_comment_templates WHERE owner_user_id = ?1",
+    )
+    .bind(alice_id)
+    .fetch_all(&app.pool)
+    .await
+    .unwrap();
+    names.sort();
+    let mut expected = vec!["Track", "Track (Kopie)", "Track (Kopie 2)"];
+    expected.sort();
+    assert_eq!(names, expected);
+    // Copies keep the source body and belong to the copier, unshared.
+    let copy_body: String = sqlx::query_scalar(
+        "SELECT body FROM hub_comment_templates WHERE owner_user_id = ?1 AND name = 'Track (Kopie)'",
+    )
+    .bind(alice_id)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(copy_body, "{bpm} {key}");
+    let copy_shared: i64 = sqlx::query_scalar(
+        "SELECT is_shared FROM hub_comment_templates WHERE owner_user_id = ?1 AND name = 'Track (Kopie)'",
+    )
+    .bind(alice_id)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(copy_shared, 0);
+}
+
+/// Visibility end-to-end and list determinism: a foreign private template is
+/// absent, a shared one is present (body included, readable by the second user),
+/// and repeated listings return the same grouping/order.
+#[tokio::test]
+async fn visibility_list_is_complete_and_deterministic() {
+    let (_dir, pool) = setup().await;
+    let alice = insert_user(&pool, "alice").await;
+    let bob = insert_user(&pool, "bob").await;
+
+    ct::create(&pool, alice, "zeta", "{tags}", false)
+        .await
+        .unwrap();
+    ct::create(&pool, alice, "Alpha", "{bpm}", false)
+        .await
+        .unwrap();
+    ct::create(&pool, bob, "Privat", "{key}", false)
+        .await
+        .unwrap();
+    let shared = ct::create(&pool, bob, "Geteilt", "{energy}", false)
+        .await
+        .unwrap();
+    ct::set_shared(&pool, bob, false, shared, true)
+        .await
+        .unwrap();
+
+    let once: Vec<(i64, String, bool)> = ct::list_visible(&pool, alice, false)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|v| (v.id, v.name.clone(), v.is_system))
+        .collect();
+    let twice: Vec<(i64, String, bool)> = ct::list_visible(&pool, alice, false)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|v| (v.id, v.name.clone(), v.is_system))
+        .collect();
+    assert_eq!(once, twice, "list order is deterministic");
+
+    let names: Vec<&str> = once.iter().map(|(_, n, _)| n.as_str()).collect();
+    assert!(names.contains(&"Geteilt"), "shared visible: {names:?}");
+    assert!(
+        !names.contains(&"Privat"),
+        "foreign private hidden: {names:?}"
+    );
+    // System group first, then own (NOCASE sorted), then foreign shared.
+    assert_eq!(
+        &names[0..2],
+        &["Nur Tags", "Standard"],
+        "system first: {names:?}"
+    );
+    assert_eq!(
+        &names[2..4],
+        &["Alpha", "zeta"],
+        "own sorted NOCASE: {names:?}"
+    );
+    assert_eq!(&names[4..], &["Geteilt"], "shared last: {names:?}");
+
+    // The shared body is readable by the second user (usable content).
+    assert_eq!(
+        ct::get_visible(&pool, alice, shared)
+            .await
+            .unwrap()
+            .unwrap()
+            .body,
+        "{energy}"
+    );
+}
+
+/// The 066 system seeds are re-runnable: `INSERT OR IGNORE` leaves exactly two
+/// system rows regardless of how often it runs, does not touch user rows that
+/// happen to share a name, and keeps the fixed timestamps.
+#[tokio::test]
+async fn system_seed_is_idempotent_and_deterministic() {
+    let (_dir, pool) = setup().await;
+    let alice = insert_user(&pool, "alice").await;
+    // A user-owned row named like a system seed must be left alone.
+    ct::create(&pool, alice, "Standard", "{tags}", false)
+        .await
+        .unwrap();
+
+    for _ in 0..3 {
+        sqlx::query(
+            "INSERT OR IGNORE INTO hub_comment_templates
+                (owner_user_id, name, body, is_shared, created_at, updated_at)
+             VALUES (NULL, 'Standard', '{tags} {bpm} {key} {energy}', 0,
+                     '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+                    (NULL, 'Nur Tags', '{tags}', 0,
+                     '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let sys: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT name, body, created_at FROM hub_comment_templates
+          WHERE owner_user_id IS NULL ORDER BY name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(sys.len(), 2, "still exactly two system seeds");
+    assert_eq!(sys[0].0, "Nur Tags");
+    assert_eq!(sys[1].0, "Standard");
+    assert_eq!(sys[1].1, "{tags} {bpm} {key} {energy}");
+    assert!(
+        sys.iter()
+            .all(|(_, _, ts)| ts == "2026-01-01T00:00:00+00:00"),
+        "fixed timestamps"
+    );
+
+    // The user's same-named row survived and there are 3 rows total.
+    let alice_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_comment_templates WHERE owner_user_id = ?1 AND name = 'Standard'",
+    )
+    .bind(alice)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(alice_rows, 1);
+    assert_eq!(count(&pool).await, 3);
+}
