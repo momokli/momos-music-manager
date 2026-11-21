@@ -40,7 +40,7 @@ const DEVICE_TOKEN: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddd
 const MUSIC_API_TOKEN: &str = "music-api-token-0123456789abcdef0123456789abcdef";
 
 const ISRC: &str = "DEABC1234567";
-const RENDERED_COMMENT: &str = "a, b BPM-128 KEY-A-Minor ENERGY-7";
+const RENDERED_COMMENT: &str = "b a";
 
 const NML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <NML VERSION="19">

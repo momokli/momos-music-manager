@@ -247,7 +247,7 @@ async fn export_has_exact_shape_with_tags_and_audio() {
         v,
         json!({
             "backpack": { "id": bp, "name": "Mix" },
-            "comment_template": "{tags} {bpm} {key} {energy}",
+            "comment_template": "{types} {tags}",
             "comment_template_name": Value::Null,
             "tracks": [
                 {
@@ -298,7 +298,7 @@ async fn empty_backpack_exports_empty_tracks() {
         v,
         json!({
             "backpack": { "id": bp, "name": "Leer" },
-            "comment_template": "{tags} {bpm} {key} {energy}",
+            "comment_template": "{types} {tags}",
             "comment_template_name": Value::Null,
             "tracks": []
         })
@@ -324,7 +324,7 @@ async fn export_includes_device_comment_template() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["comment_template"], "{tags} {bpm} {key} {energy}");
+    assert_eq!(v["comment_template"], "{types} {tags}");
 
     // A stored per-device template is delivered verbatim.
     sqlx::query(
@@ -365,7 +365,7 @@ async fn export_includes_device_comment_template() {
             .expect("export"),
     )
     .await;
-    assert_eq!(v["comment_template"], "{tags} {bpm} {key} {energy}");
+    assert_eq!(v["comment_template"], "{types} {tags}");
     assert!(v["comment_template_name"].is_null());
     assert!(
         v.get("comment_template_id").is_none(),
