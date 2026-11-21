@@ -10,24 +10,6 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
-- feat: **Jede Backpack-Mitgliedschaft ordert und priorisiert** (#683, Slice B2) —
-  die Download-Prioritaet zaehlt jetzt auch Backpacks: `crawl::priorities()` =
-  `liked + playlist_refs + backpack_bonus` mit der neuen Konstante
-  `crawl::BACKPACK_BONUS` (= 2). **Jedes** Backpack zaehlt, auch ein inaktives
-  (kein `is_active`-Filter). `crawl::order_pending()` nutzt dieselbe Formel (eine
-  Definition, kein SQL-Duplikat) und ordert jetzt auch **Backpack-only-Tracks**
-  (WHERE zusaetzlich `OR EXISTS(… hub_backpack_item_tracks …)`). Neu: `POST
-  /backpacks/{id}/prioritize` („Fehlende priorisieren“, `BACKPACK_PRIORITY`)
-  ordert die noch nicht `ready` Tracks eines Backpacks; das Hinzufuegen einer
-  Quelle (`POST /backpacks/{id}/sources`) ordert deren fehlende Tracks sofort mit.
-  **Keine Migration, kein Version-Bump.**
-- feat: **Backpack-Inhalte materialisiert** (#682, Slice B1) — der aufgelöste
-  Track-Satz jedes Backpack-Items wird in der neuen Tabelle
-  `hub_backpack_item_tracks` persistiert (Migration
-  `068_hub_backpack_item_tracks.sql`, eine Zeile pro Item/Track, `backend` =
-  `tag` | `playlist` | `track` | `lens:<key>`, beide FKs `ON DELETE CASCADE`).
-  `/backpacks` zeigt daraus **pro Quelle N Tracks** und **x/y verfügbar**, ohne
-  live aufzulösen; **kein Netzwerk-Call im Renderpfad**.
 - feat: **Tag hygiene — rename, merge similar tags, suggestions** (#456) — a tag
   detail page (`/tag/{id}`) now surfaces owner-only **suggestions** for similar
   own tags (`tags::similar_tags`; ranked by normalised-equal > small edit
@@ -70,14 +52,6 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Changed
 
-- **Tag-Export: Typen, Camelot, Source-IDs** (#690, Slice T2) — der Backpack-Export
-  und die Comment-Preview lesen Tags jetzt über **einen** Pfad (`tag_export`): getypte
-  Tags in `TYPE_NAMES`-Reihenfolge (PHASE_1..5 fest), danach ungetypte alphabetisch.
-  Neu im Export-JSON: `types` (ein Kürzel pro Familie, `P` für alle Phasen) und
-  `source_ids` (`sp:`/`sc:`/`yt:`). `key` bevorzugt Camelot und normalisiert sonst den
-  musikalischen Key. Die System-Vorlage `Standard` nutzt per Migration
-  `069_comment_template_default.sql` den Default `{types} {tags}` (nur wenn unverändert).
-
 - **Track-page download UX** (#460): the bare `FLAC laden` / `MP3 laden` links are gone.
   The `Download`-Bucket offers **one button per format the vault says is ready**
   („FLAC", „MP3 320", „MP3 128") and a **passive hint** while nothing is ready — no dead
@@ -97,6 +71,57 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   `hub_track_audio`-Read-Model, der hinterherhinkt (gedeckter Backfill, `ORDER BY id`, 7-Tage-TTL
   für „no data"), und zeigte deshalb „—", während die Track-Page den Vault-Wert hatte. Beide
   lesen jetzt denselben `resolved`-Block über `music_api::resolved_audio`.
+
+## [0.35.0] — 2026-11-21
+
+**backpack-ux** — Backpacks zeigen pro Quelle, wie viel drin ist und wie viel davon
+in music-api liegt; **alles**, was in irgendeinem Backpack steckt, wird geordert und
+priorisiert. Comment-Vorlagen rendern die neuen Platzhalter `{types}`/`{source_ids}`
+in kanonischer Tag-Reihenfolge (`TYPE_NAMES`).
+
+### Added
+
+- feat: **Jede Backpack-Mitgliedschaft ordert und priorisiert** (#683, Slice B2) —
+  die Download-Prioritaet zaehlt jetzt auch Backpacks: `crawl::priorities()` =
+  `liked + playlist_refs + backpack_bonus` mit der neuen Konstante
+  `crawl::BACKPACK_BONUS` (= 2). **Jedes** Backpack zaehlt, auch ein inaktives
+  (kein `is_active`-Filter). `crawl::order_pending()` nutzt dieselbe Formel (eine
+  Definition, kein SQL-Duplikat) und ordert jetzt auch **Backpack-only-Tracks**
+  (WHERE zusaetzlich `OR EXISTS(… hub_backpack_item_tracks …)`). Neu: `POST
+  /backpacks/{id}/prioritize` („Fehlende priorisieren“, `BACKPACK_PRIORITY`)
+  ordert die noch nicht `ready` Tracks eines Backpacks; das Hinzufuegen einer
+  Quelle (`POST /backpacks/{id}/sources`) ordert deren fehlende Tracks sofort mit.
+  **Keine Migration, kein Version-Bump.**
+- feat: **Backpack-Inhalte materialisiert** (#682, Slice B1) — der aufgelöste
+  Track-Satz jedes Backpack-Items wird in der neuen Tabelle
+  `hub_backpack_item_tracks` persistiert (Migration
+  `068_hub_backpack_item_tracks.sql`, eine Zeile pro Item/Track, `backend` =
+  `tag` | `playlist` | `track` | `lens:<key>`, beide FKs `ON DELETE CASCADE`).
+  `/backpacks` zeigt daraus **pro Quelle N Tracks** und **x/y verfügbar**, ohne
+  live aufzulösen; **kein Netzwerk-Call im Renderpfad**.
+- feat: **comment-template — `{types}`/`{source_ids}`, Tag-Reihenfolge, Tag-Budget** (#689, Slice T1) —
+  neuer Crate-Vertrag: `{types}` liefert die Typ-Kürzel als eigenen Token in
+  `TYPE_NAMES`-Reihenfolge (z. B. `[MGPE]`), `{source_ids}` die Quellen-IDs (`sp:`/`sc:`/`yt:`);
+  `{tags}` werden transliteriert (Umlaute), in Eingabereihenfolge dedupliziert und mit
+  Leerzeichen gejoint, `{bpm}` ganzzahlig gerundet. Der 48-Zeichen-Cut entfällt —
+  `COMMENT_MAX_CHARS = 512` bleibt der einzige Deckel, bei Überlänge werden ganze Tags von
+  hinten verworfen. `DEFAULT_TEMPLATE = "{types} {tags}"`.
+
+### Changed
+
+- **Tag-Export: Typen, Camelot, Source-IDs** (#690, Slice T2) — der Backpack-Export
+  und die Comment-Preview lesen Tags jetzt über **einen** Pfad (`tag_export`): getypte
+  Tags in `TYPE_NAMES`-Reihenfolge (PHASE_1..5 fest), danach ungetypte alphabetisch.
+  Neu im Export-JSON: `types` (ein Kürzel pro Familie, `P` für alle Phasen) und
+  `source_ids` (`sp:`/`sc:`/`yt:`). `key` bevorzugt Camelot und normalisiert sonst den
+  musikalischen Key. Die System-Vorlage `Standard` nutzt per Migration
+  `069_comment_template_default.sql` den Default `{types} {tags}` (nur wenn unverändert).
+- **Platzhalter-Hilfe und Doku** (#692, Slice T4) — `/comment-templates` nennt alle sechs
+  Platzhalter (`{types}`, `{tags}`, `{source_ids}`, `{bpm}`, `{key}`, `{energy}`) inkl.
+  Kürzel-Tabelle (M/G/V/P/E/S/R) und dem Hinweis, dass `{types}` die eckigen Klammern selbst
+  mitbringt; das Body-Feld schlägt `{types} {tags}` vor, `kellner_settings.html` sagt
+  „Standard-Vorlage“ statt „alphabetische Tag-Liste“. `docs/COMMENT_SYSTEM.md` ist als Legacy
+  markiert und verweist auf `comment-template` und `music-hub/src/tagtypes.rs`.
 
 ## [0.34.0] — 2026-11-21
 
