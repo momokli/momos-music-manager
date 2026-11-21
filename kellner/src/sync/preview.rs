@@ -57,9 +57,9 @@ pub async fn run_preview(hub: &HubClient, limit: usize) -> Result<PreviewStats> 
         let comment = render(
             &dev.comment_template,
             &TrackFacts {
-                types: vec![],
+                types: dev.types.clone(),
                 tags: dev.tags.clone(),
-                source_ids: vec![],
+                source_ids: dev.source_ids.clone(),
                 bpm: dev.bpm,
                 key: dev.key.clone(),
                 energy: dev.energy,
