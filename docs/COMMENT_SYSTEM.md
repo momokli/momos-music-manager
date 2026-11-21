@@ -1,5 +1,27 @@
 # Momo's Music Manager - Comment System Documentation
 
+> **Legacy:** Dieses Dokument beschreibt den historischen Kommentar-Stand
+> (PMV-Indikatoren, Kategorie-Sortierung, `service_tracks`/`service_playlists`).
+> Es ist als Historie erhalten und **nicht** mehr die gültige Referenz für die
+> Platzhalter-Semantik. Maßgeblich ist der Abschnitt „Aktuell gilt“ unten.
+
+## Aktuell gilt
+
+Die Kommentar-Texte werden heute aus einer Vorlage mit Platzhaltern gerendert:
+
+- **Crate `comment-template`** (`comment-template/src/lib.rs`): `render` expandiert
+  die Platzhalter, normalisiert Whitespace, kürzt auf 512 Zeichen und fällt bei
+  unbekannten Platzhaltern auf `DEFAULT_TEMPLATE` zurück. `DEFAULT_TEMPLATE` ist
+  `"{types} {tags}"`; erlaubt sind `{types}`, `{tags}`, `{source_ids}`, `{bpm}`,
+  `{key}` und `{energy}`.
+- **`music-hub/src/tagtypes.rs`**: definiert die feste Tag-Typ-Reihenfolge und die
+  Kürzel — `M` Mood, `G` Genre, `V` Vibe, `P` Phase, `E` Merkmal, `S` Setlist,
+  `R` Rumpelkiste. `{types}` liefert ein Kürzel pro Typ, in dem der Track
+  mindestens einen Tag hat, in dieser Reihenfolge, samt eigener eckiger Klammern
+  (z. B. `[MPE]`).
+
+Alles Folgende ist Legacy-Dokumentation.
+
 ## Overview
 
 The comment system provides a structured way to store and display metadata about music files, linking them to tags derived from streaming service playlists. Comments follow a standardized format that enables both human readability and machine parsing.

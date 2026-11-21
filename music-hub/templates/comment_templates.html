@@ -3,8 +3,32 @@
     <h1>Kommentar-Vorlagen</h1>
     <p class="hub-muted">
         Benannte Text-Bausteine für den Track-Kommentar. Erlaubte Platzhalter:
-        <code>{tags}</code>, <code>{bpm}</code>, <code>{key}</code>,
-        <code>{energy}</code>.
+    </p>
+    <ul class="hub-muted">
+        <li>
+            <code>{types}</code> — je ein Kürzel pro Tag-Typ, in dem der Track
+            mindestens einen Tag hat, in Typ-Reihenfolge: <code>M</code> Mood,
+            <code>G</code> Genre, <code>V</code> Vibe, <code>P</code> Phase,
+            <code>E</code> Merkmal, <code>S</code> Setlist,
+            <code>R</code> Rumpelkiste. Die eckigen Klammern bringt der Platzhalter
+            selbst mit — <code>{types}</code> ergibt z. B. <code>[MPE]</code>, also
+            nicht <code>[{types}]</code> schreiben.
+        </li>
+        <li><code>{tags}</code> — die Tags des Tracks, mit Leerzeichen getrennt.</li>
+        <li>
+            <code>{source_ids}</code> — die Service-IDs (<code>sp:</code>,
+            <code>sc:</code>, <code>yt:</code>), mit Leerzeichen getrennt.
+        </li>
+        <li><code>{bpm}</code> — das Tempo, z. B. <code>BPM-128</code>.</li>
+        <li><code>{key}</code> — die Tonart, z. B. <code>KEY-A-Minor</code>.</li>
+        <li><code>{energy}</code> — die Energie, z. B. <code>ENERGY-0.6</code>.</li>
+    </ul>
+    <p class="hub-muted">
+        Tags werden ohne Leerzeichen geschrieben: Umlaute werden transliteriert
+        (<code>ä</code> → <code>ae</code>, <code>ö</code> → <code>oe</code>,
+        <code>ü</code> → <code>ue</code>, <code>ß</code> → <code>ss</code>) und
+        Leerzeichen zu Bindestrichen — aus „Hard Techno“ wird
+        <code>Hard-Techno</code>. Leere Platzhalter verschwinden.
     </p>
 </hgroup>
 
@@ -17,7 +41,7 @@
     <input
         type="text"
         name="body"
-        placeholder="{tags} {bpm} {key} {energy}"
+        placeholder="{types} {tags}"
         aria-label="Vorlagen-Body"
         size="40"
         required

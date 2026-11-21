@@ -4,7 +4,7 @@
     <p class="hub-muted">
         Einstellungen je Gerät: Ausgabeformat, Kommentar-Vorlage und aktive Backpacks.
         Diese Konfiguration liegt maßgeblich im Hub. Ein leeres Kommentarfeld nutzt die
-        alphabetische Tag-Liste (v1-Standard).
+        Standard-Vorlage (<code>{types} {tags}</code>).
     </p>
 </hgroup>
 
@@ -63,7 +63,7 @@
                     type="text"
                     name="comment_template"
                     value="{{ c.legacy_comment }}"
-                    placeholder="leer = alphabetische Tag-Liste"
+                    placeholder="leer = Standard-Vorlage"
                     aria-label="Eigene Vorlage (alt)"
                     hx-post="/kellner/{{ c.id }}/template/preview"
                     hx-trigger="keyup changed delay:400ms"
