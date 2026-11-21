@@ -262,6 +262,14 @@
         gap: 0.6rem;
         align-items: start;
       }
+      /* /kellner: the device card must use the full main width, NOT the
+         24rem card cap, so the two-column settings/preview split is usable. */
+      .hub-kellner-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 0.6rem;
+        align-items: start;
+      }
       /* /kellner: two columns from 64rem (settings left, preview right). */
       .hub-kellner-cols {
         display: grid;
