@@ -96,7 +96,7 @@ kellner/
 ├── README.md
 ├── AGENT.md       # this file
 └── src/
-    ├── main.rs    # clap CLI: pair, backpack, backup, traktor-upload, downloads, run, service
+    ├── main.rs    # clap CLI: pair, backpack, comment, backup, traktor-upload, downloads, run, service
     ├── config.rs  # ~/.config/kellner/config.toml + persisted device identity
     ├── pairing.rs # token gen, hub register, approval URL, browser open, confirm
     ├── power.rs   # power-source detection (macOS pmset) + adaptive interval (#368)
@@ -109,7 +109,8 @@ kellner/
     │   ├── traktor.rs  # collection.nml detection (macOS/Windows defaults + override) + mtime watch
     │   ├── backup.rs   # walk + canonicalise (Comment cleared) + SHA-256 + dedup/upload (#365)
     │   ├── downloads.rs # order → poll → stream → flat file + provenance (#366)
-    │   └── backpack.rs  # export → diff → order → tag → soft-prune (#367)
+    │   ├── backpack.rs  # export → diff → order → tag → soft-prune (#367)
+    │   └── preview.rs  # comment --preview: Union + render, read-only (#671)
     └── client/
         ├── mod.rs
         ├── hub.rs     # traktor upload via `Authorization: Bearer <device_token>` + bounded retry/backoff

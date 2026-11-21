@@ -77,14 +77,82 @@ pub struct BackpackStats {
 
 /// One desired track unioned across the active backpacks.
 #[derive(Debug, Clone, PartialEq)]
-struct Desired {
-    tags: Vec<String>,
-    bpm: Option<f64>,
-    key: Option<String>,
-    energy: Option<f64>,
-    backpack_id: i64,
+pub(crate) struct Desired {
+    /// Track title (first-wins). The sync path ignores it; `comment --preview`
+    /// prints it (issue #671).
+    pub title: String,
+    pub tags: Vec<String>,
+    pub bpm: Option<f64>,
+    pub key: Option<String>,
+    pub energy: Option<f64>,
+    pub backpack_id: i64,
     /// The Comment template of the backpack this track came from (issue #653).
-    comment_template: String,
+    pub comment_template: String,
+}
+
+/// The union of every active backpack's tracks.
+///
+/// Shared by `kellner backpack` (sync) and `kellner comment --preview` (#671) so
+/// both derive the desired set — and therefore the rendered Comment — from one
+/// path, byte-identical by construction.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct DesiredSet {
+    /// Backpacks the hub reported (active or not).
+    pub backpacks: usize,
+    /// Active backpacks exported.
+    pub active: usize,
+    /// Tracks skipped because they carry no ISRC.
+    pub skipped_no_isrc: usize,
+    /// Desired ISRCs, ascending; the first (lowest backpack id) wins.
+    pub tracks: BTreeMap<String, Desired>,
+}
+
+/// Read the owner's backpacks, export each active one and union their tracks by
+/// ISRC (first = lowest backpack id wins, deterministically).
+///
+/// The winning track's backpack Comment template travels with it, so callers
+/// render exactly what the hub resolved for that device (#652/#659).
+pub(crate) async fn collect_desired(hub: &HubClient) -> Result<DesiredSet> {
+    let backpacks = hub
+        .list_backpacks()
+        .await
+        .context("listing hub backpacks failed")?;
+
+    let mut active_sorted: Vec<_> = backpacks.iter().filter(|b| b.is_active).collect();
+    active_sorted.sort_by_key(|b| b.id);
+
+    let mut ds = DesiredSet {
+        backpacks: backpacks.len(),
+        ..DesiredSet::default()
+    };
+    for bp in &active_sorted {
+        ds.active += 1;
+        let export = hub
+            .export_backpack(bp.id)
+            .await
+            .with_context(|| format!("exporting backpack {} failed", bp.id))?;
+        // The device's resolved template travels with the export (#652/#659).
+        let comment_template = export.comment_template.clone();
+        for t in export.tracks {
+            let isrc = t.isrc.trim().to_string();
+            if isrc.is_empty() {
+                ds.skipped_no_isrc += 1;
+                eprintln!("kellner: backpack: backpack {} has a track without ISRC — skipped", bp.id);
+                continue;
+            }
+            // Union by ISRC: the first (lowest backpack id) wins, deterministically.
+            ds.tracks.entry(isrc).or_insert_with(|| Desired {
+                title: t.title,
+                tags: t.tags,
+                bpm: t.bpm,
+                key: t.key,
+                energy: t.energy,
+                backpack_id: bp.id,
+                comment_template: comment_template.clone(),
+            });
+        }
+    }
+    Ok(ds)
 }
 
 fn now_epoch_secs() -> i64 {
@@ -115,42 +183,14 @@ pub async fn run_backpack(
     let mut state = state::load()?;
     let mut stats = BackpackStats::default();
 
-    // US1: read the owner's backpacks, then export each active one.
-    let backpacks = hub
-        .list_backpacks()
-        .await
-        .context("listing hub backpacks failed")?;
-    stats.backpacks = backpacks.len();
-
-    let mut desired: BTreeMap<String, Desired> = BTreeMap::new();
-    let mut active_sorted: Vec<_> = backpacks.iter().filter(|b| b.is_active).collect();
-    active_sorted.sort_by_key(|b| b.id);
-    for bp in &active_sorted {
-        stats.active += 1;
-        let export = hub
-            .export_backpack(bp.id)
-            .await
-            .with_context(|| format!("exporting backpack {} failed", bp.id))?;
-        // The device's resolved template travels with the export (#652/#659).
-        let comment_template = export.comment_template.clone();
-        for t in export.tracks {
-            let isrc = t.isrc.trim().to_string();
-            if isrc.is_empty() {
-                stats.failed += 1;
-                eprintln!("kellner: backpack: backpack {} has a track without ISRC — skipped", bp.id);
-                continue;
-            }
-            // Union by ISRC: the first (lowest backpack id) wins, deterministically.
-            desired.entry(isrc).or_insert_with(|| Desired {
-                tags: t.tags,
-                bpm: t.bpm,
-                key: t.key,
-                energy: t.energy,
-                backpack_id: bp.id,
-                comment_template: comment_template.clone(),
-            });
-        }
-    }
+    // US1: read the owner's backpacks, export each active one and union by ISRC.
+    // The union is shared with `kellner comment --preview` (#671), so both render
+    // identical bytes by construction.
+    let ds = collect_desired(hub).await?;
+    stats.backpacks = ds.backpacks;
+    stats.active = ds.active;
+    stats.failed += ds.skipped_no_isrc;
+    let desired = ds.tracks;
     stats.desired = desired.len();
 
     // US4: prune membership for tracks no longer in any active backpack.

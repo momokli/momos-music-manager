@@ -46,6 +46,8 @@ enum Command {
     TraktorUpload(TraktorUploadArgs),
     /// Order + download ISRCs, or show the download state without arguments.
     Downloads(DownloadsArgs),
+    /// Preview the Comment tag kellner would write (offline, read-only).
+    Comment(CommentArgs),
     /// Run the background sync loop (the entry point the OS service executes).
     Run(RunArgs),
     /// Install / uninstall / inspect the launchd or systemd unit.
@@ -138,6 +140,16 @@ struct DownloadsArgs {
 }
 
 #[derive(Debug, Args)]
+struct CommentArgs {
+    /// Preview the Comment tag kellner would write (offline, read-only).
+    #[arg(long)]
+    preview: bool,
+    /// Show at most this many tracks (default 10).
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+}
+
+#[derive(Debug, Args)]
 struct RunArgs {
     /// Run a single pass and exit (no loop).
     #[arg(long)]
@@ -211,6 +223,7 @@ fn main() -> Result<()> {
         Command::Backup(args) => return backup(args),
         Command::TraktorUpload(args) => return traktor_upload(args),
         Command::Downloads(args) => return downloads(args),
+        Command::Comment(args) => return comment(args),
         Command::Run(args) => return run_cmd(args),
         Command::Service(args) => return service_cmd(args),
     }
@@ -399,6 +412,24 @@ fn downloads(args: DownloadsArgs) -> Result<()> {
                 stats.pending, timeout_secs
             );
         }
+        Ok(())
+    })
+}
+
+/// `kellner comment …` — v1 only implements `--preview` (offline, read-only).
+fn comment(args: CommentArgs) -> Result<()> {
+    if !args.preview {
+        anyhow::bail!("kellner comment: only --preview is implemented");
+    }
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        let cfg = config::load()?;
+        let device = cfg.device.clone().ok_or_else(|| {
+            anyhow::anyhow!("this device is not paired yet — run `kellner pair` first")
+        })?;
+        // Hub-only: no music-api URL/token, no collection root, no state write.
+        let hub = client::hub::HubClient::new(cfg.hub_url(), device.device_token);
+        sync::preview::run_preview(&hub, args.limit).await?;
         Ok(())
     })
 }
@@ -619,6 +650,7 @@ mod tests {
                 Command::Backup(_) => "backup",
                 Command::TraktorUpload(_) => "traktor-upload",
                 Command::Downloads(_) => "downloads",
+                Command::Comment(_) => "comment",
                 Command::Pair(_) => "pair",
                 Command::Run(_) => "run",
                 Command::Service(_) => "service",

@@ -20,6 +20,8 @@ on each Mac / PC and keeps the local machine in sync with the always-on servers
 - **Traktor upload** — upload a Traktor `collection.nml` (playcount / rating /
   playlists).
 - **Downloads** — report the state of downloads and the Backpack.
+- **Comment-Vorschau** — `kellner comment --preview` zeigt offline an, welche
+  Kommentare der Sync schreiben würde (gleiche Vorlage/Union, read-only).
 
 ## Scope boundary
 
@@ -42,6 +44,10 @@ cargo run -- backpack
 cargo run -- backup
 cargo run -- traktor-upload
 cargo run -- downloads
+
+# Preview the Comment tag kellner would write (offline, read-only)
+cargo run -- comment --preview
+cargo run -- comment --preview --limit 25   # default: 10
 
 # Background loop (what the OS service runs) — power-aware on battery
 cargo run -- run
