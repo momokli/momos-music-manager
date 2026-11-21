@@ -45,11 +45,18 @@ fn write_comment(path: &std::path::Path, comment: &str) {
         .expect("save");
 }
 
-fn facts(tags: &[&str], bpm: Option<f64>, key: Option<&str>, energy: Option<f64>) -> TrackFacts {
+fn facts(
+    types: &[&str],
+    tags: &[&str],
+    source_ids: &[&str],
+    bpm: Option<f64>,
+    key: Option<&str>,
+    energy: Option<f64>,
+) -> TrackFacts {
     TrackFacts {
-        types: vec![],
+        types: types.iter().map(|s| s.to_string()).collect(),
         tags: tags.iter().map(|s| s.to_string()).collect(),
-        source_ids: vec![],
+        source_ids: source_ids.iter().map(|s| s.to_string()).collect(),
         bpm,
         key: key.map(str::to_string),
         energy,
@@ -63,18 +70,30 @@ fn preview_bytes_equal_written_file_bytes() {
     let cases: &[(&str, TrackFacts, &str)] = &[
         (
             "{tags} {bpm} {key} {energy}",
-            facts(&["Techno", "Peak Time"], Some(128.0), Some("8A"), Some(7.0)),
+            facts(&[], &["Techno", "Peak Time"], &[], Some(128.0), Some("8A"), Some(7.0)),
             "Techno Peak-Time BPM-128 KEY-8A ENERGY-7",
         ),
         (
             "{tags}",
-            facts(&[], None, None, None),
+            facts(&[], &[], &[], None, None, None),
             "",
         ),
         (
             "{key} / {bpm}",
-            facts(&["House"], Some(127.5), Some("A-Minor"), None),
+            facts(&[], &["House"], &[], Some(127.5), Some("A-Minor"), None),
             "KEY-A-Minor / BPM-128",
+        ),
+        (
+            "{types} {tags} {source_ids}",
+            facts(
+                &["M", "P"],
+                &["Techno"],
+                &["sp:abc", "yt:def"],
+                None,
+                None,
+                None,
+            ),
+            "[MP] Techno sp:abc yt:def",
         ),
     ];
 
@@ -108,7 +127,7 @@ fn preview_bytes_equal_written_file_bytes() {
 #[test]
 fn truncation_marker_survives_the_write() {
     let body = format!("{{tags}} {}", "x ".repeat(300));
-    let rendered = render(&body, &facts(&["Techno"], None, None, None));
+    let rendered = render(&body, &facts(&[], &["Techno"], &[], None, None, None));
     assert_eq!(rendered.chars().count(), 512);
     assert!(rendered.ends_with("..."));
 

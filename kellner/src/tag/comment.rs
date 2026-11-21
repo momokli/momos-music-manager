@@ -95,4 +95,29 @@ mod tests {
         assert!(write_comment(&dest, "").unwrap(), "clearing changes the file");
         assert!(!write_comment(&dest, "").unwrap(), "already empty -> no write");
     }
+
+    #[test]
+    fn render_types_and_tags_roundtrip_through_file() {
+        // #691: the render's `{types}` bracket-join reaches the file bytes.
+        let facts = comment_template::TrackFacts {
+            types: vec!["M".to_string(), "P".to_string()],
+            tags: vec!["Techno".to_string(), "Peak Time".to_string()],
+            ..Default::default()
+        };
+        let rendered = comment_template::render("{types} {tags}", &facts);
+        assert_eq!(rendered, "[MP] Techno Peak-Time");
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("test.flac");
+        std::fs::copy(fixture("test.flac"), &dest).unwrap();
+        assert!(write_comment(&dest, &rendered).unwrap());
+
+        let read_back = lofty::read_from_path(&dest)
+            .unwrap()
+            .primary_tag()
+            .and_then(|t| t.comment())
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        assert_eq!(read_back, "[MP] Techno Peak-Time");
+    }
 }

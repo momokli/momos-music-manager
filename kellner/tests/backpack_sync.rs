@@ -381,6 +381,27 @@ fn track_json(isrc: &str, tags: &[&str], bpm: Option<f64>, key: Option<&str>, en
     })
 }
 
+/// A track like a **new** hub export (#691): carries `types` + `source_ids`.
+fn track_json_typed(
+    isrc: &str,
+    tags: &[&str],
+    types: &[&str],
+    source_ids: &[&str],
+) -> serde_json::Value {
+    serde_json::json!({
+        "track_id": 42,
+        "isrc": isrc,
+        "title": "t",
+        "artists": "a",
+        "tags": tags,
+        "types": types,
+        "source_ids": source_ids,
+        "bpm": 128.0,
+        "key": "A-Minor",
+        "energy": 7.0,
+    })
+}
+
 fn state_json(config_path: &Path) -> serde_json::Value {
     let path = config_path.with_file_name("state.json");
     serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
@@ -802,4 +823,97 @@ async fn comment_without_preview_is_rejected() {
     let (code, out) = run_in_blocking(vec!["comment".into()], url, config);
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("only --preview is implemented"), "{out}");
+}
+
+// ── #691 E2E: types + source_ids from the export reach the written Comment ────
+
+/// A **new** hub export (#691) carries `types` + `source_ids`; the real `kellner
+/// backpack` binary must render them into the file's Comment through the same
+/// `ExportTrack` → `Desired` → `render` chain the Hub preview uses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn export_types_and_source_ids_reach_the_written_comment() {
+    let (url, state) = start_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let coll = tmp.path().join("collection");
+    std::fs::create_dir_all(&coll).unwrap();
+    let config = tmp.path().join("kellner").join("config.toml");
+    write_config(&config, &url);
+
+    {
+        let mut st = state.lock().unwrap();
+        st.backpacks = vec![backpack_json(1, "Party", true)];
+        st.exports.insert(
+            1,
+            export_json_with_template(
+                1,
+                "Party",
+                "{types} {tags} {source_ids}",
+                vec![track_json_typed(
+                    "DEABC1234567",
+                    &["Techno"],
+                    &["M", "P"],
+                    &["sp:abc", "yt:def"],
+                )],
+            ),
+        );
+    }
+
+    let (code, out) = run_in_blocking(
+        vec![
+            "backpack".into(),
+            "--root".into(),
+            coll.to_string_lossy().to_string(),
+            "--poll-secs".into(),
+            "1".into(),
+        ],
+        url,
+        config,
+    );
+    assert_eq!(code, 0, "backpack: {out}");
+    let written = read_comment(&coll.join("DEABC1234567.flac"));
+    assert_eq!(written, "[MP] Techno sp:abc yt:def", "types+source_ids in Comment: {out}");
+}
+
+/// A **legacy** hub export (no `types`/`source_ids`) must parse and render
+/// exactly as before: the empty vecs make `{types}`/`{source_ids}` drop their
+/// tokens (T1 #689 semantics), so only `{tags}` survives — identical to the
+/// pre-#691 `vec![]` behaviour.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_export_without_types_renders_tags_only() {
+    let (url, state) = start_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let coll = tmp.path().join("collection");
+    std::fs::create_dir_all(&coll).unwrap();
+    let config = tmp.path().join("kellner").join("config.toml");
+    write_config(&config, &url);
+
+    {
+        let mut st = state.lock().unwrap();
+        st.backpacks = vec![backpack_json(1, "Party", true)];
+        // `track_json` intentionally omits the #691 fields (legacy shape).
+        st.exports.insert(
+            1,
+            export_json_with_template(
+                1,
+                "Party",
+                "{types} {tags} {source_ids}",
+                vec![track_json("DEABC1234567", &["Techno"], Some(128.0), None, None)],
+            ),
+        );
+    }
+
+    let (code, out) = run_in_blocking(
+        vec![
+            "backpack".into(),
+            "--root".into(),
+            coll.to_string_lossy().to_string(),
+            "--poll-secs".into(),
+            "1".into(),
+        ],
+        url,
+        config,
+    );
+    assert_eq!(code, 0, "legacy export must parse: {out}");
+    let written = read_comment(&coll.join("DEABC1234567.flac"));
+    assert_eq!(written, "Techno", "legacy render unchanged: {out}");
 }

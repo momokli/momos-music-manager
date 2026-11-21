@@ -82,6 +82,8 @@ pub(crate) struct Desired {
     /// prints it (issue #671).
     pub title: String,
     pub tags: Vec<String>,
+    pub types: Vec<String>,
+    pub source_ids: Vec<String>,
     pub bpm: Option<f64>,
     pub key: Option<String>,
     pub energy: Option<f64>,
@@ -144,6 +146,8 @@ pub(crate) async fn collect_desired(hub: &HubClient) -> Result<DesiredSet> {
             ds.tracks.entry(isrc).or_insert_with(|| Desired {
                 title: t.title,
                 tags: t.tags,
+                types: t.types,
+                source_ids: t.source_ids,
                 bpm: t.bpm,
                 key: t.key,
                 energy: t.energy,
@@ -286,9 +290,9 @@ fn retag_existing(
         let rendered = render(
             &dev.comment_template,
             &TrackFacts {
-                types: vec![],
+                types: dev.types.clone(),
                 tags: dev.tags.clone(),
-                source_ids: vec![],
+                source_ids: dev.source_ids.clone(),
                 bpm: dev.bpm,
                 key: dev.key.clone(),
                 energy: dev.energy,
@@ -458,9 +462,9 @@ async fn fetch_and_tag(
     let rendered = render(
         &dev.comment_template,
         &TrackFacts {
-            types: vec![],
+            types: dev.types.clone(),
             tags: dev.tags.clone(),
-            source_ids: vec![],
+            source_ids: dev.source_ids.clone(),
             bpm: dev.bpm,
             key: dev.key.clone(),
             energy: dev.energy,

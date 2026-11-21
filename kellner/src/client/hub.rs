@@ -73,6 +73,12 @@ pub struct ExportTrack {
     /// Resolved tag names (alphabetical on the hub side).
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Tag types in hub order (e.g. `["M", "G", "P", "E"]`); added in #691.
+    #[serde(default)]
+    pub types: Vec<String>,
+    /// Source ids (e.g. `["sp:abc"]`), unmodified; added in #691.
+    #[serde(default)]
+    pub source_ids: Vec<String>,
     #[serde(default)]
     pub bpm: Option<f64>,
     #[serde(default)]
@@ -289,7 +295,7 @@ mod tests {
             "backpack":{"id":1,"name":"Party"},
             "comment_template":"{tags} {bpm}",
             "tracks":[
-              {"track_id":9,"isrc":"DEABC1234567","title":"t","artists":"a","tags":["b","a"],"bpm":128.0,"key":"A-Minor","energy":7.0},
+              {"track_id":9,"isrc":"DEABC1234567","title":"t","artists":"a","tags":["b","a"],"types":["M","P"],"source_ids":["sp:abc","yt:def"],"bpm":128.0,"key":"A-Minor","energy":7.0},
               {"track_id":10,"isrc":"DEABC7654321","title":"u","artists":"c","tags":[],"bpm":null,"key":null,"energy":null}
             ]
         }"#;
@@ -304,11 +310,30 @@ mod tests {
         assert_eq!(first.track_id, 9);
         assert_eq!(first.isrc, "DEABC1234567");
         assert_eq!(first.tags, vec!["b".to_string(), "a".to_string()]);
+        // #691: types + source_ids round-trip in the hub's order.
+        assert_eq!(first.types, vec!["M".to_string(), "P".to_string()]);
+        assert_eq!(
+            first.source_ids,
+            vec!["sp:abc".to_string(), "yt:def".to_string()]
+        );
         assert_eq!(first.bpm, Some(128.0));
         assert_eq!(first.key.as_deref(), Some("A-Minor"));
         assert_eq!(first.energy, Some(7.0));
         let second = &parsed.tracks[1];
         assert!(second.bpm.is_none() && second.key.is_none() && second.energy.is_none());
+        // #691: absent keys default to empty vectors (legacy hub).
+        assert!(second.types.is_empty() && second.source_ids.is_empty());
+    }
+
+    #[test]
+    fn export_track_tolerates_missing_types_and_source_ids() {
+        // Legacy hub export without the #691 fields parses fine, as empty vecs.
+        let json = r#"{"track_id":1,"isrc":"X","title":"t","artists":"a","tags":["House"],"bpm":120.0,"key":null,"energy":null}"#;
+        let first: ExportTrack = serde_json::from_str(json).unwrap();
+        assert!(first.types.is_empty());
+        assert!(first.source_ids.is_empty());
+        assert_eq!(first.tags, vec!["House".to_string()]);
+        assert_eq!(first.bpm, Some(120.0));
     }
 
     #[test]
