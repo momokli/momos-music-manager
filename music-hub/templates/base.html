@@ -1308,7 +1308,7 @@
         </li>
         <li>
           <details class="dropdown">
-            <summary {% if nav.active == "playlists" || nav.active == "queue" || nav.active == "tag-task" || nav.active == "tags" || nav.active == "revisit" || nav.active == "collectives" || nav.active == "playlist" || nav.active == "tag" || nav.active == "curate" || nav.active == "listening" || nav.active == "clusters" || nav.active == "backpacks" || nav.active == "tonies" %}aria-current="page"{% endif %}>Bibliothek</summary>
+            <summary {% if nav.active == "playlists" || nav.active == "queue" || nav.active == "tag-task" || nav.active == "tags" || nav.active == "revisit" || nav.active == "collectives" || nav.active == "playlist" || nav.active == "tag" || nav.active == "curate" || nav.active == "listening" || nav.active == "clusters" || nav.active == "backpacks" || nav.active == "comment-templates" || nav.active == "tonies" %}aria-current="page"{% endif %}>Bibliothek</summary>
             <ul>
               <li><a href="/me/playlists">Playlists</a></li>
               <li><a href="/tag-queue">Tag-Queue</a></li>
@@ -1317,6 +1317,7 @@
               <li><a href="/tag-clusters">Cluster</a></li>
               <li><a href="/curate">Kuratieren</a></li>
               <li><a href="/backpacks">Backpacks</a></li>
+              <li><a href="/comment-templates" {% if nav.active == "comment-templates" %}aria-current="page"{% endif %}>Kommentar-Vorlagen</a></li>
               <li><a href="/listening">Gehört</a></li>
               <li><a href="/revisit">Wiedervorlage</a></li>
               {% if nav.has_tonies %}

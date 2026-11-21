@@ -1,0 +1,89 @@
+{% extends "base.html" %} {% block title %}Kommentar-Vorlagen — Spelunke{% endblock %} {% block content %}
+<hgroup>
+    <h1>Kommentar-Vorlagen</h1>
+    <p class="hub-muted">
+        Benannte Text-Bausteine für den Track-Kommentar. Erlaubte Platzhalter:
+        <code>{tags}</code>, <code>{bpm}</code>, <code>{key}</code>,
+        <code>{energy}</code>.
+    </p>
+</hgroup>
+
+<form
+    method="post"
+    action="/comment-templates/create"
+    style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem"
+>
+    <input type="text" name="name" placeholder="Name" aria-label="Vorlagen-Name" required />
+    <input
+        type="text"
+        name="body"
+        placeholder="{tags} {bpm} {key} {energy}"
+        aria-label="Vorlagen-Body"
+        size="40"
+        required
+    />
+    <button type="submit">Anlegen</button>
+</form>
+
+<h3>System</h3>
+{% if system.is_empty() %}
+<p class="hub-empty">Keine System-Vorlagen.</p>
+{% else %}
+<div class="hub-backpack-grid">
+    {% for c in system %}
+    <article class="hub-backpack-card">
+        <header>
+            <h4>{{ c.name }} <span class="hub-badge">System</span></h4>
+        </header>
+        <p><code>{{ c.body }}</code></p>
+        {% if c.editable %}
+        {% include "comment_template_fields.html" %}
+        {% endif %}
+        <form method="post" action="/comment-templates/{{ c.id }}/duplicate" style="display: inline">
+            <button type="submit" class="secondary">Kopie anlegen</button>
+        </form>
+    </article>
+    {% endfor %}
+</div>
+{% endif %}
+
+<h3>Meine Vorlagen</h3>
+{% if mine.is_empty() %}
+<p class="hub-empty">Noch keine eigenen Vorlagen.</p>
+{% else %}
+<div class="hub-backpack-grid">
+    {% for c in mine %}
+    <article class="hub-backpack-card">
+        <header>
+            <h4>
+                {{ c.name }}
+                {% if c.is_shared %}<span class="hub-badge hub-badge-ok">Geteilt</span>{% endif %}
+            </h4>
+        </header>
+        {% include "comment_template_fields.html" %}
+        <form method="post" action="/comment-templates/{{ c.id }}/duplicate" style="display: inline">
+            <button type="submit" class="secondary">Kopie anlegen</button>
+        </form>
+    </article>
+    {% endfor %}
+</div>
+{% endif %}
+
+<h3>Geteilt von anderen</h3>
+{% if shared.is_empty() %}
+<p class="hub-empty">Keine geteilten Vorlagen anderer Nutzer.</p>
+{% else %}
+<div class="hub-backpack-grid">
+    {% for c in shared %}
+    <article class="hub-backpack-card">
+        <header>
+            <h4>{{ c.owner_slug }}: {{ c.name }} <span class="hub-badge">Geteilt</span></h4>
+        </header>
+        <p><code>{{ c.body }}</code></p>
+        <form method="post" action="/comment-templates/{{ c.id }}/duplicate" style="display: inline">
+            <button type="submit" class="secondary">Kopie anlegen</button>
+        </form>
+    </article>
+    {% endfor %}
+</div>
+{% endif %} {% endblock %}

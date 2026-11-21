@@ -37,6 +37,16 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/backpacks/{id}/clear", post(backpack_sources_clear))
         .route("/backpacks/{id}/export", get(backpack_export))
+        .route("/comment-templates", get(comment_templates_page))
+        .route("/comment-templates/create", post(comment_template_create))
+        .route("/comment-templates/{id}/rename", post(comment_template_rename))
+        .route("/comment-templates/{id}/body", post(comment_template_body))
+        .route("/comment-templates/{id}/share", post(comment_template_share))
+        .route(
+            "/comment-templates/{id}/duplicate",
+            post(comment_template_duplicate),
+        )
+        .route("/comment-templates/{id}/delete", post(comment_template_delete))
         .route("/tags/create", post(tag_create))
         .route("/tags/smart/create", post(smart_tag_create))
         .route("/tags/search", get(tag_search))
@@ -114,6 +124,16 @@ fn not_found(msg: &str) -> Response {
         StatusCode::NOT_FOUND,
         Html(format!(
             "<!doctype html><html><body><h1>404</h1><p>{msg}</p><p><a href=\"/\">Zurück</a></p></body></html>"
+        )),
+    )
+        .into_response()
+}
+
+fn forbidden(msg: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Html(format!(
+            "<!doctype html><html><body><h1>403</h1><p>{msg}</p><p><a href=\"/\">Zurück</a></p></body></html>"
         )),
     )
         .into_response()
@@ -5410,6 +5430,235 @@ async fn backpack_export(
                 format!("{label}.m3u8"),
             )
         }
+    }
+}
+
+// ── comment templates (#668) ─────────────────────────────────────────────────
+
+/// One template card of the `/comment-templates` view.
+struct CommentTemplateCard {
+    id: i64,
+    name: String,
+    body: String,
+    owner_slug: String,
+    is_shared: bool,
+    editable: bool,
+}
+
+#[derive(Template)]
+#[template(path = "comment_templates.html")]
+struct CommentTemplatesPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    /// System templates (read-only except for admins).
+    system: Vec<CommentTemplateCard>,
+    /// The viewer's own templates.
+    mine: Vec<CommentTemplateCard>,
+    /// Foreign templates shared with everyone.
+    shared: Vec<CommentTemplateCard>,
+}
+
+#[derive(Deserialize)]
+struct CommentTemplateCreateForm {
+    name: String,
+    body: String,
+}
+
+#[derive(Deserialize)]
+struct CommentTemplateRenameForm {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct CommentTemplateBodyForm {
+    body: String,
+}
+
+/// GET `/comment-templates` (#668): the caller's own templates, foreign shared
+/// ones and the system templates, grouped. No session -> `/login`.
+async fn comment_templates_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "comment-templates").await else {
+        return Redirect::to("/login").into_response();
+    };
+
+    let views = match crate::comment_templates::list_visible(&st.pool, nav.id, nav.is_admin).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("comment templates list failed for user {}: {e:#}", nav.id);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Vorlagen konnten nicht geladen werden",
+            )
+                .into_response();
+        }
+    };
+
+    let mut system = Vec::new();
+    let mut mine = Vec::new();
+    let mut shared = Vec::new();
+    for v in views {
+        let card = CommentTemplateCard {
+            id: v.id,
+            name: v.name,
+            body: v.body,
+            owner_slug: v.owner_slug,
+            is_shared: v.is_shared,
+            editable: v.editable,
+        };
+        if v.is_system {
+            system.push(card);
+        } else if v.is_mine {
+            mine.push(card);
+        } else {
+            shared.push(card);
+        }
+    }
+
+    render(&CommentTemplatesPage {
+        nav,
+        flash: crate::flash::from_headers(&headers),
+        system,
+        mine,
+        shared,
+    })
+}
+
+/// Shared guard for the mutating routes: `404` when the template is not visible
+/// to the caller, `403` when it is visible but not mutable (foreign shared, or a
+/// system template for a non-admin).
+async fn comment_template_guard(
+    st: &AppState,
+    nav: &crate::ui::Nav,
+    id: i64,
+) -> Result<(), Response> {
+    match crate::comment_templates::get_visible(&st.pool, nav.id, id).await {
+        Ok(None) | Err(_) => return Err(not_found("Vorlage nicht gefunden.")),
+        Ok(Some(_)) => {}
+    }
+    match crate::comment_templates::mutable_by(&st.pool, nav.id, nav.is_admin, id).await {
+        Ok(Some(true)) => Ok(()),
+        Ok(_) => Err(forbidden(
+            "Diese Vorlage ist schreibgeschützt (System- oder fremde geteilte Vorlage).",
+        )),
+        Err(_) => Err(not_found("Vorlage nicht gefunden.")),
+    }
+}
+
+/// POST `/comment-templates/create` (#668): create a template for the caller.
+/// Errors (empty/duplicate name, invalid body) become a flash, never a 500.
+async fn comment_template_create(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<CommentTemplateCreateForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "comment-templates").await else {
+        return Redirect::to("/login").into_response();
+    };
+    match crate::comment_templates::create(&st.pool, nav.id, &f.name, &f.body, false).await {
+        Ok(_) => Redirect::to("/comment-templates").into_response(),
+        Err(e) => flash_redirect("/comment-templates", format!("Fehler: {e}")),
+    }
+}
+
+/// POST `/comment-templates/{id}/rename` (#668): rename a mutable template.
+async fn comment_template_rename(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<CommentTemplateRenameForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "comment-templates").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Err(resp) = comment_template_guard(&st, &nav, id).await {
+        return resp;
+    }
+    match crate::comment_templates::rename(&st.pool, nav.id, nav.is_admin, id, &f.name).await {
+        Ok(()) => Redirect::to("/comment-templates").into_response(),
+        Err(e) => flash_redirect("/comment-templates", format!("Fehler: {e}")),
+    }
+}
+
+/// POST `/comment-templates/{id}/body` (#668): replace a mutable template's
+/// body (validated against the placeholder whitelist).
+async fn comment_template_body(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<CommentTemplateBodyForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "comment-templates").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Err(resp) = comment_template_guard(&st, &nav, id).await {
+        return resp;
+    }
+    match crate::comment_templates::update_body(&st.pool, nav.id, nav.is_admin, id, &f.body).await {
+        Ok(()) => Redirect::to("/comment-templates").into_response(),
+        Err(e) => flash_redirect("/comment-templates", format!("Fehler: {e}")),
+    }
+}
+
+/// POST `/comment-templates/{id}/share` (#668): toggle a mutable template's
+/// `is_shared` flag.
+async fn comment_template_share(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "comment-templates").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Err(resp) = comment_template_guard(&st, &nav, id).await {
+        return resp;
+    }
+    let now_shared = match crate::comment_templates::get_visible(&st.pool, nav.id, id).await {
+        Ok(Some(row)) => row.is_shared != 0,
+        _ => false,
+    };
+    match crate::comment_templates::set_shared(&st.pool, nav.id, nav.is_admin, id, !now_shared)
+        .await
+    {
+        Ok(()) => Redirect::to("/comment-templates").into_response(),
+        Err(e) => flash_redirect("/comment-templates", format!("Fehler: {e}")),
+    }
+}
+
+/// POST `/comment-templates/{id}/duplicate` (#668): copy any visible template
+/// into a new template owned by the caller (unshared, editable).
+async fn comment_template_duplicate(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "comment-templates").await else {
+        return Redirect::to("/login").into_response();
+    };
+    match crate::comment_templates::get_visible(&st.pool, nav.id, id).await {
+        Ok(Some(_)) => {}
+        _ => return not_found("Vorlage nicht gefunden."),
+    }
+    match crate::comment_templates::duplicate(&st.pool, nav.id, id).await {
+        Ok(_) => Redirect::to("/comment-templates").into_response(),
+        Err(e) => flash_redirect("/comment-templates", format!("Fehler: {e}")),
+    }
+}
+
+/// POST `/comment-templates/{id}/delete` (#668): delete a mutable template.
+async fn comment_template_delete(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "comment-templates").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Err(resp) = comment_template_guard(&st, &nav, id).await {
+        return resp;
+    }
+    match crate::comment_templates::delete(&st.pool, nav.id, nav.is_admin, id).await {
+        Ok(_) => Redirect::to("/comment-templates").into_response(),
+        Err(e) => flash_redirect("/comment-templates", format!("Fehler: {e}")),
     }
 }
 

@@ -1,0 +1,42 @@
+{# Editable fields for one own/system comment template (`c` in scope). #}
+<form
+    method="post"
+    action="/comment-templates/{{ c.id }}/rename"
+    style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center"
+>
+    <input type="text" name="name" value="{{ c.name }}" aria-label="Umbenennen" required />
+    <button type="submit">Umbenennen</button>
+</form>
+
+<form
+    method="post"
+    action="/comment-templates/{{ c.id }}/body"
+    style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center"
+>
+    <input
+        type="text"
+        name="body"
+        value="{{ c.body }}"
+        aria-label="Body"
+        size="40"
+        required
+    />
+    <button type="submit">Body speichern</button>
+</form>
+
+<form method="post" action="/comment-templates/{{ c.id }}/share" style="display: inline">
+    {% if c.is_shared %}
+    <button type="submit" class="secondary outline">Nicht mehr teilen</button>
+    {% else %}
+    <button type="submit" class="secondary">Teilen</button>
+    {% endif %}
+</form>
+
+<form
+    method="post"
+    action="/comment-templates/{{ c.id }}/delete"
+    style="display: inline"
+    onsubmit="return confirm('Vorlage wirklich löschen?')"
+>
+    <button type="submit" class="secondary outline">Löschen</button>
+</form>

@@ -24,6 +24,7 @@ pub mod audio;
 pub mod backpack_api;
 pub mod backpacks;
 pub mod clusters;
+pub mod comment_templates;
 pub mod config;
 pub mod cosine;
 pub mod crawl;
