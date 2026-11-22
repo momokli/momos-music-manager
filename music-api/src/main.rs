@@ -32,6 +32,35 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::from_env()?;
 
+    // Per-file catalogue backfill (#700). Read-only on media files; `--apply`
+    // writes `track_files` rows, `--dry-run` only reports. Never on the boot
+    // path: needs file IO and ffprobe.
+    if std::env::args().skip(1).any(|a| a == "archive-backfill") {
+        let args: Vec<String> = std::env::args().collect();
+        let apply = args.iter().any(|a| a == "--apply");
+        let dry = args.iter().any(|a| a == "--dry-run");
+        if apply == dry {
+            anyhow::bail!("usage: music-api archive-backfill <--dry-run|--apply>");
+        }
+        let pool = connect_db(&config).await?;
+        db::init(&pool).await?;
+        let store = music_api::store::Store::new(
+            config.store_root.clone(),
+            config.store_max_upload_bytes,
+        );
+        music_api::store::init(&pool, &store).await?;
+        let report =
+            music_api::archive::backfill(&pool, &config, &store, apply).await?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if !report.missing_files.is_empty() {
+            eprintln!(
+                "warning: {} catalogued file(s) are missing on disk",
+                report.missing_files.len()
+            );
+        }
+        return Ok(());
+    }
+
     // One-shot vault backfill. Deliberately **off the boot path**: the server
     // never blocks on it. Batched, transactional and idempotent — safe to re-run.
     if std::env::args().skip(1).any(|a| a == "backfill-vault") {

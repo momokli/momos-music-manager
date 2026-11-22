@@ -413,14 +413,14 @@ async fn get_queue(State(state): State<Arc<AppState>>) -> Response {
     Json(json!({ "items": [], "counts": counts })).into_response()
 }
 
-/// `GET /storage/stats` — format-completeness visibility (#699).
+/// `GET /storage/stats` — the per-file catalogue (#700).
 ///
-/// * `servableButNotReady` — rows with a `path_*` that are not `ready` (the
-///   degradation this issue removes; must be `0`);
-/// * `pathsMissingOnDisk` — rows whose set `path_*` no longer exists (a
-///   filesystem `stat` per path).
+/// Aggregates `track_files` only (no filesystem scan per request):
+/// file count + bytes per role, `tracksWithoutFiles`, `incompleteTracks` and
+/// `unmanagedFiles`. `servableButNotReady` (#699) stays as a cheap DB-only
+/// compatibility counter.
 async fn storage_stats(State(state): State<Arc<AppState>>) -> Response {
-    match db::storage_stats(&state.pool).await {
+    match crate::archive::storage_stats(&state.pool).await {
         Ok(s) => Json(s).into_response(),
         Err(e) => {
             tracing::error!("storage_stats failed: {e:#}");
