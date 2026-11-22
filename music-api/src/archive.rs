@@ -114,6 +114,9 @@ pub struct StorageStats {
     pub unmanaged_files: i64,
     /// #699 compatibility: `path_*` present but `state <> 'ready'` (DB only).
     pub servable_but_not_ready: i64,
+    /// #703: object-store drift, counted read-only by the API layer
+    /// (`crate::store::orphan_candidates`). The default is "not filled in".
+    pub orphan_candidates: crate::store::OrphanCandidates,
 }
 
 /// Aggregate the catalogue. No filesystem access: everything comes from
@@ -196,6 +199,8 @@ pub async fn storage_stats(pool: &Pool<Sqlite>) -> anyhow::Result<StorageStats> 
         incomplete_tracks,
         unmanaged_files,
         servable_but_not_ready,
+        // Filled by the API layer, which alone owns the store handle.
+        orphan_candidates: crate::store::OrphanCandidates::default(),
     })
 }
 

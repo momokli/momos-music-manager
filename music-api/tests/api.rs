@@ -639,7 +639,23 @@ async fn object_store_rejects_a_wrong_digest() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-// ── Object store: delete / prune / orphans / stats / tmp sweep (#355) ───────
+// ── Object store: delete / prune / stats (#355, #703) ──────────────────────
+
+#[tokio::test]
+async fn object_orphan_reconcile_route_is_gone() {
+    // #703: `prune_orphans` was removed — deletion happens only via an explicit
+    // hash list on `POST /objects/prune`.
+    let h = harness().await;
+    let (status, _) = send(
+        &h.app,
+        authed("POST", "/objects/prune/orphans")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({ "dryRun": true })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
 
 async fn put_object(h: &Harness, bytes: &[u8]) -> String {
     let hash = sha256_hex(bytes);
@@ -791,84 +807,6 @@ async fn object_prune_dry_run_then_real() {
 }
 
 #[tokio::test]
-async fn object_orphans_reconcile() {
-    let h = harness().await;
-    let healthy = put_object(&h, b"healthy").await;
-
-    // (a) An object file in valid layout with no row.
-    let orphan_file = sha256_hex(b"orphan-file");
-    let orphan_path = h.state.store.path_for(&orphan_file);
-    std::fs::create_dir_all(orphan_path.parent().unwrap()).unwrap();
-    std::fs::write(&orphan_path, b"orphan-bytes").unwrap();
-
-    // (b) A row with no file.
-    let orphan_row = sha256_hex(b"orphan-row");
-    sqlx::query("INSERT INTO store_objects (hash, size, created_at) VALUES (?, ?, ?)")
-        .bind(&orphan_row)
-        .bind(7_i64)
-        .bind(0_i64)
-        .execute(&h.state.pool)
-        .await
-        .unwrap();
-
-    // dryRun: counts both, changes nothing. `minAgeSecs: 0` disables the grace
-    // window so the freshly written file is eligible.
-    let (status, resp) = send(
-        &h.app,
-        authed("POST", "/objects/prune/orphans")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(
-                serde_json::json!({ "dryRun": true, "minAgeSecs": 0 }),
-            ))
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
-    assert_eq!(v["dryRun"], true);
-    assert_eq!(v["filesRemoved"], 1);
-    assert_eq!(v["rowsRemoved"], 1);
-    assert_eq!(v["freedBytes"], 12 + 7);
-    assert!(orphan_path.exists());
-    assert_eq!(object_row_count(&h, &orphan_row).await, 1);
-
-    // Real reconcile removes both, keeps the healthy object.
-    let (status, resp) = send(
-        &h.app,
-        authed("POST", "/objects/prune/orphans")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(
-                serde_json::json!({ "dryRun": false, "minAgeSecs": 0 }),
-            ))
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
-    assert_eq!(v["filesRemoved"], 1);
-    assert_eq!(v["rowsRemoved"], 1);
-    assert!(!orphan_path.exists());
-    assert_eq!(object_row_count(&h, &orphan_row).await, 0);
-    assert_eq!(head_status(&h, &healthy).await, StatusCode::OK);
-
-    // Idempotent.
-    let (status, resp) = send(
-        &h.app,
-        authed("POST", "/objects/prune/orphans")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(
-                serde_json::json!({ "dryRun": false, "minAgeSecs": 0 }),
-            ))
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
-    assert_eq!(v["filesRemoved"], 0);
-    assert_eq!(v["rowsRemoved"], 0);
-}
-
-#[tokio::test]
 async fn object_stats_track_count_and_bytes() {
     let h = harness().await;
 
@@ -911,52 +849,12 @@ async fn object_stats_track_count_and_bytes() {
     assert_eq!(v["totalBytes"], 0);
 }
 
-#[tokio::test]
-async fn tmp_sweep_removes_only_stale_files() {
-    let h = harness().await;
-    let tmp = h.state.store.tmp_dir();
-    std::fs::create_dir_all(&tmp).unwrap();
-
-    let stale = tmp.join("stale-partial");
-    std::fs::write(&stale, b"stale").unwrap();
-    let f = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&stale)
-        .unwrap();
-    f.set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
-        .unwrap();
-    drop(f);
-
-    let fresh = tmp.join("fresh-partial");
-    std::fs::write(&fresh, b"fresh").unwrap();
-
-    let (files, bytes) = music_api::store::sweep_tmp(&h.state.store, Duration::from_secs(60))
-        .await
-        .unwrap();
-    assert_eq!(files, 1);
-    assert_eq!(bytes, 5);
-    assert!(!stale.exists());
-    assert!(fresh.exists());
-}
-
 // ── Object store: prune/delete edge cases (#355) ───────────────────────────
 
 async fn prune(h: &Harness, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
     let (status, resp) = send(
         &h.app,
         authed("POST", "/objects/prune")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(body))
-            .unwrap(),
-    )
-    .await;
-    (status, serde_json::from_slice(&resp).unwrap())
-}
-
-async fn prune_orphans(h: &Harness, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
-    let (status, resp) = send(
-        &h.app,
-        authed("POST", "/objects/prune/orphans")
             .header(header::CONTENT_TYPE, "application/json")
             .body(json_body(body))
             .unwrap(),
@@ -1047,111 +945,6 @@ async fn object_prune_all_missing_or_invalid_is_idempotent() {
         assert_eq!(v["freedBytes"], 0);
         assert_eq!(v["dryRun"], false);
     }
-}
-
-#[tokio::test]
-async fn object_orphans_include_tmp_sweeps_only_when_not_dry() {
-    let h = harness().await;
-    let tmp = h.state.store.tmp_dir();
-    std::fs::create_dir_all(&tmp).unwrap();
-    let stale = tmp.join("stale-orphan");
-    std::fs::write(&stale, b"stalebytes").unwrap();
-    let f = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&stale)
-        .unwrap();
-    f.set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
-        .unwrap();
-    drop(f);
-
-    // dryRun + includeTmp must not sweep abandoned uploads.
-    let (status, v) = prune_orphans(
-        &h,
-        serde_json::json!({ "dryRun": true, "includeTmp": true }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["filesRemoved"], 0);
-    assert!(stale.exists(), "dryRun must keep the stale tmp file");
-
-    // Real run with includeTmp sweeps it.
-    let (status, v) = prune_orphans(
-        &h,
-        serde_json::json!({ "dryRun": false, "includeTmp": true }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["filesRemoved"], 1);
-    assert_eq!(v["freedBytes"], 10);
-    assert!(!stale.exists());
-
-    // Second real run changes nothing.
-    let (status, v) = prune_orphans(&h, serde_json::json!({ "includeTmp": true })).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["filesRemoved"], 0);
-    assert_eq!(v["rowsRemoved"], 0);
-    assert_eq!(v["freedBytes"], 0);
-}
-
-#[tokio::test]
-async fn object_orphans_respect_grace_period() {
-    let h = harness().await;
-
-    // A freshly written file with no row must survive the default grace window:
-    // an in-flight `PUT` may not have published its row+file pair yet.
-    let fresh = sha256_hex(b"fresh-orphan-file");
-    let fresh_path = h.state.store.path_for(&fresh);
-    std::fs::create_dir_all(fresh_path.parent().unwrap()).unwrap();
-    std::fs::write(&fresh_path, b"fresh-bytes").unwrap();
-
-    // A row with no file, inserted now, is protected on the row side too.
-    let fresh_row = sha256_hex(b"fresh-orphan-row");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-    sqlx::query("INSERT INTO store_objects (hash, size, created_at) VALUES (?, ?, ?)")
-        .bind(&fresh_row)
-        .bind(3_i64)
-        .bind(now)
-        .execute(&h.state.pool)
-        .await
-        .unwrap();
-
-    let (status, v) = prune_orphans(&h, serde_json::json!({})).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        v["filesRemoved"], 0,
-        "young orphan file survives the grace window"
-    );
-    assert_eq!(
-        v["rowsRemoved"], 0,
-        "young orphan row survives the grace window"
-    );
-    assert!(fresh_path.exists());
-    assert_eq!(object_row_count(&h, &fresh_row).await, 1);
-
-    // Age both past the grace window → both are reclaimed.
-    let f = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&fresh_path)
-        .unwrap();
-    f.set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
-        .unwrap();
-    drop(f);
-    sqlx::query("UPDATE store_objects SET created_at = ? WHERE hash = ?")
-        .bind(now - 7200)
-        .bind(&fresh_row)
-        .execute(&h.state.pool)
-        .await
-        .unwrap();
-
-    let (status, v) = prune_orphans(&h, serde_json::json!({})).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["filesRemoved"], 1);
-    assert_eq!(v["rowsRemoved"], 1);
-    assert!(!fresh_path.exists());
-    assert_eq!(object_row_count(&h, &fresh_row).await, 0);
 }
 
 #[tokio::test]

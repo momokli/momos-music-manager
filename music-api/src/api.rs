@@ -90,7 +90,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/objects", get(crate::store::list))
         .route("/objects/check", post(crate::store::check))
         .route("/objects/prune", post(crate::store::prune))
-        .route("/objects/prune/orphans", post(crate::store::prune_orphans))
         .route("/objects/stats", get(crate::store::stats))
         .route(
             "/objects/{hash}",
@@ -413,15 +412,32 @@ async fn get_queue(State(state): State<Arc<AppState>>) -> Response {
     Json(json!({ "items": [], "counts": counts })).into_response()
 }
 
-/// `GET /storage/stats` — the per-file catalogue (#700).
+/// `GET /storage/stats` — the per-file catalogue (#700) plus the object-store
+/// orphan census (#703).
 ///
-/// Aggregates `track_files` only (no filesystem scan per request):
+/// Aggregates `track_files` only (no per-request scan of the media tree):
 /// file count + bytes per role, `tracksWithoutFiles`, `incompleteTracks` and
 /// `unmanagedFiles`. `servableButNotReady` (#699) stays as a cheap DB-only
-/// compatibility counter.
+/// compatibility counter. `orphanCandidates` ({filesWithoutRow, rowsWithoutFile,
+/// total}) counts object-store drift between `store_objects` and the files on
+/// disk — it never deletes; deletion stays consumer-driven via
+/// `POST /objects/prune`.
 async fn storage_stats(State(state): State<Arc<AppState>>) -> Response {
+    let orphans = match crate::store::orphan_candidates(&state.pool, &state.store).await {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::error!("orphan census failed: {e:#}");
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to scan the object store",
+            );
+        }
+    };
     match crate::archive::storage_stats(&state.pool).await {
-        Ok(s) => Json(s).into_response(),
+        Ok(mut s) => {
+            s.orphan_candidates = orphans;
+            Json(s).into_response()
+        }
         Err(e) => {
             tracing::error!("storage_stats failed: {e:#}");
             error(
