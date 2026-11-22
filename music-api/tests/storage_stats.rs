@@ -108,3 +108,47 @@ async fn storage_stats_is_empty_when_clean() {
     // Six roles since #702 added `archived`.
     assert_eq!(body["roles"].as_array().unwrap().len(), 6);
 }
+
+#[tokio::test]
+async fn storage_stats_counts_orphan_candidates_without_deleting() {
+    let h = harness().await;
+
+    // Valid 64-char lowercase hex keys; `path_for` only needs the layout.
+    let healthy = "11".repeat(32);
+    let file_only = "22".repeat(32);
+    let row_only = "33".repeat(32);
+
+    // Healthy pair: file + row.
+    let healthy_path = h.state.store.path_for(&healthy);
+    std::fs::create_dir_all(healthy_path.parent().unwrap()).unwrap();
+    std::fs::write(&healthy_path, b"ok").unwrap();
+
+    // File with no row.
+    let file_only_path = h.state.store.path_for(&file_only);
+    std::fs::create_dir_all(file_only_path.parent().unwrap()).unwrap();
+    std::fs::write(&file_only_path, b"orphan").unwrap();
+
+    for (hash, size) in [(&healthy, 2_i64), (&row_only, 5_i64)] {
+        sqlx::query("INSERT INTO store_objects (hash, size, created_at) VALUES (?, ?, 0)")
+            .bind(hash)
+            .bind(size)
+            .execute(&h.state.pool)
+            .await
+            .unwrap();
+    }
+
+    let (status, body) = get_json_authed(&h.app, "/storage/stats").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["orphanCandidates"]["filesWithoutRow"], 1);
+    assert_eq!(body["orphanCandidates"]["rowsWithoutFile"], 1);
+    assert_eq!(body["orphanCandidates"]["total"], 2);
+
+    // Read-only: nothing was deleted or rewritten.
+    assert!(file_only_path.exists(), "census must never delete files");
+    assert!(healthy_path.exists());
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM store_objects")
+        .fetch_one(&h.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 2, "census must never delete rows");
+}

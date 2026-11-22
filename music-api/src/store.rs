@@ -235,9 +235,9 @@ pub async fn put(
     if let Ok(meta) = tokio::fs::metadata(&dest).await {
         let mut stream = body.into_data_stream();
         while stream.next().await.is_some() {}
-        // The file is the source of truth for `GET`; ensure a row exists so
-        // orphan-prune cannot later reclaim a live object (e.g. after an earlier
-        // insert failed). An existing row is left untouched.
+        // The file is the source of truth for `GET`; ensure a row exists so a
+        // live object is never reported as a file without a row (e.g. after an
+        // earlier insert failed). An existing row is left untouched.
         if let Err(e) = sqlx::query(
             "INSERT INTO store_objects (hash, size, content_type, original_path, isrc, name, group_key, stem_type, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -326,10 +326,9 @@ pub async fn put(
     }
 
     // Record the row *before* publishing the file: "file without a row" is the
-    // one state orphan-prune reclaims, so the row must never be the step that
-    // fails silently. If it does, the PUT fails and nothing is published
-    // (concurrent scans are additionally covered by the grace period in
-    // `prune_orphans`).
+    // one half-state the read-only census in `orphan_candidates` reports, so the
+    // row must never be the step that fails silently. If it does, the PUT fails
+    // and nothing is published.
     if let Err(e) = sqlx::query(
         "INSERT INTO store_objects (hash, size, content_type, original_path, isrc, name, group_key, stem_type, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -696,18 +695,7 @@ pub async fn stream_object(
     resp
 }
 
-// ── Prune: delete / bulk prune / orphan reconcile / tmp sweep / stats ────────
-
-/// Default age after which entries in [`Store::tmp_dir`] are treated as
-/// abandoned uploads by [`sweep_tmp`].
-pub const DEFAULT_TMP_MAX_AGE_SECS: u64 = 60 * 60;
-
-/// Default grace period during which reconcile ([`prune_orphans`]) leaves
-/// file-/row-side-only objects alone. A `PUT` publishes its row and file a
-/// moment apart, so a just-started upload can legitimately look like a
-/// half-object to a concurrent scan; within the grace window nothing is
-/// reclaimed.
-pub const DEFAULT_ORPHAN_MIN_AGE_SECS: u64 = 60 * 60;
+// ── Prune: delete / bulk prune / orphan census / stats ──────────────────────
 
 /// Size of an object in bytes, preferring the file on disk and falling back to
 /// the recorded row. `None` when neither file nor row exists.
@@ -730,7 +718,7 @@ pub async fn object_size(pool: &Pool<Sqlite>, store: &Store, hash: &str) -> Opti
 /// existed. A file-removal error other than "not found" propagates unchanged and
 /// leaves the row in place. The reverse is best-effort: if the `DELETE` fails
 /// after the file is already gone, the row is left dangling (file removed, row
-/// present) — a non-destructive half-state that [`prune_orphans`] reconciles.
+/// present) — a non-destructive half-state that [`orphan_candidates`] reports.
 pub async fn delete_object(
     pool: &Pool<Sqlite>,
     store: &Store,
@@ -821,62 +809,47 @@ pub async fn prune(
     .into_response()
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PruneOrphansRequest {
-    #[serde(default)]
-    pub dry_run: bool,
-    /// Opt-in: also sweep abandoned uploads under `tmp/` (never on `dryRun`).
-    #[serde(default)]
-    pub include_tmp: bool,
-    /// Grace period: only reconcile objects older than this many seconds.
-    /// Defaults to [`DEFAULT_ORPHAN_MIN_AGE_SECS`]; `0` disables the grace
-    /// window.
-    #[serde(default = "default_orphan_min_age_secs")]
-    pub min_age_secs: u64,
-}
-
-fn default_orphan_min_age_secs() -> u64 {
-    DEFAULT_ORPHAN_MIN_AGE_SECS
-}
-
 fn hex2(s: &str) -> bool {
     s.len() == 2
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// `POST /objects/prune/orphans` — reconcile the file tree against the rows.
+/// Read-only census of the object store (#703): object files with no
+/// `store_objects` row, and rows with no file on disk.
 ///
-/// Removes (a) object files with no `store_objects` row and (b) `store_objects`
-/// rows with no file. `tmp/` is excluded unless `includeTmp` is set.
-pub async fn prune_orphans(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<PruneOrphansRequest>,
-) -> Response {
-    let dry = req.dry_run;
-    let grace = std::time::Duration::from_secs(req.min_age_secs);
-    let now_secs = crate::db::now();
-    let mut files_removed: u64 = 0;
-    let mut rows_removed: u64 = 0;
-    let mut freed_bytes: u64 = 0;
+/// Counts only — nothing here ever deletes. Deletion happens exclusively via
+/// `POST /objects/prune` with an explicit, consumer-supplied hash list.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrphanCandidates {
+    /// Object files under the store root with no `store_objects` row.
+    pub files_without_row: i64,
+    /// `store_objects` rows whose file is missing on disk.
+    pub rows_without_file: i64,
+    /// Sum of both: everything an explicit reconcile would have to look at.
+    pub total: i64,
+}
 
-    // Load the full row set up front and fail closed: a DB hiccup must never be
-    // read as "no row" for a live file. If the rows cannot be read, abort the
-    // run before deleting anything.
-    let rows: Vec<(String, i64, i64)> =
-        match sqlx::query_as("SELECT hash, size, created_at FROM store_objects")
-            .fetch_all(&state.pool)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => return internal(format!("listing objects for orphan scan: {e}")),
-        };
-    let known: std::collections::HashSet<String> =
-        rows.iter().map(|(h, _, _)| h.clone()).collect();
+/// Count orphan candidates without touching anything. Backs
+/// `GET /storage/stats` (`orphanCandidates`).
+///
+/// An unreadable store root reports zero file-side candidates instead of failing
+/// the stats endpoint; the row side is still counted. Fail-closed on stat
+/// errors: anything but "not found" counts as present, so a permission problem
+/// never inflates the orphan count.
+pub async fn orphan_candidates(
+    pool: &Pool<Sqlite>,
+    store: &Store,
+) -> anyhow::Result<OrphanCandidates> {
+    let hashes: Vec<String> = sqlx::query_scalar("SELECT hash FROM store_objects")
+        .fetch_all(pool)
+        .await?;
+    let known: std::collections::HashSet<&str> = hashes.iter().map(|h| h.as_str()).collect();
 
     // (a) Object files without a row: walk <root>/<aa>/<bb>/<hash>.
-    if let Ok(mut aa_dir) = tokio::fs::read_dir(&state.store.root).await {
+    let mut files_without_row: i64 = 0;
+    if let Ok(mut aa_dir) = tokio::fs::read_dir(&store.root).await {
         while let Ok(Some(aa)) = aa_dir.next_entry().await {
             let aa_path = aa.path();
             if !aa_path.is_dir() {
@@ -906,32 +879,8 @@ pub async fn prune_orphans(
                         Ok(n) if valid_hash(&n) => n,
                         _ => continue,
                     };
-                    if known.contains(hash.as_str()) {
-                        continue;
-                    }
-                    // Grace period: an in-flight `PUT` may not have published
-                    // its row+file pair yet, so leave young files alone. An
-                    // unreadable mtime counts as too young (fail-closed).
-                    let meta = match entry.metadata().await {
-                        Ok(m) => m,
-                        Err(_) => continue,
-                    };
-                    let too_young = meta
-                        .modified()
-                        .ok()
-                        .and_then(|m| std::time::SystemTime::now().duration_since(m).ok())
-                        .map(|age| age < grace)
-                        .unwrap_or(true);
-                    if too_young {
-                        continue;
-                    }
-                    let size = meta.len();
-                    if dry {
-                        files_removed += 1;
-                        freed_bytes += size;
-                    } else if tokio::fs::remove_file(entry.path()).await.is_ok() {
-                        files_removed += 1;
-                        freed_bytes += size;
+                    if !known.contains(hash.as_str()) {
+                        files_without_row += 1;
                     }
                 }
             }
@@ -939,94 +888,22 @@ pub async fn prune_orphans(
     }
 
     // (b) Rows without a file.
-    for (hash, size, created_at) in rows {
-        let present = match tokio::fs::metadata(state.store.path_for(&hash)).await {
-            Ok(_) => true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            // Any other stat error (e.g. permissions) is treated as present so
-            // a valid object is never dropped by mistake.
-            Err(_) => true,
-        };
-        if present {
-            continue;
-        }
-        // Same grace period on the row side: `PUT` writes its row just before
-        // the file lands, so a row this young is not an orphan yet.
-        if now_secs.saturating_sub(created_at) < req.min_age_secs as i64 {
-            continue;
-        }
-        if dry {
-            rows_removed += 1;
-            freed_bytes += size.max(0) as u64;
-        } else {
-            let res = sqlx::query("DELETE FROM store_objects WHERE hash = ?")
-                .bind(&hash)
-                .execute(&state.pool)
-                .await;
-            if res.map(|r| r.rows_affected() > 0).unwrap_or(false) {
-                rows_removed += 1;
-                freed_bytes += size.max(0) as u64;
-            }
+    let mut rows_without_file: i64 = 0;
+    for hash in &hashes {
+        match tokio::fs::metadata(store.path_for(hash)).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => rows_without_file += 1,
+            // Any other stat error counts as present: a live object must never
+            // be reported as an orphan.
+            Err(_) => {}
         }
     }
 
-    // Opt-in, non-dry sweep of abandoned uploads under tmp/.
-    if req.include_tmp && !dry {
-        if let Ok((files, bytes)) = sweep_tmp(
-            &state.store,
-            std::time::Duration::from_secs(DEFAULT_TMP_MAX_AGE_SECS),
-        )
-        .await
-        {
-            files_removed += files;
-            freed_bytes += bytes;
-        }
-    }
-
-    Json(serde_json::json!({
-        "filesRemoved": files_removed,
-        "rowsRemoved": rows_removed,
-        "freedBytes": freed_bytes,
-        "dryRun": dry,
-    }))
-    .into_response()
-}
-
-/// Delete entries directly under `store.tmp_dir()` older than `max_age`.
-///
-/// Bounded (only the flat tmp directory is scanned) and never auto-triggered on
-/// the request path unless the caller opts in. Returns `(files_removed, bytes)`.
-pub async fn sweep_tmp(
-    store: &Store,
-    max_age: std::time::Duration,
-) -> anyhow::Result<(u64, u64)> {
-    let mut dir = match tokio::fs::read_dir(store.tmp_dir()).await {
-        Ok(d) => d,
-        Err(_) => return Ok((0, 0)),
-    };
-    let now = std::time::SystemTime::now();
-    let mut files: u64 = 0;
-    let mut bytes: u64 = 0;
-    while let Ok(Some(entry)) = dir.next_entry().await {
-        let meta = match entry.metadata().await {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if !meta.is_file() {
-            continue;
-        }
-        let old_enough = meta
-            .modified()
-            .ok()
-            .and_then(|m| now.duration_since(m).ok())
-            .map(|age| age >= max_age)
-            .unwrap_or(false);
-        if old_enough && tokio::fs::remove_file(entry.path()).await.is_ok() {
-            files += 1;
-            bytes += meta.len();
-        }
-    }
-    Ok((files, bytes))
+    Ok(OrphanCandidates {
+        files_without_row,
+        rows_without_file,
+        total: files_without_row + rows_without_file,
+    })
 }
 
 /// `GET /objects/stats` — object count and total stored bytes.

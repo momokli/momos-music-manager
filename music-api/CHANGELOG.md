@@ -8,6 +8,13 @@ Versioning: per-component tag line `api-v<x.y.z>` (see
 
 ## [Unreleased]
 
+### Added
+
+- **`orphanCandidates` in `GET /storage/stats`** (#703) — read-only census of
+  object-store drift: `filesWithoutRow` (object files with no `store_objects`
+  row), `rowsWithoutFile` (rows whose file is missing) and their `total`. It
+  only counts; deletion stays with the explicit `POST /objects/prune` hash list.
+
 ### Changed
 
 - **Legacy archive relocation — `music-api archive-legacy <--dry-run|--apply>`** (#702)
@@ -27,6 +34,15 @@ Versioning: per-component tag line `api-v<x.y.z>` (see
   `--apply` is a no-op; an occupied target is skipped (no global abort — only a
   real I/O failure aborts, with exit code 2). `/storage/stats` reports the `archived`
   role separately from `stem`.
+
+### Removed
+
+- **`prune_orphans` / `POST /objects/prune/orphans` / tmp sweep** (#703) — the
+  automatic reconcile handler, `PruneOrphansRequest`, the `sweep_tmp` wiring and
+  their tests are gone; the route now returns `404`. Operator decision
+  (2026-11-21): nothing deletes on its own, only on an explicit API-consumer
+  request. `POST /objects/prune` is unchanged and is now documented in the README
+  as the consumer-driven hash-list API it always was.
 
 ## [0.8.0] - 2026-11-22
 

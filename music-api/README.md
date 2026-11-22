@@ -173,6 +173,19 @@ ISRC answers `200` with `count: 0`.
 and (since #359) `X-Group-Key` / `X-Stem-Type` for stem grouping. Re-uploading an
 existing object never wipes these: group/stem columns are merged with `COALESCE`.
 
+### Object store deletion policy
+
+Deletion is **consumer-driven and explicit**: the only way to remove objects is
+`POST /objects/prune` with `{"hashes": ["<sha256>", …]}` (plus `dryRun` to get
+the `deleted`/`missing`/`freedBytes` report without touching anything) or the
+single-key `DELETE /objects/{sha256}`. There is no automatic or scheduled
+reconcile — nothing deletes files that were not named in a request (#703).
+Storage drift is only *reported*: `GET /storage/stats` carries
+`orphanCandidates` with `filesWithoutRow` (object files with no
+`store_objects` row), `rowsWithoutFile` (rows whose file is missing) and
+`total`; a consumer that wants those gone passes their hashes to
+`POST /objects/prune` itself.
+
 ### Queue control (transparent, hub-facing)
 
 | Method | Path                      | Use                                                        |
