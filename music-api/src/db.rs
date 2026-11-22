@@ -1147,7 +1147,8 @@ pub async fn mark_downloading(
 ) -> anyhow::Result<()> {
     sqlx::query(
         "UPDATE tracks SET download_ref = ?, error = NULL,
-                lease_expires_at = ?, terminal_state = NULL, updated_at = ?
+                lease_expires_at = ?, next_attempt_at = NULL,
+                terminal_state = NULL, updated_at = ?
           WHERE isrc = ?",
     )
     .bind(download_ref)

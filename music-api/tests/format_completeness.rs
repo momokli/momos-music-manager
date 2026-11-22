@@ -193,6 +193,48 @@ async fn no_rearm_after_terminal_failure() {
     assert_eq!(t.error.as_deref(), Some("track NOARM is gone (403)"));
 }
 
+/// Regression (Verifier F1): a download resumed after `schedule_retry` must be
+/// `downloading` again. `schedule_retry` sets `next_attempt_at`; `mark_downloading`
+/// has to clear it, otherwise `recompute_state` keeps the row `pending` (inflight
+/// cap / lease reaper / download sync all key off `state='downloading'`).
+#[tokio::test]
+async fn retried_download_is_downloading() {
+    let h = harness().await;
+    let _ = create_order_typed(&h.app, &["RETRYDL"], "library", "flac").await;
+
+    // A transient failure schedules a retry → `next_attempt_at` is set.
+    let policy = db::RetryPolicy {
+        max_attempts: 3,
+        base_secs: 60,
+        max_secs: 1800,
+    };
+    let retryable = db::schedule_retry(&h.state.pool, "RETRYDL", "boom", &policy, db::now())
+        .await
+        .unwrap();
+    assert!(retryable, "first transient failure is retryable");
+    let t = db::get_track(&h.state.pool, "RETRYDL")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(t.next_attempt_at.is_some(), "retry is scheduled");
+    assert_eq!(t.state, "pending");
+
+    // The retry is picked up: it must become `downloading`, not stay `pending`.
+    db::mark_downloading(&h.state.pool, "RETRYDL", "uuid-retry", db::now() + 60)
+        .await
+        .unwrap();
+    let t = db::get_track(&h.state.pool, "RETRYDL")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.state, "downloading", "resumed download is downloading");
+    assert_eq!(
+        t.next_attempt_at, None,
+        "mark_downloading clears the scheduled retry"
+    );
+    assert!(t.lease_expires_at.is_some(), "lease is held");
+}
+
 /// Coverage helper sanity: a lossless/higher format covers a lower one, never
 /// the other way round.
 #[test]
