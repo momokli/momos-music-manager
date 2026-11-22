@@ -105,5 +105,6 @@ async fn storage_stats_is_empty_when_clean() {
     assert_eq!(body["incompleteTracks"], 0);
     assert_eq!(body["unmanagedFiles"], 0);
     assert_eq!(body["servableButNotReady"], 0);
-    assert_eq!(body["roles"].as_array().unwrap().len(), 5);
+    // Six roles since #702 added `archived`.
+    assert_eq!(body["roles"].as_array().unwrap().len(), 6);
 }

@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
 use sqlx::{Pool, Sqlite};
 
 use crate::config::Config;
@@ -22,13 +23,17 @@ pub const ROLE_320: &str = "320";
 pub const ROLE_FLAC: &str = "flac";
 pub const ROLE_STEM: &str = "stem";
 pub const ROLE_STEM_PART: &str = "stem_part";
+/// A file relocated under `_archive/` by the `archive-legacy` CLI (#702).
+/// `path` points at the new location; the bytes are never deleted.
+pub const ROLE_ARCHIVED: &str = "archived";
 
-pub const ROLES: [&str; 5] = [
+pub const ROLES: [&str; 6] = [
     ROLE_128,
     ROLE_320,
     ROLE_FLAC,
     ROLE_STEM,
     ROLE_STEM_PART,
+    ROLE_ARCHIVED,
 ];
 
 /// Stem part suffixes. Mirrors `bin/store_import.rs` (`_vocals`, `_bass`, …).
@@ -798,6 +803,669 @@ fn collect_objects_unmanaged(
             size: entry.metadata().map(|m| m.len() as i64).unwrap_or(0),
         });
     }
+}
+
+// ── archive-legacy (#702) ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkipEntry {
+    pub path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassReport {
+    pub count: usize,
+    pub bytes: u64,
+    pub moved: usize,
+    pub remaining: usize,
+    pub not_identical: Vec<String>,
+    pub skipped: Vec<SkipEntry>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyClasses {
+    pub flac_copies: ClassReport,
+    pub duplicate_bundles: ClassReport,
+    pub relocated_bundles: ClassReport,
+    pub mp3_copies: ClassReport,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveLegacyReport {
+    /// `dry-run` or `apply`.
+    pub mode: String,
+    pub aborted: bool,
+    pub aborted_reason: Option<String>,
+    pub classes: LegacyClasses,
+    pub total_moved: usize,
+    pub total_bytes_moved: u64,
+    /// Union of every class's skips (path + reason).
+    pub skipped: Vec<SkipEntry>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyClass {
+    FlacCopy,
+    DuplicateBundle,
+    RelocatedBundle,
+    Mp3Copy,
+}
+
+impl LegacyClass {
+    fn label(self) -> &'static str {
+        match self {
+            LegacyClass::FlacCopy => "flac-copy",
+            LegacyClass::DuplicateBundle => "duplicate-bundle",
+            LegacyClass::RelocatedBundle => "relocated-bundle",
+            LegacyClass::Mp3Copy => "mp3-copy",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MovePlan {
+    class: LegacyClass,
+    isrc: String,
+    src: PathBuf,
+    dst: PathBuf,
+    size: u64,
+    /// `track_files.stem_part` discriminator (the unique key is
+    /// `(isrc, role, COALESCE(stem_part,''))`, so each archived file needs one).
+    stem_part: String,
+    /// The existing catalogue row (`role`, `stem_part`) this move rewrites, if
+    /// the candidate came from `track_files`. `None` → insert a new row.
+    origin_row: Option<(String, Option<String>)>,
+}
+
+fn hex_str(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+fn sha256_file(p: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(p).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(hex_str(&hasher.finalize()))
+}
+
+fn basename(p: &Path) -> String {
+    p.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string()
+}
+
+/// PCM-MD5 memo keyed by `(absolute path, size)` — a file is decoded at most once.
+struct Md5Cache<'a> {
+    ffmpeg: &'a str,
+    map: HashMap<(String, u64), Option<String>>,
+}
+
+impl Md5Cache<'_> {
+    async fn get(&mut self, p: &Path) -> Option<String> {
+        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let key = (p.to_string_lossy().to_string(), size);
+        if let Some(v) = self.map.get(&key) {
+            return v.clone();
+        }
+        let v = crate::transcode::pcm_md5(self.ffmpeg, p).await;
+        self.map.insert(key, v.clone());
+        v
+    }
+}
+
+/// Reserve a unique `(isrc, 'archived', stem_part)` discriminator.
+fn unique_disc(
+    used: &mut HashMap<(String, String), usize>,
+    isrc: &str,
+    base: &str,
+) -> String {
+    let key = (isrc.to_string(), base.to_string());
+    let n = used.entry(key).or_insert(0);
+    *n += 1;
+    if *n == 1 {
+        base.to_string()
+    } else {
+        format!("{base}-{n}")
+    }
+}
+
+/// Run `archive-legacy`.
+///
+/// Relocates legacy duplicates under `_archive/` (and orphan bundles into their
+/// track folder) — **never deletes, never copies**: only `std::fs::rename`
+/// inside the data dataset, and only for bytes proven identical by PCM MD5.
+/// `apply == false` builds the same plan and reports it without touching a file
+/// or writing a row.
+pub async fn archive_legacy(
+    pool: &Pool<Sqlite>,
+    config: &Config,
+    store: &Store,
+    apply: bool,
+) -> anyhow::Result<ArchiveLegacyReport> {
+    let data_dir = config.data_dir.clone();
+    let archive_root = data_dir.join("_archive");
+    let flac_copies_dir = archive_root.join("flac-copies");
+    let dup_dir = archive_root.join("duplicate-bundles");
+    let mp3_copies_dir = archive_root.join("mp3-copies");
+    let tracks_dir = data_dir.join("tracks");
+
+    let mut report = ArchiveLegacyReport {
+        mode: if apply { "apply" } else { "dry-run" }.to_string(),
+        ..Default::default()
+    };
+    let mut cache = Md5Cache {
+        ffmpeg: &config.ffmpeg,
+        map: HashMap::new(),
+    };
+    let mut used_disc: HashMap<(String, String), usize> = HashMap::new();
+    let mut moves: Vec<MovePlan> = Vec::new();
+
+    // ── Load the catalogue ─────────────────────────────────────────────────
+    let tracks: Vec<(String, Option<String>, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT isrc, path_flac, path_320, path_128 FROM tracks")
+            .fetch_all(pool)
+            .await?;
+    let mut delivery_flac: HashMap<String, PathBuf> = HashMap::new();
+    let mut ref128: HashMap<String, PathBuf> = HashMap::new();
+    for (isrc, flac, _p320, p128) in &tracks {
+        if let Some(p) = flac.as_deref().filter(|s| !s.trim().is_empty()) {
+            delivery_flac.insert(isrc.clone(), resolve_abs(p, &data_dir));
+        }
+        if let Some(p) = p128.as_deref().filter(|s| !s.trim().is_empty()) {
+            ref128.insert(isrc.clone(), resolve_abs(p, &data_dir));
+        }
+    }
+
+    let tf: Vec<(String, String, String, Option<String>)> =
+        sqlx::query_as("SELECT isrc, role, path, stem_part FROM track_files")
+            .fetch_all(pool)
+            .await?;
+
+    // Legit (never-touched) MP3 and FLAC delivery paths per ISRC.
+    let mut legit_mp3: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (isrc, _role, path, _sp) in &tf {
+        if let Some(p) = ref128.get(isrc) {
+            legit_mp3.insert(p.to_string_lossy().to_string());
+        }
+        legit_mp3.insert(resolve_abs(path, &data_dir).to_string_lossy().to_string());
+    }
+    for (_isrc, _flac, p320, p128) in &tracks {
+        for p in [p320, p128] {
+            if let Some(p) = p.as_deref().filter(|s| !s.trim().is_empty()) {
+                legit_mp3.insert(resolve_abs(p, &data_dir).to_string_lossy().to_string());
+            }
+        }
+    }
+
+    // Named stem bundles per ISRC (S1-attributed) — the "named twin".
+    let mut named_stem: HashMap<String, PathBuf> = HashMap::new();
+    let mut tf128: HashMap<String, PathBuf> = HashMap::new();
+    for (isrc, role, path, _sp) in &tf {
+        if role == ROLE_STEM {
+            named_stem.entry(isrc.clone()).or_insert_with(|| resolve_abs(path, &data_dir));
+        } else if role == ROLE_128 {
+            tf128.entry(isrc.clone()).or_insert_with(|| resolve_abs(path, &data_dir));
+        }
+    }
+
+    let objects: Vec<ObjectRow> = sqlx::query_as(
+        "SELECT hash, size, content_type, original_path, isrc, name, stem_type
+           FROM store_objects",
+    )
+    .fetch_all(pool)
+    .await?;
+    let unmanaged: Vec<(String, String, i64)> =
+        sqlx::query_as("SELECT path, reason, size FROM track_files_unmanaged")
+            .fetch_all(pool)
+            .await?;
+
+    // ── Class A: FLAC copies identical to the delivery FLAC ────────────────
+    let mut seen_a: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut cand_a: Vec<(PathBuf, String)> = Vec::new();
+    for (isrc, role, path, _sp) in &tf {
+        if role != ROLE_FLAC {
+            continue;
+        }
+        let abs = resolve_abs(path, &data_dir);
+        if delivery_flac.get(isrc).map(|d| d == &abs).unwrap_or(false) {
+            continue;
+        }
+        if seen_a.insert(abs.to_string_lossy().to_string()) {
+            cand_a.push((abs, isrc.clone()));
+        }
+    }
+    for o in &objects {
+        if o.ext().as_deref() != Some("flac") {
+            continue;
+        }
+        let abs = store.path_for(&o.hash);
+        let isrc = o
+            .isrc
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| crate::tags::read_isrc(&abs));
+        let Some(isrc) = isrc else { continue };
+        if delivery_flac.get(&isrc).map(|d| d == &abs).unwrap_or(false) {
+            continue;
+        }
+        if seen_a.insert(abs.to_string_lossy().to_string()) {
+            cand_a.push((abs, isrc));
+        }
+    }
+    for (abs, isrc) in cand_a {
+        if !abs.is_file() {
+            report.classes.flac_copies.skipped.push(SkipEntry {
+                path: display_path(&abs, &data_dir),
+                reason: "source missing".to_string(),
+            });
+            continue;
+        }
+        let size = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
+        report.classes.flac_copies.count += 1;
+        report.classes.flac_copies.bytes += size;
+        let rel = display_path(&abs, &data_dir);
+        let Some(delivery) = delivery_flac.get(&isrc) else {
+            report.classes.flac_copies.skipped.push(SkipEntry {
+                path: rel,
+                reason: "no delivery flac for ISRC".to_string(),
+            });
+            continue;
+        };
+        if !delivery.is_file() {
+            report.classes.flac_copies.skipped.push(SkipEntry {
+                path: rel,
+                reason: "delivery flac missing".to_string(),
+            });
+            continue;
+        }
+        let cand_md5 = cache.get(&abs).await;
+        let del_md5 = cache.get(delivery).await;
+        match (cand_md5, del_md5) {
+            (Some(a), Some(d)) if a == d => {
+                let dst = flac_copies_dir.join(format!("{isrc}.flac"));
+                let base = format!("flac-copy:{}", basename(&abs));
+                let stem_part = unique_disc(&mut used_disc, &isrc, &base);
+                moves.push(MovePlan {
+                    class: LegacyClass::FlacCopy,
+                    isrc,
+                    src: abs,
+                    dst,
+                    size,
+                    stem_part,
+                    origin_row: None,
+                });
+            }
+            (None, _) => report.classes.flac_copies.skipped.push(SkipEntry {
+                path: rel,
+                reason: "candidate unreadable (pcm md5)".to_string(),
+            }),
+            (_, None) => report.classes.flac_copies.skipped.push(SkipEntry {
+                path: rel,
+                reason: "delivery unreadable (pcm md5)".to_string(),
+            }),
+            _ => report.classes.flac_copies.not_identical.push(rel),
+        }
+    }
+
+    // ── Classes B & C: anonymous bundles ──────────────────────────────────
+    // Object hash by absolute path (for `duplicate-bundles/<hash>`).
+    let mut obj_hash: HashMap<String, String> = HashMap::new();
+    let mut obj_name: HashMap<String, String> = HashMap::new();
+    let mut cand_bundle: Vec<(PathBuf, String)> = Vec::new();
+    for o in &objects {
+        let abs = store.path_for(&o.hash);
+        obj_hash.insert(abs.to_string_lossy().to_string(), o.hash.clone());
+        obj_name.insert(abs.to_string_lossy().to_string(), o.file_name());
+        if !o.is_bundle() {
+            continue;
+        }
+        let isrc = o
+            .isrc
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| crate::tags::read_isrc(&abs));
+        let Some(isrc) = isrc else { continue };
+        cand_bundle.push((abs, isrc));
+    }
+    for (path, _reason, _size) in &unmanaged {
+        let abs = resolve_abs(path, &data_dir);
+        if !matches!(ext_of(path).as_deref(), Some("m4a") | Some("alac")) {
+            continue;
+        }
+        let isrc = crate::tags::read_isrc(&abs);
+        let Some(isrc) = isrc else {
+            report.classes.relocated_bundles.skipped.push(SkipEntry {
+                path: display_path(&abs, &data_dir),
+                reason: "no_isrc".to_string(),
+            });
+            report.classes.relocated_bundles.count += 1;
+            continue;
+        };
+        cand_bundle.push((abs, isrc));
+    }
+
+    let mut seen_b: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (abs, isrc) in cand_bundle {
+        let canonical = tracks_dir.join(&isrc).join(format!("{isrc}.stem.m4a"));
+        if abs == canonical || !seen_b.insert(abs.to_string_lossy().to_string()) {
+            continue;
+        }
+        if !abs.is_file() {
+            report.classes.relocated_bundles.skipped.push(SkipEntry {
+                path: display_path(&abs, &data_dir),
+                reason: "source missing".to_string(),
+            });
+            continue;
+        }
+        let size = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
+        let rel = display_path(&abs, &data_dir);
+        // A named twin: an S1-attributed stem row, else a file already at the
+        // canonical path.
+        let twin = named_stem
+            .get(&isrc)
+            .cloned()
+            .or_else(|| canonical.is_file().then(|| canonical.clone()));
+        match twin {
+            Some(twin) if twin != abs => {
+                report.classes.duplicate_bundles.count += 1;
+                report.classes.duplicate_bundles.bytes += size;
+                let cand_md5 = cache.get(&abs).await;
+                let twin_md5 = cache.get(&twin).await;
+                match (cand_md5, twin_md5) {
+                    (Some(a), Some(t)) if a == t => {
+                        let hash = obj_hash
+                            .get(&abs.to_string_lossy().to_string())
+                            .cloned()
+                            .or_else(|| sha256_file(&abs))
+                            .unwrap_or_else(|| basename(&abs));
+                        let dst = dup_dir.join(&hash);
+                        let base = format!("duplicate-bundle:{hash}");
+                        let stem_part = unique_disc(&mut used_disc, &isrc, &base);
+                        moves.push(MovePlan {
+                            class: LegacyClass::DuplicateBundle,
+                            isrc,
+                            src: abs,
+                            dst,
+                            size,
+                            stem_part,
+                            origin_row: None,
+                        });
+                    }
+                    (None, _) => report.classes.duplicate_bundles.skipped.push(SkipEntry {
+                        path: rel,
+                        reason: "candidate unreadable (pcm md5)".to_string(),
+                    }),
+                    (_, None) => report.classes.duplicate_bundles.skipped.push(SkipEntry {
+                        path: rel,
+                        reason: "twin unreadable (pcm md5)".to_string(),
+                    }),
+                    _ => report.classes.duplicate_bundles.not_identical.push(rel),
+                }
+            }
+            _ => {
+                // Class C: no twin → relocate into the track folder.
+                report.classes.relocated_bundles.count += 1;
+                report.classes.relocated_bundles.bytes += size;
+                if canonical.exists() {
+                    report.classes.relocated_bundles.skipped.push(SkipEntry {
+                        path: rel,
+                        reason: "target occupied".to_string(),
+                    });
+                    continue;
+                }
+                let base = format!("relocated-bundle:{isrc}");
+                let stem_part = unique_disc(&mut used_disc, &isrc, &base);
+                moves.push(MovePlan {
+                    class: LegacyClass::RelocatedBundle,
+                    isrc,
+                    src: abs,
+                    dst: canonical,
+                    size,
+                    stem_part,
+                    origin_row: None,
+                });
+            }
+        }
+    }
+
+    // ── Class D: MP3 copies identical to the 128 reference ────────────────
+    let mut cand_mp3: Vec<(PathBuf, String)> = Vec::new();
+    let mut seen_d: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for o in &objects {
+        if o.ext().as_deref() != Some("mp3") {
+            continue;
+        }
+        let abs = store.path_for(&o.hash);
+        if legit_mp3.contains(&abs.to_string_lossy().to_string()) {
+            continue;
+        }
+        let isrc = o
+            .isrc
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| crate::tags::read_isrc(&abs));
+        let Some(isrc) = isrc else { continue };
+        if seen_d.insert(abs.to_string_lossy().to_string()) {
+            cand_mp3.push((abs, isrc));
+        }
+    }
+    for (path, _reason, _size) in &unmanaged {
+        if ext_of(path).as_deref() != Some("mp3") {
+            continue;
+        }
+        let abs = resolve_abs(path, &data_dir);
+        if legit_mp3.contains(&abs.to_string_lossy().to_string()) {
+            continue;
+        }
+        let Some(isrc) = crate::tags::read_isrc(&abs) else { continue };
+        if seen_d.insert(abs.to_string_lossy().to_string()) {
+            cand_mp3.push((abs, isrc));
+        }
+    }
+    for (abs, isrc) in cand_mp3 {
+        if !abs.is_file() {
+            report.classes.mp3_copies.skipped.push(SkipEntry {
+                path: display_path(&abs, &data_dir),
+                reason: "source missing".to_string(),
+            });
+            continue;
+        }
+        let size = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
+        report.classes.mp3_copies.count += 1;
+        report.classes.mp3_copies.bytes += size;
+        let rel = display_path(&abs, &data_dir);
+        let reference = ref128.get(&isrc).cloned().or_else(|| tf128.get(&isrc).cloned());
+        let Some(reference) = reference else {
+            report.classes.mp3_copies.skipped.push(SkipEntry {
+                path: rel,
+                reason: "no 128 reference".to_string(),
+            });
+            continue;
+        };
+        if !reference.is_file() {
+            report.classes.mp3_copies.skipped.push(SkipEntry {
+                path: rel,
+                reason: "128 reference missing".to_string(),
+            });
+            continue;
+        }
+        let cand_md5 = cache.get(&abs).await;
+        let ref_md5 = cache.get(&reference).await;
+        match (cand_md5, ref_md5) {
+            (Some(a), Some(r)) if a == r => {
+                let name = obj_name
+                    .get(&abs.to_string_lossy().to_string())
+                    .cloned()
+                    .unwrap_or_else(|| basename(&abs));
+                let name = if name.to_ascii_lowercase().ends_with(".mp3") {
+                    name
+                } else {
+                    format!("{name}.mp3")
+                };
+                let dst = mp3_copies_dir.join(&name);
+                let base = format!("mp3-copy:{name}");
+                let stem_part = unique_disc(&mut used_disc, &isrc, &base);
+                moves.push(MovePlan {
+                    class: LegacyClass::Mp3Copy,
+                    isrc,
+                    src: abs,
+                    dst,
+                    size,
+                    stem_part,
+                    origin_row: None,
+                });
+            }
+            (None, _) => report.classes.mp3_copies.skipped.push(SkipEntry {
+                path: rel,
+                reason: "candidate unreadable (pcm md5)".to_string(),
+            }),
+            (_, None) => report.classes.mp3_copies.skipped.push(SkipEntry {
+                path: rel,
+                reason: "reference unreadable (pcm md5)".to_string(),
+            }),
+            _ => report.classes.mp3_copies.not_identical.push(rel),
+        }
+    }
+
+    // ── Pre-flight: a target must be free and unique ───────────────────────
+    let mut seen_dst: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut conflict: Option<String> = None;
+    for m in &moves {
+        if m.dst.exists() {
+            conflict = Some(format!("target occupied: {}", display_path(&m.dst, &data_dir)));
+            break;
+        }
+        if !seen_dst.insert(m.dst.to_string_lossy().to_string()) {
+            conflict = Some(format!("two moves to {}", display_path(&m.dst, &data_dir)));
+            break;
+        }
+    }
+    if let Some(reason) = conflict {
+        report.aborted = true;
+        report.aborted_reason = Some(reason);
+        return Ok(report);
+    }
+
+    // Planned counts are visible in both modes; `apply` performs them below.
+    report.total_moved = moves.len();
+    report.total_bytes_moved = moves.iter().map(|m| m.size).sum();
+    for m in &moves {
+        let cr = match m.class {
+            LegacyClass::FlacCopy => &mut report.classes.flac_copies,
+            LegacyClass::DuplicateBundle => &mut report.classes.duplicate_bundles,
+            LegacyClass::RelocatedBundle => &mut report.classes.relocated_bundles,
+            LegacyClass::Mp3Copy => &mut report.classes.mp3_copies,
+        };
+        cr.moved += 1;
+    }
+
+    if apply {
+        std::fs::create_dir_all(&archive_root)?;
+        let now = now_iso();
+        let mut moved_now: usize = 0;
+        for m in &moves {
+            if let Some(parent) = m.dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if let Err(e) = std::fs::rename(&m.src, &m.dst) {
+                report.errors.push(format!(
+                    "rename {}: {e}",
+                    display_path(&m.src, &data_dir)
+                ));
+                report.aborted = true;
+                report.aborted_reason = Some(format!(
+                    "rename failed: {}",
+                    display_path(&m.src, &data_dir)
+                ));
+                break;
+            }
+            moved_now += 1;
+            let dst_rel = display_path(&m.dst, &data_dir);
+            let origin = format!("{}:{}", m.class.label(), display_path(&m.src, &data_dir));
+            if let Some((role, sp)) = &m.origin_row {
+                sqlx::query(
+                    "UPDATE track_files
+                        SET role = 'archived', path = ?, size = ?, stem_part = ?,
+                            origin = ?, original_filename = ?
+                      WHERE isrc = ? AND role = ?
+                        AND COALESCE(stem_part, '') = COALESCE(?, '')",
+                )
+                .bind(&dst_rel)
+                .bind(m.size as i64)
+                .bind(&m.stem_part)
+                .bind(&origin)
+                .bind(basename(&m.dst))
+                .bind(&m.isrc)
+                .bind(role)
+                .bind(sp)
+                .execute(pool)
+                .await?;
+            } else {
+                sqlx::query(
+                    "INSERT INTO track_files
+                        (isrc, role, path, size, sha256, stem_part, origin,
+                         original_filename, created_at)
+                     VALUES (?, 'archived', ?, ?, NULL, ?, ?, ?, ?)
+                     ON CONFLICT DO NOTHING",
+                )
+                .bind(&m.isrc)
+                .bind(&dst_rel)
+                .bind(m.size as i64)
+                .bind(&m.stem_part)
+                .bind(&origin)
+                .bind(basename(&m.dst))
+                .bind(&now)
+                .execute(pool)
+                .await?;
+            }
+        }
+        report.total_moved = moved_now;
+        report.total_bytes_moved = moves.iter().take(moved_now).map(|m| m.size).sum();
+    }
+
+    // ── Derived counters + aggregate skips ────────────────────────────────
+    let classes = &mut report.classes;
+    for cr in [
+        &mut classes.flac_copies,
+        &mut classes.duplicate_bundles,
+        &mut classes.relocated_bundles,
+        &mut classes.mp3_copies,
+    ] {
+        cr.remaining = cr
+            .count
+            .saturating_sub(cr.moved)
+            .saturating_sub(cr.not_identical.len());
+    }
+    report.skipped = [
+        &classes.flac_copies,
+        &classes.duplicate_bundles,
+        &classes.relocated_bundles,
+        &classes.mp3_copies,
+    ]
+    .iter()
+    .flat_map(|cr| cr.skipped.iter().cloned())
+    .collect();
+
+    Ok(report)
 }
 
 #[cfg(test)]
