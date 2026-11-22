@@ -12,6 +12,8 @@ use music_api::db;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const ISRC: &str = "DECLI0000007";
+
 fn hash_n(n: u32) -> String {
     format!("{:064x}", n)
 }
@@ -124,11 +126,11 @@ async fn setup(h: &Harness) -> Option<(PathBuf, PathBuf)> {
         &hash_n(0x77),
         std::fs::metadata(&candidate).unwrap().len() as i64,
         "legacy/CLI702.flac",
-        "CLI702",
+        ISRC,
         "CLI702.flac",
     )
     .await;
-    seed_track(&h.state.pool, "CLI702", &delivery.display().to_string()).await;
+    seed_track(&h.state.pool, ISRC, &delivery.display().to_string()).await;
     Some((delivery, candidate))
 }
 
@@ -150,7 +152,10 @@ async fn cli_dry_run_apply_idempotent() {
     assert_eq!(report["aborted"], false);
     let flac = &report["classes"]["flacCopies"];
     assert_eq!(flac["count"], 1, "{report}");
-    assert_eq!(flac["moved"], 1, "{report}");
+    // Dry-run reports the plan under `planned`; `moved` stays 0.
+    assert_eq!(flac["planned"], 1, "{report}");
+    assert_eq!(flac["moved"], 0, "{report}");
+    assert_eq!(report["totalMoved"], 0, "{report}");
     assert!(delivery.exists(), "delivery untouched");
     assert!(candidate.exists(), "dry-run must not move the candidate");
     assert!(
@@ -174,10 +179,23 @@ async fn cli_dry_run_apply_idempotent() {
     let total_moved = report["totalMoved"].as_u64().expect("totalMoved");
     assert_eq!(total_moved, 1, "{report}");
 
-    let archived_path = data_dir.join("_archive/flac-copies/CLI702.flac");
-    assert!(archived_path.exists(), "file relocated under _archive/");
     assert!(!candidate.exists(), "original path is empty after rename");
     assert!(delivery.exists(), "delivery FLAC must stay put");
+
+    let (role, path): (String, String) = sqlx::query_as(
+        "SELECT role, path FROM track_files WHERE isrc=? AND role='archived'",
+    )
+    .bind(ISRC)
+    .fetch_one(&h.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(role, "archived");
+    assert!(
+        path.starts_with("_archive/flac-copies/DECLI0000007-") && path.ends_with(".flac"),
+        "unexpected archived path: {path}"
+    );
+    let archived_path = data_dir.join(&path);
+    assert!(archived_path.exists(), "file relocated under _archive/");
 
     // Nothing deleted: file count under _archive == totalMoved.
     assert_eq!(
@@ -186,14 +204,12 @@ async fn cli_dry_run_apply_idempotent() {
         "archive file count must equal totalMoved"
     );
 
-    let (role, path): (String, String) = sqlx::query_as(
-        "SELECT role, path FROM track_files WHERE isrc='CLI702' AND role='archived'",
-    )
-    .fetch_one(&h.state.pool)
-    .await
-    .unwrap();
-    assert_eq!(role, "archived");
-    assert_eq!(path, "_archive/flac-copies/CLI702.flac");
+    // Blocker 3: the moved object's `store_objects` row is gone.
+    let store_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM store_objects")
+        .fetch_one(&h.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(store_rows, 0, "store_objects row removed after the move");
 
     // ---- 3. second --apply is a no-op. ----
     let (code, stdout, stderr) = run_cli(&data_dir, &store_root, "--apply");

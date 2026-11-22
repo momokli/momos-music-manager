@@ -1169,8 +1169,9 @@ fn track_stem(isrc: &str, artist: Option<&str>, title: Option<&str>) -> String {
 }
 
 /// Strip path/control characters, collapse whitespace, trim and cap length so
-/// the result is a safe ZIP entry name.
-fn sanitize_filename(raw: &str) -> String {
+/// the result is a safe ZIP entry name. Also reused by `archive-legacy` to
+/// defuse `store_objects.name` values before they reach a destination path.
+pub(crate) fn sanitize_filename(raw: &str) -> String {
     let mut cleaned = String::with_capacity(raw.len());
     for c in raw.chars() {
         if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {

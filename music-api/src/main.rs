@@ -86,6 +86,9 @@ async fn main() -> anyhow::Result<()> {
                 "warning: aborted — {}",
                 report.aborted_reason.as_deref().unwrap_or("unknown reason")
             );
+            // A partial/aborted relocation is a failure, not a success: signal
+            // it with a non-zero exit code so scripts can detect it.
+            std::process::exit(2);
         }
         return Ok(());
     }

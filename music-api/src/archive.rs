@@ -819,6 +819,9 @@ pub struct SkipEntry {
 pub struct ClassReport {
     pub count: usize,
     pub bytes: u64,
+    /// Candidates the plan would relocate — visible in both modes.
+    pub planned: usize,
+    /// Candidates actually renamed. `0` in `dry-run` (nothing is touched).
     pub moved: usize,
     pub remaining: usize,
     pub not_identical: Vec<String>,
@@ -842,6 +845,10 @@ pub struct ArchiveLegacyReport {
     pub aborted: bool,
     pub aborted_reason: Option<String>,
     pub classes: LegacyClasses,
+    /// Candidates the plan would relocate (both modes).
+    pub total_planned: usize,
+    pub total_bytes_planned: u64,
+    /// Candidates actually renamed. `0` in `dry-run`.
     pub total_moved: usize,
     pub total_bytes_moved: u64,
     /// Union of every class's skips (path + reason).
@@ -875,12 +882,21 @@ struct MovePlan {
     src: PathBuf,
     dst: PathBuf,
     size: u64,
-    /// `track_files.stem_part` discriminator (the unique key is
-    /// `(isrc, role, COALESCE(stem_part,''))`, so each archived file needs one).
-    stem_part: String,
+    /// `track_files.role` for the row this move writes: `archived` for the
+    /// `_archive/` classes, `stem` for a relocated bundle (it lives in the
+    /// active `tracks/<ISRC>/` folder, not under `_archive`).
+    role: &'static str,
+    /// `track_files.stem_part` discriminator. `Some(disc)` for archived files
+    /// (they share `(isrc, 'archived')`), `None` for a relocated bundle
+    /// (`(isrc, 'stem', '')`).
+    stem_part: Option<String>,
     /// The existing catalogue row (`role`, `stem_part`) this move rewrites, if
     /// the candidate came from `track_files`. `None` → insert a new row.
     origin_row: Option<(String, Option<String>)>,
+    /// `store_objects.hash` when the candidate came from the object store, so
+    /// `apply` can drop the now-dangling metadata row after the rename. `None`
+    /// for `track_files`/`unmanaged` candidates.
+    store_hash: Option<String>,
 }
 
 fn hex_str(bytes: &[u8]) -> String {
@@ -911,6 +927,79 @@ fn basename(p: &Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("file")
         .to_string()
+}
+
+/// Validate and normalise an ISRC coming from an **untrusted** source
+/// (`store_objects.isrc`, a file tag). Only the canonical 12-character
+/// alphanumeric form is accepted, so a hostile value like `../../escape` can
+/// never reach a destination path or a catalogue key.
+fn safe_isrc(raw: &str) -> Option<String> {
+    let n = crate::db::normalize_isrc(raw);
+    (n.len() == 12 && n.chars().all(|c| c.is_ascii_alphanumeric())).then_some(n)
+}
+
+/// Defuse an untrusted file name (`store_objects.name`): take its basename
+/// (drops every directory part, including `..`) and run it through the same
+/// sanitiser the archive ZIP uses. Never returns a path separator.
+fn safe_name(raw: &str) -> String {
+    let base = Path::new(raw)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    crate::api::sanitize_filename(base)
+}
+
+/// Lexically normalise `p` (resolve `.`/`..` without touching the filesystem)
+/// and report whether the result stays under `base`.
+fn within(base: &Path, p: &Path) -> bool {
+    let mut norm = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                if !norm.pop() {
+                    return false;
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => norm.push(other.as_os_str()),
+        }
+    }
+    norm.starts_with(base)
+}
+
+/// Reserve a unique `<stem>.<ext>` inside `dir`, appending `-2`, `-3`, … when
+/// the name is already claimed by the plan or already exists on disk. Replaces
+/// the old global abort on an intra-plan target collision.
+fn reserve_dst(
+    used: &mut std::collections::HashSet<String>,
+    dir: &Path,
+    stem: &str,
+    ext: &str,
+) -> PathBuf {
+    let mut n = 0usize;
+    loop {
+        n += 1;
+        let name = if n == 1 {
+            format!("{stem}.{ext}")
+        } else {
+            format!("{stem}-{n}.{ext}")
+        };
+        let full = dir.join(&name);
+        let key = full.to_string_lossy().to_string();
+        if !used.contains(&key) && !full.exists() {
+            used.insert(key);
+            return full;
+        }
+    }
+}
+
+fn class_report_mut(classes: &mut LegacyClasses, class: LegacyClass) -> &mut ClassReport {
+    match class {
+        LegacyClass::FlacCopy => &mut classes.flac_copies,
+        LegacyClass::DuplicateBundle => &mut classes.duplicate_bundles,
+        LegacyClass::RelocatedBundle => &mut classes.relocated_bundles,
+        LegacyClass::Mp3Copy => &mut classes.mp3_copies,
+    }
 }
 
 /// PCM-MD5 memo keyed by `(absolute path, size)` — a file is decoded at most once.
@@ -959,9 +1048,11 @@ fn unique_disc(
     }
 }
 
-/// Insert a fresh `archived` row for a move that has no catalogue origin.
+/// Insert a fresh `track_files` row for a move that has no catalogue origin.
+/// `m.role` / `m.stem_part` decide the row kind: `archived` with a disc for an
+/// `_archive/` file, `stem` with a NULL stem_part for a relocated bundle.
 /// `ON CONFLICT DO NOTHING` keeps a stray pre-existing discriminator harmless.
-async fn insert_archived_row(
+async fn insert_move_row(
     pool: &Pool<Sqlite>,
     m: &MovePlan,
     dst_rel: &str,
@@ -972,13 +1063,14 @@ async fn insert_archived_row(
         "INSERT INTO track_files
             (isrc, role, path, size, sha256, stem_part, origin,
              original_filename, created_at)
-         VALUES (?, 'archived', ?, ?, NULL, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)
          ON CONFLICT DO NOTHING",
     )
     .bind(&m.isrc)
+    .bind(m.role)
     .bind(dst_rel)
     .bind(m.size as i64)
-    .bind(&m.stem_part)
+    .bind(m.stem_part.as_deref())
     .bind(origin)
     .bind(basename(&m.dst))
     .bind(now)
@@ -1016,6 +1108,9 @@ pub async fn archive_legacy(
         map: HashMap::new(),
     };
     let mut used_disc: HashMap<(String, String), usize> = HashMap::new();
+    // Full destination paths claimed by the plan — resolves intra-plan target
+    // collisions with a `-2`, `-3`, … suffix instead of aborting the run.
+    let mut used_dst: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut moves: Vec<MovePlan> = Vec::new();
 
     // ── Load the catalogue ─────────────────────────────────────────────────
@@ -1094,7 +1189,8 @@ pub async fn archive_legacy(
     // when the candidate is catalogue-backed, so `apply` rewrites it in place
     // instead of inserting a duplicate row (which would leave the old row
     // dangling on the relocated path).
-    let mut cand_a: Vec<(PathBuf, String, Option<(String, Option<String>)>)> = Vec::new();
+    let mut cand_a: Vec<(PathBuf, String, Option<(String, Option<String>)>, Option<String>)> =
+        Vec::new();
     for (isrc, role, path, sp) in &tf {
         if role != ROLE_FLAC {
             continue;
@@ -1104,7 +1200,7 @@ pub async fn archive_legacy(
             continue;
         }
         if seen_a.insert(abs.to_string_lossy().to_string()) {
-            cand_a.push((abs, isrc.clone(), Some((role.clone(), sp.clone()))));
+            cand_a.push((abs, isrc.clone(), Some((role.clone(), sp.clone())), None));
         }
     }
     for o in &objects {
@@ -1112,20 +1208,30 @@ pub async fn archive_legacy(
             continue;
         }
         let abs = store.path_for(&o.hash);
-        let isrc = o
-            .isrc
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| crate::tags::read_isrc(&abs));
-        let Some(isrc) = isrc else { continue };
+        // The ISRC reaches a destination path and a catalogue key: only the
+        // canonical 12-character form is accepted, anything else is skipped.
+        let raw = o.isrc.clone().filter(|s| !s.trim().is_empty());
+        let isrc = raw
+            .as_deref()
+            .and_then(safe_isrc)
+            .or_else(|| crate::tags::read_isrc(&abs).and_then(|s| safe_isrc(&s)));
+        let Some(isrc) = isrc else {
+            if raw.is_some() {
+                report.classes.flac_copies.skipped.push(SkipEntry {
+                    path: display_path(&abs, &data_dir),
+                    reason: "invalid_isrc".to_string(),
+                });
+            }
+            continue;
+        };
         if delivery_flac.get(&isrc).map(|d| d == &abs).unwrap_or(false) {
             continue;
         }
         if seen_a.insert(abs.to_string_lossy().to_string()) {
-            cand_a.push((abs, isrc, None));
+            cand_a.push((abs, isrc, None, Some(o.hash.clone())));
         }
     }
-    for (abs, isrc, origin) in cand_a {
+    for (abs, isrc, origin, store_hash) in cand_a {
         if !abs.is_file() {
             report.classes.flac_copies.skipped.push(SkipEntry {
                 path: display_path(&abs, &data_dir),
@@ -1155,7 +1261,24 @@ pub async fn archive_legacy(
         let del_md5 = cache.get(delivery).await;
         match (cand_md5, del_md5) {
             (Some(a), Some(d)) if a == d => {
-                let dst = flac_copies_dir.join(format!("{isrc}.flac"));
+                // `<ISRC>-<hash8>`: the source hash keeps two PCM-identical
+                // copies of the same ISRC apart instead of aborting the run.
+                let hash8 = sha256_file(&abs)
+                    .map(|h| h[..8].to_string())
+                    .unwrap_or_else(|| "00000000".to_string());
+                let dst = reserve_dst(
+                    &mut used_dst,
+                    &flac_copies_dir,
+                    &format!("{isrc}-{hash8}"),
+                    "flac",
+                );
+                if !within(&archive_root, &dst) {
+                    report.classes.flac_copies.skipped.push(SkipEntry {
+                        path: rel.clone(),
+                        reason: "target escapes archive root".to_string(),
+                    });
+                    continue;
+                }
                 let base = format!("flac-copy:{}", basename(&abs));
                 let stem_part = unique_disc(&mut used_disc, &existing_archived, &isrc, &base);
                 moves.push(MovePlan {
@@ -1164,8 +1287,10 @@ pub async fn archive_legacy(
                     src: abs,
                     dst,
                     size,
-                    stem_part,
+                    role: ROLE_ARCHIVED,
+                    stem_part: Some(stem_part),
                     origin_row: origin,
+                    store_hash,
                 });
             }
             (None, _) => report.classes.flac_copies.skipped.push(SkipEntry {
@@ -1184,7 +1309,7 @@ pub async fn archive_legacy(
     // Object hash by absolute path (for `duplicate-bundles/<hash>`).
     let mut obj_hash: HashMap<String, String> = HashMap::new();
     let mut obj_name: HashMap<String, String> = HashMap::new();
-    let mut cand_bundle: Vec<(PathBuf, String)> = Vec::new();
+    let mut cand_bundle: Vec<(PathBuf, String, Option<String>)> = Vec::new();
     for o in &objects {
         let abs = store.path_for(&o.hash);
         obj_hash.insert(abs.to_string_lossy().to_string(), o.hash.clone());
@@ -1192,20 +1317,28 @@ pub async fn archive_legacy(
         if !o.is_bundle() {
             continue;
         }
-        let isrc = o
-            .isrc
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| crate::tags::read_isrc(&abs));
-        let Some(isrc) = isrc else { continue };
-        cand_bundle.push((abs, isrc));
+        let raw = o.isrc.clone().filter(|s| !s.trim().is_empty());
+        let isrc = raw
+            .as_deref()
+            .and_then(safe_isrc)
+            .or_else(|| crate::tags::read_isrc(&abs).and_then(|s| safe_isrc(&s)));
+        let Some(isrc) = isrc else {
+            if raw.is_some() {
+                report.classes.relocated_bundles.skipped.push(SkipEntry {
+                    path: display_path(&abs, &data_dir),
+                    reason: "invalid_isrc".to_string(),
+                });
+            }
+            continue;
+        };
+        cand_bundle.push((abs, isrc, Some(o.hash.clone())));
     }
     for (path, _reason, _size) in &unmanaged {
         let abs = resolve_abs(path, &data_dir);
         if !matches!(ext_of(path).as_deref(), Some("m4a") | Some("alac")) {
             continue;
         }
-        let isrc = crate::tags::read_isrc(&abs);
+        let isrc = crate::tags::read_isrc(&abs).and_then(|s| safe_isrc(&s));
         let Some(isrc) = isrc else {
             report.classes.relocated_bundles.skipped.push(SkipEntry {
                 path: display_path(&abs, &data_dir),
@@ -1214,11 +1347,11 @@ pub async fn archive_legacy(
             report.classes.relocated_bundles.count += 1;
             continue;
         };
-        cand_bundle.push((abs, isrc));
+        cand_bundle.push((abs, isrc, None));
     }
 
     let mut seen_b: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (abs, isrc) in cand_bundle {
+    for (abs, isrc, store_hash) in cand_bundle {
         let canonical = tracks_dir.join(&isrc).join(format!("{isrc}.stem.m4a"));
         if abs == canonical || !seen_b.insert(abs.to_string_lossy().to_string()) {
             continue;
@@ -1252,6 +1385,9 @@ pub async fn archive_legacy(
                             .or_else(|| sha256_file(&abs))
                             .unwrap_or_else(|| basename(&abs));
                         let dst = dup_dir.join(&hash);
+                        // The content hash is the natural unique name; only a
+                        // pre-existing file can conflict (pre-flight skips it).
+                        used_dst.insert(dst.to_string_lossy().to_string());
                         let base = format!("duplicate-bundle:{hash}");
                         let stem_part = unique_disc(&mut used_disc, &existing_archived, &isrc, &base);
                         moves.push(MovePlan {
@@ -1260,8 +1396,10 @@ pub async fn archive_legacy(
                             src: abs,
                             dst,
                             size,
-                            stem_part,
+                            role: ROLE_ARCHIVED,
+                            stem_part: Some(stem_part),
                             origin_row: None,
+                            store_hash,
                         });
                     }
                     (None, _) => report.classes.duplicate_bundles.skipped.push(SkipEntry {
@@ -1286,23 +1424,32 @@ pub async fn archive_legacy(
                     });
                     continue;
                 }
-                let base = format!("relocated-bundle:{isrc}");
-                let stem_part = unique_disc(&mut used_disc, &existing_archived, &isrc, &base);
+                if !within(&tracks_dir, &canonical) {
+                    report.classes.relocated_bundles.skipped.push(SkipEntry {
+                        path: rel,
+                        reason: "target escapes tracks root".to_string(),
+                    });
+                    continue;
+                }
                 moves.push(MovePlan {
                     class: LegacyClass::RelocatedBundle,
                     isrc,
                     src: abs,
                     dst: canonical,
                     size,
-                    stem_part,
+                    // Lives in the active track folder: backfill role `stem`,
+                    // no stem_part — NOT an `_archive` entry.
+                    role: ROLE_STEM,
+                    stem_part: None,
                     origin_row: None,
+                    store_hash,
                 });
             }
         }
     }
 
     // ── Class D: MP3 copies identical to the 128 reference ────────────────
-    let mut cand_mp3: Vec<(PathBuf, String)> = Vec::new();
+    let mut cand_mp3: Vec<(PathBuf, String, Option<String>)> = Vec::new();
     let mut seen_d: std::collections::HashSet<String> = std::collections::HashSet::new();
     for o in &objects {
         if o.ext().as_deref() != Some("mp3") {
@@ -1312,14 +1459,22 @@ pub async fn archive_legacy(
         if legit_mp3.contains(&abs.to_string_lossy().to_string()) {
             continue;
         }
-        let isrc = o
-            .isrc
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| crate::tags::read_isrc(&abs));
-        let Some(isrc) = isrc else { continue };
+        let raw = o.isrc.clone().filter(|s| !s.trim().is_empty());
+        let isrc = raw
+            .as_deref()
+            .and_then(safe_isrc)
+            .or_else(|| crate::tags::read_isrc(&abs).and_then(|s| safe_isrc(&s)));
+        let Some(isrc) = isrc else {
+            if raw.is_some() {
+                report.classes.mp3_copies.skipped.push(SkipEntry {
+                    path: display_path(&abs, &data_dir),
+                    reason: "invalid_isrc".to_string(),
+                });
+            }
+            continue;
+        };
         if seen_d.insert(abs.to_string_lossy().to_string()) {
-            cand_mp3.push((abs, isrc));
+            cand_mp3.push((abs, isrc, Some(o.hash.clone())));
         }
     }
     for (path, _reason, _size) in &unmanaged {
@@ -1330,12 +1485,14 @@ pub async fn archive_legacy(
         if legit_mp3.contains(&abs.to_string_lossy().to_string()) {
             continue;
         }
-        let Some(isrc) = crate::tags::read_isrc(&abs) else { continue };
+        let Some(isrc) = crate::tags::read_isrc(&abs).and_then(|s| safe_isrc(&s)) else {
+            continue;
+        };
         if seen_d.insert(abs.to_string_lossy().to_string()) {
-            cand_mp3.push((abs, isrc));
+            cand_mp3.push((abs, isrc, None));
         }
     }
-    for (abs, isrc) in cand_mp3 {
+    for (abs, isrc, store_hash) in cand_mp3 {
         if !abs.is_file() {
             report.classes.mp3_copies.skipped.push(SkipEntry {
                 path: display_path(&abs, &data_dir),
@@ -1370,12 +1527,27 @@ pub async fn archive_legacy(
                     .get(&abs.to_string_lossy().to_string())
                     .cloned()
                     .unwrap_or_else(|| basename(&abs));
+                let name = safe_name(&name);
                 let name = if name.to_ascii_lowercase().ends_with(".mp3") {
                     name
                 } else {
                     format!("{name}.mp3")
                 };
-                let dst = mp3_copies_dir.join(&name);
+                // `<ISRC>/<name>`: the ISRC folder keeps identically named MP3s
+                // of different tracks apart; same ISRC + same name gets `-2`.
+                let (stem, ext) = name
+                    .rsplit_once('.')
+                    .map(|(s, e)| (s.to_string(), e.to_string()))
+                    .unwrap_or_else(|| (name.clone(), "mp3".to_string()));
+                let dir = mp3_copies_dir.join(&isrc);
+                let dst = reserve_dst(&mut used_dst, &dir, &stem, &ext);
+                if !within(&archive_root, &dst) {
+                    report.classes.mp3_copies.skipped.push(SkipEntry {
+                        path: rel.clone(),
+                        reason: "target escapes archive root".to_string(),
+                    });
+                    continue;
+                }
                 let base = format!("mp3-copy:{name}");
                 let stem_part = unique_disc(&mut used_disc, &existing_archived, &isrc, &base);
                 moves.push(MovePlan {
@@ -1384,8 +1556,10 @@ pub async fn archive_legacy(
                     src: abs,
                     dst,
                     size,
-                    stem_part,
+                    role: ROLE_ARCHIVED,
+                    stem_part: Some(stem_part),
                     origin_row: None,
+                    store_hash,
                 });
             }
             (None, _) => report.classes.mp3_copies.skipped.push(SkipEntry {
@@ -1400,42 +1574,38 @@ pub async fn archive_legacy(
         }
     }
 
-    // ── Pre-flight: a target must be free and unique ───────────────────────
+    // ── Pre-flight: drop only targets that are genuinely occupied ──────────
+    // Intra-plan collisions are already resolved by `reserve_dst`; a target
+    // that exists on disk (or a leftover duplicate claim) is skipped for that
+    // candidate instead of aborting the whole run. A real I/O failure during
+    // `apply` still aborts.
     let mut seen_dst: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut conflict: Option<String> = None;
-    for m in &moves {
-        if m.dst.exists() {
-            conflict = Some(format!("target occupied: {}", display_path(&m.dst, &data_dir)));
-            break;
+    let mut accepted: Vec<MovePlan> = Vec::with_capacity(moves.len());
+    for m in moves {
+        if m.dst.exists() || !seen_dst.insert(m.dst.to_string_lossy().to_string()) {
+            class_report_mut(&mut report.classes, m.class)
+                .skipped
+                .push(SkipEntry {
+                    path: display_path(&m.src, &data_dir),
+                    reason: "target occupied".to_string(),
+                });
+            continue;
         }
-        if !seen_dst.insert(m.dst.to_string_lossy().to_string()) {
-            conflict = Some(format!("two moves to {}", display_path(&m.dst, &data_dir)));
-            break;
-        }
+        accepted.push(m);
     }
-    if let Some(reason) = conflict {
-        report.aborted = true;
-        report.aborted_reason = Some(reason);
-        return Ok(report);
-    }
+    let moves = accepted;
 
     // Planned counts are visible in both modes; `apply` performs them below.
-    report.total_moved = moves.len();
-    report.total_bytes_moved = moves.iter().map(|m| m.size).sum();
+    report.total_planned = moves.len();
+    report.total_bytes_planned = moves.iter().map(|m| m.size).sum();
     for m in &moves {
-        let cr = match m.class {
-            LegacyClass::FlacCopy => &mut report.classes.flac_copies,
-            LegacyClass::DuplicateBundle => &mut report.classes.duplicate_bundles,
-            LegacyClass::RelocatedBundle => &mut report.classes.relocated_bundles,
-            LegacyClass::Mp3Copy => &mut report.classes.mp3_copies,
-        };
-        cr.moved += 1;
+        class_report_mut(&mut report.classes, m.class).planned += 1;
     }
 
     if apply {
-        std::fs::create_dir_all(&archive_root)?;
         let now = now_iso();
         let mut moved_now: usize = 0;
+        let mut bytes_now: u64 = 0;
         for m in &moves {
             if let Some(parent) = m.dst.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -1453,19 +1623,41 @@ pub async fn archive_legacy(
                 break;
             }
             moved_now += 1;
+            bytes_now += m.size;
+            class_report_mut(&mut report.classes, m.class).moved += 1;
+
             let dst_rel = display_path(&m.dst, &data_dir);
             let origin = format!("{}:{}", m.class.label(), display_path(&m.src, &data_dir));
+
+            // The bytes now live at `dst`; drop the stale object metadata so
+            // `/objects`, `/isrc/{isrc}/objects` and `/objects/stats` stop
+            // counting a file that no longer sits in the object store. The
+            // provenance survives in `track_files.origin` +
+            // `original_filename`.
+            //
+            // NOTE: the `rename` above and this DELETE/INSERT are not
+            // transactional. A crash in between leaves the file moved but the
+            // rows stale; the run is idempotent and a re-run repairs the
+            // catalogue (the relocated file is simply re-catalogued).
+            if let Some(hash) = &m.store_hash {
+                sqlx::query("DELETE FROM store_objects WHERE hash = ?")
+                    .bind(hash)
+                    .execute(pool)
+                    .await?;
+            }
+
             if let Some((role, sp)) = &m.origin_row {
                 let updated = sqlx::query(
                     "UPDATE track_files
-                        SET role = 'archived', path = ?, size = ?, stem_part = ?,
+                        SET role = ?, path = ?, size = ?, stem_part = ?,
                             origin = ?, original_filename = ?
                       WHERE isrc = ? AND role = ?
                         AND COALESCE(stem_part, '') = COALESCE(?, '')",
                 )
+                .bind(m.role)
                 .bind(&dst_rel)
                 .bind(m.size as i64)
-                .bind(&m.stem_part)
+                .bind(m.stem_part.as_deref())
                 .bind(&origin)
                 .bind(basename(&m.dst))
                 .bind(&m.isrc)
@@ -1478,14 +1670,14 @@ pub async fn archive_legacy(
                 // did not, still record the relocated file instead of leaving a
                 // dangling filesystem entry without a catalogue row.
                 if updated == 0 {
-                    insert_archived_row(pool, m, &dst_rel, &origin, &now).await?;
+                    insert_move_row(pool, m, &dst_rel, &origin, &now).await?;
                 }
             } else {
-                insert_archived_row(pool, m, &dst_rel, &origin, &now).await?;
+                insert_move_row(pool, m, &dst_rel, &origin, &now).await?;
             }
         }
         report.total_moved = moved_now;
-        report.total_bytes_moved = moves.iter().take(moved_now).map(|m| m.size).sum();
+        report.total_bytes_moved = bytes_now;
     }
 
     // ── Derived counters + aggregate skips ────────────────────────────────
@@ -1498,7 +1690,7 @@ pub async fn archive_legacy(
     ] {
         cr.remaining = cr
             .count
-            .saturating_sub(cr.moved)
+            .saturating_sub(cr.planned)
             .saturating_sub(cr.not_identical.len());
     }
     report.skipped = [
