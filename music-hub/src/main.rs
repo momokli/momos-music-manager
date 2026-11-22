@@ -66,6 +66,18 @@ enum Command {
     Backfill,
     /// Backfill artist/album entities from the historical free-text columns.
     BackfillArtists,
+    /// Fill missing ISRCs from Spotify's full track objects.
+    IsrcBackfill {
+        #[arg(long)]
+        user: String,
+        /// Include discovery/crawl tracks, not just user-owned ones.
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
     /// Backfill audio features (BPM/key/energy) via ReccoBeats.
     Features {
         #[arg(long, default_value_t = 2000)]
@@ -181,12 +193,16 @@ async fn main() -> Result<()> {
         Command::SetPassword { user, password } => cmd_set_password(cfg, &user, &password).await,
         Command::Backfill => cmd_backfill(cfg).await,
         Command::BackfillArtists => cmd_backfill_artists(cfg).await,
+        Command::IsrcBackfill {
+            user,
+            all,
+            limit,
+            dry_run,
+        } => cmd_isrc_backfill(cfg, &user, all, limit, dry_run).await,
         Command::Features { limit } => cmd_features(cfg, limit).await,
         Command::Freqblog { limit } => cmd_freqblog(cfg, limit).await,
         Command::ImportMmmTags { db, user } => cmd_import_mmm_tags(cfg, &db, &user).await,
-        Command::ImportMmmPlaylists { db, user } => {
-            cmd_import_mmm_playlists(cfg, &db, &user).await
-        }
+        Command::ImportMmmPlaylists { db, user } => cmd_import_mmm_playlists(cfg, &db, &user).await,
         Command::ImportMmmSettings { db, dry_run } => {
             cmd_import_mmm_settings(cfg, &db, dry_run).await
         }
@@ -371,6 +387,28 @@ async fn cmd_make_admin(cfg: Config, slug: &str) -> Result<()> {
         bail!("user '{slug}' not found");
     }
     println!("✓ '{slug}' ist jetzt Admin.");
+    Ok(())
+}
+
+async fn cmd_isrc_backfill(
+    cfg: Config,
+    user: &str,
+    all: bool,
+    limit: Option<usize>,
+    dry_run: bool,
+) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    let cfg = settings::overlay_config(&pool, cfg).await;
+    let scope = if all { "alle" } else { "Nutzerbestand" };
+    println!(
+        "ISRC-Backfill ({scope}){} …",
+        if dry_run { " [dry run]" } else { "" }
+    );
+    let r = ingest::backfill_isrc(&pool, &cfg, user, !all, limit, dry_run).await?;
+    println!(
+        "Kandidaten {} · Batches {} · geschrieben {} · ohne ISRC {} · fehlend {}",
+        r.candidates, r.batches, r.updated, r.no_isrc, r.missing
+    );
     Ok(())
 }
 
