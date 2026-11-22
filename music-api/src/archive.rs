@@ -933,19 +933,58 @@ impl Md5Cache<'_> {
 }
 
 /// Reserve a unique `(isrc, 'archived', stem_part)` discriminator.
+///
+/// Uniqueness is enforced both among the planned moves (`used`) and against
+/// rows already present in `track_files` (`existing`, keyed by
+/// `(isrc, COALESCE(stem_part,''))`) so an in-place rewrite can never collide
+/// with an existing `archived` row under the unique index.
 fn unique_disc(
     used: &mut HashMap<(String, String), usize>,
+    existing: &std::collections::HashSet<(String, String)>,
     isrc: &str,
     base: &str,
 ) -> String {
     let key = (isrc.to_string(), base.to_string());
     let n = used.entry(key).or_insert(0);
-    *n += 1;
-    if *n == 1 {
-        base.to_string()
-    } else {
-        format!("{base}-{n}")
+    loop {
+        *n += 1;
+        let cand = if *n == 1 {
+            base.to_string()
+        } else {
+            format!("{base}-{n}")
+        };
+        if !existing.contains(&(isrc.to_string(), cand.clone())) {
+            return cand;
+        }
     }
+}
+
+/// Insert a fresh `archived` row for a move that has no catalogue origin.
+/// `ON CONFLICT DO NOTHING` keeps a stray pre-existing discriminator harmless.
+async fn insert_archived_row(
+    pool: &Pool<Sqlite>,
+    m: &MovePlan,
+    dst_rel: &str,
+    origin: &str,
+    now: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO track_files
+            (isrc, role, path, size, sha256, stem_part, origin,
+             original_filename, created_at)
+         VALUES (?, 'archived', ?, ?, NULL, ?, ?, ?, ?)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&m.isrc)
+    .bind(dst_rel)
+    .bind(m.size as i64)
+    .bind(&m.stem_part)
+    .bind(origin)
+    .bind(basename(&m.dst))
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Run `archive-legacy`.
@@ -1000,6 +1039,17 @@ pub async fn archive_legacy(
             .fetch_all(pool)
             .await?;
 
+    // Existing archived discriminators per ISRC — consulted when reserving a
+    // new `stem_part` so an in-place rewrite cannot violate the unique index.
+    let existing_archived: std::collections::HashSet<(String, String)> =
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT isrc, COALESCE(stem_part, '') FROM track_files WHERE role = 'archived'",
+        )
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .collect();
+
     // Legit (never-touched) MP3 and FLAC delivery paths per ISRC.
     let mut legit_mp3: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (isrc, _role, path, _sp) in &tf {
@@ -1040,8 +1090,12 @@ pub async fn archive_legacy(
 
     // ── Class A: FLAC copies identical to the delivery FLAC ────────────────
     let mut seen_a: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut cand_a: Vec<(PathBuf, String)> = Vec::new();
-    for (isrc, role, path, _sp) in &tf {
+    // `origin_row` carries the existing `track_files` row (`role`, `stem_part`)
+    // when the candidate is catalogue-backed, so `apply` rewrites it in place
+    // instead of inserting a duplicate row (which would leave the old row
+    // dangling on the relocated path).
+    let mut cand_a: Vec<(PathBuf, String, Option<(String, Option<String>)>)> = Vec::new();
+    for (isrc, role, path, sp) in &tf {
         if role != ROLE_FLAC {
             continue;
         }
@@ -1050,7 +1104,7 @@ pub async fn archive_legacy(
             continue;
         }
         if seen_a.insert(abs.to_string_lossy().to_string()) {
-            cand_a.push((abs, isrc.clone()));
+            cand_a.push((abs, isrc.clone(), Some((role.clone(), sp.clone()))));
         }
     }
     for o in &objects {
@@ -1068,10 +1122,10 @@ pub async fn archive_legacy(
             continue;
         }
         if seen_a.insert(abs.to_string_lossy().to_string()) {
-            cand_a.push((abs, isrc));
+            cand_a.push((abs, isrc, None));
         }
     }
-    for (abs, isrc) in cand_a {
+    for (abs, isrc, origin) in cand_a {
         if !abs.is_file() {
             report.classes.flac_copies.skipped.push(SkipEntry {
                 path: display_path(&abs, &data_dir),
@@ -1103,7 +1157,7 @@ pub async fn archive_legacy(
             (Some(a), Some(d)) if a == d => {
                 let dst = flac_copies_dir.join(format!("{isrc}.flac"));
                 let base = format!("flac-copy:{}", basename(&abs));
-                let stem_part = unique_disc(&mut used_disc, &isrc, &base);
+                let stem_part = unique_disc(&mut used_disc, &existing_archived, &isrc, &base);
                 moves.push(MovePlan {
                     class: LegacyClass::FlacCopy,
                     isrc,
@@ -1111,7 +1165,7 @@ pub async fn archive_legacy(
                     dst,
                     size,
                     stem_part,
-                    origin_row: None,
+                    origin_row: origin,
                 });
             }
             (None, _) => report.classes.flac_copies.skipped.push(SkipEntry {
@@ -1199,7 +1253,7 @@ pub async fn archive_legacy(
                             .unwrap_or_else(|| basename(&abs));
                         let dst = dup_dir.join(&hash);
                         let base = format!("duplicate-bundle:{hash}");
-                        let stem_part = unique_disc(&mut used_disc, &isrc, &base);
+                        let stem_part = unique_disc(&mut used_disc, &existing_archived, &isrc, &base);
                         moves.push(MovePlan {
                             class: LegacyClass::DuplicateBundle,
                             isrc,
@@ -1233,7 +1287,7 @@ pub async fn archive_legacy(
                     continue;
                 }
                 let base = format!("relocated-bundle:{isrc}");
-                let stem_part = unique_disc(&mut used_disc, &isrc, &base);
+                let stem_part = unique_disc(&mut used_disc, &existing_archived, &isrc, &base);
                 moves.push(MovePlan {
                     class: LegacyClass::RelocatedBundle,
                     isrc,
@@ -1323,7 +1377,7 @@ pub async fn archive_legacy(
                 };
                 let dst = mp3_copies_dir.join(&name);
                 let base = format!("mp3-copy:{name}");
-                let stem_part = unique_disc(&mut used_disc, &isrc, &base);
+                let stem_part = unique_disc(&mut used_disc, &existing_archived, &isrc, &base);
                 moves.push(MovePlan {
                     class: LegacyClass::Mp3Copy,
                     isrc,
@@ -1402,7 +1456,7 @@ pub async fn archive_legacy(
             let dst_rel = display_path(&m.dst, &data_dir);
             let origin = format!("{}:{}", m.class.label(), display_path(&m.src, &data_dir));
             if let Some((role, sp)) = &m.origin_row {
-                sqlx::query(
+                let updated = sqlx::query(
                     "UPDATE track_files
                         SET role = 'archived', path = ?, size = ?, stem_part = ?,
                             origin = ?, original_filename = ?
@@ -1418,24 +1472,16 @@ pub async fn archive_legacy(
                 .bind(role)
                 .bind(sp)
                 .execute(pool)
-                .await?;
+                .await?
+                .rows_affected();
+                // The origin row should always exist (it came from `tf`); if it
+                // did not, still record the relocated file instead of leaving a
+                // dangling filesystem entry without a catalogue row.
+                if updated == 0 {
+                    insert_archived_row(pool, m, &dst_rel, &origin, &now).await?;
+                }
             } else {
-                sqlx::query(
-                    "INSERT INTO track_files
-                        (isrc, role, path, size, sha256, stem_part, origin,
-                         original_filename, created_at)
-                     VALUES (?, 'archived', ?, ?, NULL, ?, ?, ?, ?)
-                     ON CONFLICT DO NOTHING",
-                )
-                .bind(&m.isrc)
-                .bind(&dst_rel)
-                .bind(m.size as i64)
-                .bind(&m.stem_part)
-                .bind(&origin)
-                .bind(basename(&m.dst))
-                .bind(&now)
-                .execute(pool)
-                .await?;
+                insert_archived_row(pool, m, &dst_rel, &origin, &now).await?;
             }
         }
         report.total_moved = moved_now;

@@ -370,3 +370,133 @@ async fn nothing_is_deleted() {
     let count = count_archive_files(&h.state.config.data_dir.join("_archive"));
     assert_eq!(count, report.total_moved);
 }
+
+/// Blocker #702: a candidate taken from `track_files.role='flac'` must have its
+/// origin row rewritten **in place** to `archived`, never duplicated — otherwise
+/// the old `flac` row would dangle on the relocated path and `storage_stats`
+/// (purely row-based) would count the file twice.
+#[tokio::test]
+async fn class_a_track_file_candidate_rewrites_origin_row_in_place() {
+    let h = harness().await;
+    let cfg = &h.state.config;
+    let delivery = cfg.flac_dir().join("ARCHI1.flac");
+    if !make_flac(&delivery) {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    }
+    let legacy = cfg.data_dir.join("downloads/ARCHI1.flac");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::copy(&delivery, &legacy).unwrap();
+    seed_track(
+        &h.state.pool,
+        "ARCHI1",
+        Some(&delivery.display().to_string()),
+        None,
+    )
+    .await;
+    seed_track_file(
+        &h.state.pool,
+        "ARCHI1",
+        archive::ROLE_FLAC,
+        &legacy.display().to_string(),
+    )
+    .await;
+
+    let id_before: i64 =
+        sqlx::query_scalar("SELECT id FROM track_files WHERE isrc='ARCHI1' AND role='flac'")
+            .fetch_one(&h.state.pool)
+            .await
+            .unwrap();
+
+    let report = archive::archive_legacy(&h.state.pool, cfg, &h.state.store, true)
+        .await
+        .unwrap();
+    assert!(!report.aborted, "{report:?}");
+    assert_eq!(report.classes.flac_copies.moved, 1, "{report:?}");
+
+    // Exactly one row remains, with the original id, now `archived`.
+    let rows: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT id, role, path FROM track_files WHERE isrc='ARCHI1'")
+            .fetch_all(&h.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1, "no duplicate inserted: {rows:?}");
+    assert_eq!(rows[0].0, id_before, "row rewritten in place");
+    assert_eq!(rows[0].1, "archived");
+    assert_eq!(rows[0].2, "_archive/flac-copies/ARCHI1.flac");
+
+    // No row points at the relocated-away path any longer.
+    let dangling: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM track_files WHERE path = ?")
+        .bind(legacy.display().to_string())
+        .fetch_one(&h.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(dangling, 0, "no dangling rows at the removed path");
+
+    // Row-based stats count the single file exactly once.
+    let stats = archive::storage_stats(&h.state.pool).await.unwrap();
+    let archived = stats
+        .roles
+        .iter()
+        .find(|r| r.role == archive::ROLE_ARCHIVED)
+        .expect("archived role present");
+    assert_eq!(archived.files, 1);
+    assert_eq!(stats.total_files, 1, "no double count: {stats:?}");
+}
+
+/// Two planned moves that resolve to the same destination must abort the whole
+/// run before anything is touched.
+#[tokio::test]
+async fn aborts_when_two_moves_share_a_target() {
+    let h = harness().await;
+    let cfg = &h.state.config;
+    let delivery = cfg.flac_dir().join("ARCHT1.flac");
+    if !make_flac(&delivery) {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    }
+    seed_track(
+        &h.state.pool,
+        "ARCHT1",
+        Some(&delivery.display().to_string()),
+        None,
+    )
+    .await;
+
+    // Two distinct copies of the same delivery → both plan `_archive/flac-copies/ARCHT1.flac`.
+    let mut candidates = Vec::new();
+    for (hash, name) in [(hash_n(0xE1), "ARCHT1-a.flac"), (hash_n(0xE2), "ARCHT1-b.flac")] {
+        let cand = h.state.store.path_for(&hash);
+        std::fs::create_dir_all(cand.parent().unwrap()).unwrap();
+        std::fs::copy(&delivery, &cand).unwrap();
+        seed_object(
+            &h.state.pool,
+            &hash,
+            std::fs::metadata(&cand).unwrap().len() as i64,
+            "audio/flac",
+            &format!("legacy/{name}"),
+            "ARCHT1",
+            name,
+        )
+        .await;
+        candidates.push(cand);
+    }
+
+    let report = archive::archive_legacy(&h.state.pool, cfg, &h.state.store, true)
+        .await
+        .unwrap();
+    assert!(report.aborted, "{report:?}");
+    assert_eq!(report.total_moved, 0, "nothing moved on abort");
+    let reason = report.aborted_reason.as_deref().unwrap_or("");
+    assert!(
+        reason.contains("two moves"),
+        "reason should name the duplicate target: {reason:?}"
+    );
+    for cand in &candidates {
+        assert!(cand.exists(), "source untouched on abort");
+    }
+    assert!(
+        !cfg.data_dir.join("_archive").exists(),
+        "no archive tree created on abort"
+    );
+}
