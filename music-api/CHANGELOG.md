@@ -8,6 +8,8 @@ Versioning: per-component tag line `api-v<x.y.z>` (see
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-22
+
 ### Added
 
 - **`track_files` catalogue + `archive-backfill` + `/storage/stats`** (#700) — one
