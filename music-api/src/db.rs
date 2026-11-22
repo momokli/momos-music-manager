@@ -45,11 +45,9 @@ async fn rename_column_if_exists(
             .fetch_one(pool)
             .await?;
     if has_to == 0 {
-        sqlx::query(&format!(
-            "ALTER TABLE {table} RENAME COLUMN {from} TO {to}"
-        ))
-        .execute(pool)
-        .await?;
+        sqlx::query(&format!("ALTER TABLE {table} RENAME COLUMN {from} TO {to}"))
+            .execute(pool)
+            .await?;
     }
     Ok(())
 }
@@ -248,6 +246,14 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     for sql in [
         "ALTER TABLE tracks ADD COLUMN wanted_quality TEXT",
         "ALTER TABLE tracks ADD COLUMN quality_tier TEXT",
+        // #699: the additive *demand set* (`flac,320,128`) replacing the scalar
+        // quality rank, plus the terminal outcome hint that lets a single
+        // writer (`recompute_state`) derive `state` without losing `absent`.
+        "ALTER TABLE tracks ADD COLUMN wanted_formats TEXT",
+        "ALTER TABLE tracks ADD COLUMN terminal_state TEXT",
+        // Explicit demand re-arm (a genuinely new, not-yet-servable format was
+        // ordered). Distinguishes "owe a download" from "servable, nothing due".
+        "ALTER TABLE tracks ADD COLUMN rearm_pending INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE tracks ADD COLUMN intent TEXT NOT NULL DEFAULT 'library'",
         "ALTER TABLE orders ADD COLUMN intent TEXT NOT NULL DEFAULT 'library'",
         "ALTER TABLE orders ADD COLUMN target TEXT",
@@ -295,17 +301,113 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Create an order for the given (already normalised, de-duplicated) ISRCs.
-/// Unknown ISRCs are inserted as `pending`; known ones keep their state, so
-/// re-ordering an already-downloaded track is a cheap no-op.
-/// Rank of a store tier, as SQL (`flac` > `mp3-320` > `mp3-128` > none).
-fn tier_rank(col: &str) -> String {
-    format!(
-        "CASE {col} WHEN 'flac' THEN 3 WHEN 'mp3-320' THEN 2 \
-         WHEN 'mp3-128' THEN 1 ELSE 0 END"
+/// The **single writer** of `tracks.state` (#699). Derives a row's state from
+/// the *servable* set (`path_*`), the download lease, the explicit demand
+/// re-arm flag and a recorded terminal outcome:
+///
+/// * nothing is servable and a terminal outcome is recorded (`failed`/`absent`)
+///   → that outcome;
+/// * a download is in flight (lease held, no retry scheduled) → `downloading`;
+/// * an explicit demand re-arm is outstanding (a genuinely new, not-yet-servable
+///   format was ordered) → `pending`;
+/// * something is servable → `ready` (a failed *upgrade* never degrades the
+///   row — the still-present format keeps it ready);
+/// * otherwise the row still owes its first download → `pending`.
+///
+/// `quality_tier` (display only) is refreshed to the best format on disk.
+/// Callers write the *inputs* (paths, error, terminal outcome, re-arm flag,
+/// lease) and then call this; they never assign `state` themselves.
+pub async fn recompute_state(pool: &Pool<Sqlite>, isrc: &str) -> anyhow::Result<()> {
+    use crate::models::{format_rank, have_formats, token_tier};
+
+    let row = sqlx::query_as::<
+        _,
+        (
+            Option<String>, // path_flac
+            Option<String>, // path_320
+            Option<String>, // path_128
+            String,         // state
+            Option<i64>,    // next_attempt_at
+            Option<i64>,    // lease_expires_at
+            Option<String>, // terminal_state
+            i64,            // rearm_pending
+        ),
+    >(
+        "SELECT path_flac, path_320, path_128, state, next_attempt_at,
+                lease_expires_at, terminal_state, rearm_pending
+           FROM tracks WHERE isrc = ?",
     )
+    .bind(isrc)
+    .fetch_optional(pool)
+    .await?;
+    let Some((pf, p320, p128, cur, next_attempt, lease, terminal, rearm)) = row else {
+        return Ok(()); // unknown ISRC — nothing to derive
+    };
+
+    let have = have_formats(pf.as_deref(), p320.as_deref(), p128.as_deref());
+
+    let new_state: &str = if have.is_empty() && terminal.is_some() {
+        terminal.as_deref().unwrap_or(state::PENDING)
+    } else if next_attempt.is_none() && lease.is_some() {
+        state::DOWNLOADING
+    } else if rearm != 0 {
+        state::PENDING
+    } else if !have.is_empty() {
+        state::READY
+    } else {
+        state::PENDING
+    };
+
+    let best_tier = have
+        .iter()
+        .max_by_key(|f| format_rank(f))
+        .and_then(|f| token_tier(f));
+
+    if new_state == state::READY && cur != state::READY {
+        tracing::info!(
+            isrc,
+            from = %cur,
+            formats = %have.join(","),
+            "recompute_state: servable row recovered to ready"
+        );
+    }
+
+    sqlx::query("UPDATE tracks SET state = ?, quality_tier = ?, updated_at = ? WHERE isrc = ?")
+        .bind(new_state)
+        .bind(best_tier)
+        .bind(now())
+        .bind(isrc)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
+/// Highest store tier of `a` and `b` (`None` when both are `None`).
+fn max_tier(a: Option<&str>, b: Option<&str>) -> Option<String> {
+    use crate::models::{format_rank, tier_token};
+    let ra = a.and_then(tier_token).map(format_rank).unwrap_or(0);
+    let rb = b.and_then(tier_token).map(format_rank).unwrap_or(0);
+    if rb > ra {
+        b.map(str::to_string)
+    } else {
+        a.or(b).map(str::to_string)
+    }
+}
+
+/// Canonical (`flac,320,128`) join of a format set.
+fn join_formats(v: &mut [String]) -> String {
+    v.sort_by_key(|f| std::cmp::Reverse(crate::models::format_rank(f)));
+    v.join(",")
+}
+
+/// Create an order for the given (already normalised, de-duplicated) ISRCs.
+///
+/// Demand is a **format set**: the order's target is merged additively into
+/// `wanted_formats` (never replaces it). A track is re-armed (`pending`) only
+/// when the new format is genuinely new *and* not already servable from what is
+/// on disk — so ordering `128` for a FLAC track is a cheap no-op, and a format
+/// that terminally failed is not re-armed by the same order again. `state` is
+/// never written here; [`recompute_state`] derives it.
 pub async fn create_order(
     pool: &Pool<Sqlite>,
     order_id: &str,
@@ -315,6 +417,7 @@ pub async fn create_order(
     target: Option<&str>,
 ) -> anyhow::Result<()> {
     let ts = now();
+    let target_token = target.and_then(crate::models::tier_token);
     let mut tx = pool.begin().await?;
 
     sqlx::query(
@@ -330,42 +433,104 @@ pub async fn create_order(
     .execute(&mut *tx)
     .await?;
 
-    // One row per ISRC, merged across orders:
-    // * intent is max-merged (`library` wins over `toys`),
-    // * wanted_quality takes the highest tier ever requested,
-    // * a ready track whose stored tier is below that re-arms the download
-    //   (the upgrade path — never a second row).
-    let sql = format!(
-        "INSERT INTO tracks
-             (isrc, source, state, created_at, updated_at, wanted_quality, intent)
-         VALUES (?, ?, 'pending', ?, ?, ?, ?)
-         ON CONFLICT(isrc) DO UPDATE SET
-             intent = CASE WHEN excluded.intent = 'library'
-                           THEN 'library' ELSE tracks.intent END,
-             wanted_quality = CASE WHEN {ex_new} > {cur}
-                                   THEN excluded.wanted_quality
-                                   ELSE tracks.wanted_quality END,
-             state = CASE WHEN tracks.state = 'ready' AND {ex_new} > {tier}
-                          THEN 'pending' ELSE tracks.state END,
-             error = CASE WHEN tracks.state = 'ready' AND {ex_new} > {tier}
-                          THEN NULL ELSE tracks.error END,
-             updated_at = excluded.updated_at",
-        ex_new = tier_rank("excluded.wanted_quality"),
-        cur = tier_rank("tracks.wanted_quality"),
-        tier = tier_rank("tracks.quality_tier"),
-    );
-
     for isrc in isrcs {
         let source = crate::models::track_source(isrc);
-        sqlx::query(&sql)
-            .bind(isrc)
-            .bind(source)
-            .bind(ts)
-            .bind(ts)
-            .bind(target)
-            .bind(intent)
-            .execute(&mut *tx)
-            .await?;
+        let existing = sqlx::query_as::<
+            _,
+            (
+                Option<String>, // wanted_quality
+                Option<String>, // wanted_formats
+                String,         // intent
+                Option<String>, // path_flac
+                Option<String>, // path_320
+                Option<String>, // path_128
+            ),
+        >(
+            "SELECT wanted_quality, wanted_formats, intent, path_flac, path_320, path_128
+               FROM tracks WHERE isrc = ?",
+        )
+        .bind(isrc)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        match existing {
+            None => {
+                // Fresh ISRC: insert pending; the demand set is the one target.
+                sqlx::query(
+                    "INSERT INTO tracks
+                         (isrc, source, state, created_at, updated_at, wanted_quality,
+                          wanted_formats, intent)
+                     VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)",
+                )
+                .bind(isrc)
+                .bind(source)
+                .bind(ts)
+                .bind(ts)
+                .bind(target)
+                .bind(target_token)
+                .bind(intent)
+                .execute(&mut *tx)
+                .await?;
+            }
+            Some((old_wq, old_wf, old_intent, pf, p320, p128)) => {
+                let mut wanted = crate::models::parse_formats(old_wf.as_deref());
+                let is_new = target_token.is_some_and(|t| !wanted.iter().any(|x| x == t));
+                if let Some(t) = target_token {
+                    if !wanted.iter().any(|x| x == t) {
+                        wanted.push(t.to_string());
+                    }
+                }
+                let new_wq = max_tier(old_wq.as_deref(), target);
+                let wanted_str = join_formats(&mut wanted);
+                // `library` wins over `toys` (max-merge).
+                let new_intent = if old_intent == "library" || intent == "library" {
+                    "library"
+                } else {
+                    intent
+                };
+                // Re-arm only for a genuinely new format that is *not* already
+                // coverable from disk (a lossless/higher format covers a lower
+                // one): ordering `128` for a FLAC track stays a cheap no-op.
+                let have =
+                    crate::models::have_formats(pf.as_deref(), p320.as_deref(), p128.as_deref());
+                let covered = target_token
+                    .is_some_and(|t| have.iter().any(|h| crate::models::format_covers(h, t)));
+                let rearm = is_new && !covered;
+                if rearm {
+                    // A genuinely new demand clears any terminal outcome and the
+                    // attempt counter, and raises the explicit re-arm flag so
+                    // recompute becomes `pending`.
+                    sqlx::query(
+                        "UPDATE tracks
+                            SET intent = ?, wanted_quality = ?, wanted_formats = ?,
+                                attempts = 0, error = NULL, terminal_state = NULL,
+                                rearm_pending = 1, next_attempt_at = NULL,
+                                lease_expires_at = NULL, updated_at = ?
+                          WHERE isrc = ?",
+                    )
+                    .bind(new_intent)
+                    .bind(&new_wq)
+                    .bind(&wanted_str)
+                    .bind(ts)
+                    .bind(isrc)
+                    .execute(&mut *tx)
+                    .await?;
+                } else {
+                    sqlx::query(
+                        "UPDATE tracks
+                            SET intent = ?, wanted_quality = ?, wanted_formats = ?, updated_at = ?
+                          WHERE isrc = ?",
+                    )
+                    .bind(new_intent)
+                    .bind(&new_wq)
+                    .bind(&wanted_str)
+                    .bind(ts)
+                    .bind(isrc)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+        }
 
         sqlx::query("INSERT OR IGNORE INTO order_items (order_id, isrc) VALUES (?, ?)")
             .bind(order_id)
@@ -375,16 +540,25 @@ pub async fn create_order(
     }
 
     tx.commit().await?;
-    // Materialise the new tracks into the `download` kind (raise-only on re-touch).
+
+    // Derive state per ISRC (the single writer) and materialise work **only when
+    // a download is actually owed** — a ready-and-covered track stays untouched.
     for isrc in isrcs {
-        crate::work::enqueue(
-            pool,
-            crate::work::kind::DOWNLOAD,
-            isrc,
-            priority,
-            Some(crate::models::track_source(isrc)),
-        )
-        .await?;
+        recompute_state(pool, isrc).await?;
+        let owed = match get_track(pool, isrc).await? {
+            Some(t) => t.state == state::PENDING || t.state == state::DOWNLOADING,
+            None => false,
+        };
+        if owed {
+            crate::work::enqueue(
+                pool,
+                crate::work::kind::DOWNLOAD,
+                isrc,
+                priority,
+                Some(crate::models::track_source(isrc)),
+            )
+            .await?;
+        }
     }
     refresh_order(pool, order_id).await?;
     Ok(())
@@ -562,6 +736,7 @@ pub async fn set_track_derived(
     .bind(isrc)
     .execute(pool)
     .await?;
+    recompute_state(pool, isrc).await?;
     Ok(())
 }
 
@@ -630,8 +805,8 @@ pub async fn schedule_retry(
     }
     let next = now + backoff_delay(attempts as u32, policy.base_secs, policy.max_secs);
     sqlx::query(
-        "UPDATE tracks SET state = 'pending', error = ?, next_attempt_at = ?,
-                lease_expires_at = NULL, updated_at = ?
+        "UPDATE tracks SET error = ?, next_attempt_at = ?,
+                lease_expires_at = NULL, terminal_state = NULL, updated_at = ?
           WHERE isrc = ?",
     )
     .bind(error)
@@ -640,6 +815,7 @@ pub async fn schedule_retry(
     .bind(isrc)
     .execute(pool)
     .await?;
+    recompute_state(pool, isrc).await?;
     refresh_orders_for_isrc(pool, isrc).await?;
     // Keep the materialised download item in lockstep (re-queue or fail out).
     crate::work::retry_ref(pool, crate::work::kind::DOWNLOAD, isrc, error, next, now).await?;
@@ -704,11 +880,139 @@ pub async fn count_downloading(pool: &Pool<Sqlite>) -> anyhow::Result<i64> {
     )
 }
 
+/// The two visibility counters behind `GET /storage/stats` (#699).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageStats {
+    /// Rows that carry a `path_*` but are not `ready` — the degradation this
+    /// issue removes. Must be `0` once the repair has run.
+    pub servable_but_not_ready: i64,
+    /// Rows with a set `path_*` whose file is not on disk.
+    pub paths_missing_on_disk: i64,
+}
+
+/// Rows with any `path_*` set, as `(isrc, path_flac, path_320, path_128)`.
+async fn rows_with_paths(
+    pool: &Pool<Sqlite>,
+) -> anyhow::Result<Vec<(String, Option<String>, Option<String>, Option<String>)>> {
+    Ok(sqlx::query_as(
+        "SELECT isrc, path_flac, path_320, path_128 FROM tracks
+          WHERE path_flac IS NOT NULL OR path_320 IS NOT NULL OR path_128 IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Collect the non-empty paths of a row.
+fn set_paths(a: Option<&str>, b: Option<&str>, c: Option<&str>) -> Vec<String> {
+    [a, b, c]
+        .into_iter()
+        .flatten()
+        .filter(|p| !p.trim().is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Compute the two visibility counters for `GET /storage/stats`.
+pub async fn storage_stats(pool: &Pool<Sqlite>) -> anyhow::Result<StorageStats> {
+    let servable_but_not_ready: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tracks
+          WHERE state <> 'ready'
+            AND (path_flac IS NOT NULL OR path_320 IS NOT NULL OR path_128 IS NOT NULL)",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let mut paths_missing_on_disk = 0i64;
+    for (_isrc, a, b, c) in rows_with_paths(pool).await? {
+        let mut missing = false;
+        for p in set_paths(a.as_deref(), b.as_deref(), c.as_deref()) {
+            if tokio::fs::metadata(&p).await.is_err() {
+                missing = true;
+                break;
+            }
+        }
+        if missing {
+            paths_missing_on_disk += 1;
+        }
+    }
+
+    Ok(StorageStats {
+        servable_but_not_ready,
+        paths_missing_on_disk,
+    })
+}
+
+/// Result of the `repair-states` CLI / `db::repair_states` (#699).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairStats {
+    /// Rows that matched the degradation predicate (`state` non-ready + a path).
+    pub checked: usize,
+    /// Rows that have a servable file and were repaired to `ready`.
+    pub repaired: usize,
+    /// Rows whose set paths are all missing on disk (never repaired).
+    pub paths_missing_on_disk: usize,
+}
+
+/// Repair the degraded rows of the pre-#699 model: a row with a `path_*` on disk
+/// is servable, so it must be `ready` again. For each candidate the file is
+/// **statted first** — a row whose set paths are all missing on disk is counted
+/// and skipped (never a blind `UPDATE`). The `error` text is preserved.
+///
+/// `state` is not written directly: the terminal outcome is cleared and
+/// [`recompute_state`] derives `ready` from the formats on disk — the same
+/// single-writer path the normal flow uses.
+pub async fn repair_states(pool: &Pool<Sqlite>, apply: bool) -> anyhow::Result<RepairStats> {
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT isrc, path_flac, path_320, path_128 FROM tracks
+          WHERE state IN ('failed', 'absent', 'pending')
+            AND (path_flac IS NOT NULL OR path_320 IS NOT NULL OR path_128 IS NOT NULL)",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut stats = RepairStats::default();
+    for (isrc, a, b, c) in rows {
+        stats.checked += 1;
+        let paths = set_paths(a.as_deref(), b.as_deref(), c.as_deref());
+        let mut any_present = false;
+        for p in &paths {
+            if tokio::fs::metadata(p).await.is_ok() {
+                any_present = true;
+                break;
+            }
+        }
+        if !any_present {
+            stats.paths_missing_on_disk += 1;
+            continue;
+        }
+        if apply {
+            // Clear the (degrading) terminal outcome, keep `error`; recompute
+            // re-derives `ready` because a format is on disk.
+            sqlx::query(
+                "UPDATE tracks SET terminal_state = NULL, lease_expires_at = NULL,
+                        next_attempt_at = NULL, updated_at = ? WHERE isrc = ?",
+            )
+            .bind(now())
+            .bind(&isrc)
+            .execute(pool)
+            .await?;
+            recompute_state(pool, &isrc).await?;
+        }
+        stats.repaired += 1;
+    }
+    Ok(stats)
+}
+
 /// Reset a non-ready track to `pending` so the worker re-resolves/re-downloads it.
 pub async fn reset_track_to_pending(pool: &Pool<Sqlite>, isrc: &str) -> anyhow::Result<bool> {
+    // `state` is left to `recompute_state`; an explicit retry clears the terminal
+    // outcome and the attempt counter so the row becomes due again.
     let n = sqlx::query(
-        "UPDATE tracks SET state = 'pending', error = NULL, download_ref = NULL,
-                attempts = 0, next_attempt_at = NULL, lease_expires_at = NULL, updated_at = ?
+        "UPDATE tracks SET error = NULL, download_ref = NULL,
+                attempts = 0, next_attempt_at = NULL, lease_expires_at = NULL,
+                terminal_state = NULL, rearm_pending = 1, updated_at = ?
           WHERE isrc = ? AND state <> 'ready'",
     )
     .bind(now())
@@ -716,6 +1020,7 @@ pub async fn reset_track_to_pending(pool: &Pool<Sqlite>, isrc: &str) -> anyhow::
     .execute(pool)
     .await?
     .rows_affected();
+    recompute_state(pool, isrc).await?;
     refresh_orders_for_isrc(pool, isrc).await?;
     if n > 0 {
         crate::work::enqueue(pool, crate::work::kind::DOWNLOAD, isrc, 0, None).await?;
@@ -790,10 +1095,11 @@ pub async fn ingest_ready_track(
             path_flac        = COALESCE(tracks.path_flac, excluded.path_flac),
             path_320         = COALESCE(tracks.path_320, excluded.path_320),
             path_128         = COALESCE(tracks.path_128, excluded.path_128),
-            state            = 'ready',
             error            = NULL,
             lease_expires_at = NULL,
             next_attempt_at  = NULL,
+            terminal_state   = NULL,
+            rearm_pending    = 0,
             updated_at       = excluded.updated_at",
     )
     .bind(isrc)
@@ -805,6 +1111,7 @@ pub async fn ingest_ready_track(
     .bind(ts)
     .execute(pool)
     .await?;
+    recompute_state(pool, isrc).await?;
     refresh_orders_for_isrc(pool, isrc).await?;
     Ok(())
 }
@@ -839,8 +1146,8 @@ pub async fn mark_downloading(
     lease_until: i64,
 ) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE tracks SET state = 'downloading', download_ref = ?, error = NULL,
-                lease_expires_at = ?, updated_at = ?
+        "UPDATE tracks SET download_ref = ?, error = NULL,
+                lease_expires_at = ?, terminal_state = NULL, updated_at = ?
           WHERE isrc = ?",
     )
     .bind(download_ref)
@@ -849,6 +1156,7 @@ pub async fn mark_downloading(
     .bind(isrc)
     .execute(pool)
     .await?;
+    recompute_state(pool, isrc).await?;
     crate::work::ensure_running_ref(pool, crate::work::kind::DOWNLOAD, isrc, now()).await?;
     refresh_orders_for_isrc(pool, isrc).await
 }
@@ -861,36 +1169,38 @@ pub async fn mark_ready(
     path_320: Option<&str>,
     path_128: Option<&str>,
 ) -> anyhow::Result<()> {
-    // The stored tier is what is actually on disk, not what was requested.
-    let tier = if path_flac.is_some() {
-        Some("flac")
-    } else if path_320.is_some() {
-        Some("mp3-320")
-    } else if path_128.is_some() {
-        Some("mp3-128")
-    } else {
-        None
-    };
+    // Additive: each path column is only written when a value is passed
+    // (`COALESCE`), so a second download at another quality never clears a path
+    // that is already on disk. `quality_tier`/`state` are derived by
+    // `recompute_state` afterwards.
     sqlx::query(
         "UPDATE tracks
-            SET state = 'ready', source_format = ?, path_flac = ?, path_320 = ?, path_128 = ?,
-                quality_tier = COALESCE(?, quality_tier),
-                error = NULL, lease_expires_at = NULL, next_attempt_at = NULL, updated_at = ?
+            SET source_format = COALESCE(?, source_format),
+                path_flac = COALESCE(?, path_flac),
+                path_320 = COALESCE(?, path_320),
+                path_128 = COALESCE(?, path_128),
+                error = NULL, lease_expires_at = NULL, next_attempt_at = NULL,
+                terminal_state = NULL, rearm_pending = 0, updated_at = ?
           WHERE isrc = ?",
     )
     .bind(source_format)
     .bind(path_flac)
     .bind(path_320)
     .bind(path_128)
-    .bind(tier)
     .bind(now())
     .bind(isrc)
     .execute(pool)
     .await?;
+    recompute_state(pool, isrc).await?;
     crate::work::finish_ref(pool, crate::work::kind::DOWNLOAD, isrc, now()).await?;
     refresh_orders_for_isrc(pool, isrc).await
 }
 
+/// Record a terminal download outcome (`failed`/`absent`). `error` stays as the
+/// attempt record (never overwritten here). `state` is **not** written: the
+/// outcome is stored in `terminal_state` and `recompute_state` derives the row's
+/// state — a row that still has a servable format (`have != {}`) is *not*
+/// degraded (#699).
 pub async fn mark_terminal(
     pool: &Pool<Sqlite>,
     isrc: &str,
@@ -898,16 +1208,17 @@ pub async fn mark_terminal(
     error: &str,
 ) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE tracks SET state = ?, error = ?, lease_expires_at = NULL,
-                next_attempt_at = NULL, updated_at = ?
+        "UPDATE tracks SET error = ?, terminal_state = ?, lease_expires_at = NULL,
+                next_attempt_at = NULL, rearm_pending = 0, updated_at = ?
           WHERE isrc = ?",
     )
-    .bind(new_state)
     .bind(error)
+    .bind(new_state)
     .bind(now())
     .bind(isrc)
     .execute(pool)
     .await?;
+    recompute_state(pool, isrc).await?;
     crate::work::finish_ref(pool, crate::work::kind::DOWNLOAD, isrc, now()).await?;
     refresh_orders_for_isrc(pool, isrc).await
 }
@@ -1076,12 +1387,10 @@ pub async fn catalogue_album_get(
     pool: &Pool<Sqlite>,
     album_id: &str,
 ) -> anyhow::Result<Option<serde_json::Value>> {
-    let row = sqlx::query(
-        "SELECT payload, fetched_at FROM catalogue_albums WHERE album_id = ?",
-    )
-    .bind(album_id)
-    .fetch_optional(pool)
-    .await?;
+    let row = sqlx::query("SELECT payload, fetched_at FROM catalogue_albums WHERE album_id = ?")
+        .bind(album_id)
+        .fetch_optional(pool)
+        .await?;
     let Some(row) = row else { return Ok(None) };
     let fetched_at: i64 = sqlx::Row::get(&row, "fetched_at");
     if fetched_at < now() - CATALOGUE_ALBUM_TTL {

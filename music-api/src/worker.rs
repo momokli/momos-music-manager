@@ -309,7 +309,8 @@ pub async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
                 }
                 let lease = db::now() + state.config.download_timeout.as_secs() as i64;
                 let sentinel = format!("native:{}", track.isrc);
-                if let Err(e) = db::mark_downloading(&state.pool, &track.isrc, &sentinel, lease).await
+                if let Err(e) =
+                    db::mark_downloading(&state.pool, &track.isrc, &sentinel, lease).await
                 {
                     warn!("{}: mark downloading failed: {e:#}", track.isrc);
                     continue;
@@ -492,12 +493,26 @@ async fn run_native_download(state: &Arc<AppState>, track: &Track) -> Result<()>
         },
     };
 
-    // Per-track wish from the order (`toys` -> mp3-128), else the global
+    // Per-track wish from the order's **demand set** (#699): the highest
+    // requested format that is not already servable from disk (a real upgrade),
+    // falling back to the compatibility `wanted_quality`, then the global
     // default. An unknown value falls back instead of failing the download.
-    let wanted = track
-        .wanted_quality
+    let have = track.formats();
+    let wanted_token = track
+        .wanted_formats()
+        .into_iter()
+        .filter(|f| !have.iter().any(|h| crate::models::format_covers(h, f)))
+        .max_by_key(|f| crate::models::format_rank(f));
+    let wanted = wanted_token
         .as_deref()
+        .and_then(crate::models::token_tier)
         .and_then(crate::deezer_dl::Quality::from_tier)
+        .or_else(|| {
+            track
+                .wanted_quality
+                .as_deref()
+                .and_then(crate::deezer_dl::Quality::from_tier)
+        })
         .unwrap_or(cfg.download_quality);
     let started = std::time::Instant::now();
 

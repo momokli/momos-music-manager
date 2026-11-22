@@ -164,16 +164,20 @@ pub async fn run_downloads(client: &ApiClient, opts: &DownloadOptions) -> Result
 
     // US3: fetch + flat file for every ready ISRC.
     for status in &ready {
-        match fetch_one(client, opts, &mut state, &status.isrc, &preferred, &status.formats, &order.order_id)
-            .await
+        match fetch_one(
+            client,
+            opts,
+            &mut state,
+            &status.isrc,
+            &preferred,
+            &status.formats,
+            &order.order_id,
+        )
+        .await
         {
             Ok(path) => {
                 stats.fetched += 1;
-                println!(
-                    "kellner: downloads: {} -> {}",
-                    status.isrc,
-                    path.display()
-                );
+                println!("kellner: downloads: {} -> {}", status.isrc, path.display());
             }
             Err(e) => {
                 stats.failed += 1;
@@ -193,7 +197,12 @@ async fn poll_until_ready(
     client: &ApiClient,
     isrcs: &[String],
     opts: &DownloadOptions,
-) -> Result<(Vec<TrackStatus>, Vec<String>, Vec<String>, BTreeMap<String, String>)> {
+) -> Result<(
+    Vec<TrackStatus>,
+    Vec<String>,
+    Vec<String>,
+    BTreeMap<String, String>,
+)> {
     let deadline = Instant::now() + Duration::from_secs(opts.timeout_secs);
     let poll = Duration::from_secs(opts.poll_secs.max(1));
 
@@ -208,10 +217,13 @@ async fn poll_until_ready(
         let mut waiting: Vec<String> = Vec::new();
         let mut states: BTreeMap<String, String> = BTreeMap::new();
         for t in &resp.tracks {
-            let label = t
-                .state
-                .clone()
-                .unwrap_or_else(|| if t.unknown { "unknown".into() } else { "pending".into() });
+            let label = t.state.clone().unwrap_or_else(|| {
+                if t.unknown {
+                    "unknown".into()
+                } else {
+                    "pending".into()
+                }
+            });
             states.insert(t.isrc.clone(), label);
             if t.is_ready() {
                 ready.push(t.clone());
@@ -262,11 +274,7 @@ async fn fetch_one(
 /// failed write never leaves a partial file at the final path (AK3.3).
 pub fn write_atomic(root: &Path, isrc: &str, format: &str, bytes: &[u8]) -> Result<PathBuf> {
     let final_path = root.join(format!("{isrc}.{}", extension_for(format)));
-    let tmp = root.join(format!(
-        ".{}.{}.tmp",
-        isrc,
-        std::process::id()
-    ));
+    let tmp = root.join(format!(".{}.{}.tmp", isrc, std::process::id()));
     std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
     if let Err(e) = std::fs::rename(&tmp, &final_path) {
         let _ = std::fs::remove_file(&tmp);
@@ -322,13 +330,7 @@ mod tests {
 
     #[test]
     fn normalise_trims_sorts_dedupes() {
-        let got = normalise_isrcs(&[
-            " b ".into(),
-            "a".into(),
-            "".into(),
-            "b".into(),
-            "  ".into(),
-        ]);
+        let got = normalise_isrcs(&[" b ".into(), "a".into(), "".into(), "b".into(), "  ".into()]);
         assert_eq!(got, vec!["a".to_string(), "b".to_string()]);
     }
 
@@ -341,10 +343,19 @@ mod tests {
 
     #[test]
     fn format_prefers_requested_then_falls_back() {
-        assert_eq!(choose_format("flac", &["flac".into(), "320".into()]), Some("flac".to_string()));
+        assert_eq!(
+            choose_format("flac", &["flac".into(), "320".into()]),
+            Some("flac".to_string())
+        );
         // No flac → next in preference order.
-        assert_eq!(choose_format("flac", &["128".into(), "320".into()]), Some("320".to_string()));
-        assert_eq!(choose_format("320", &["128".into()]), Some("128".to_string()));
+        assert_eq!(
+            choose_format("flac", &["128".into(), "320".into()]),
+            Some("320".to_string())
+        );
+        assert_eq!(
+            choose_format("320", &["128".into()]),
+            Some("128".to_string())
+        );
         // Nothing servable offered.
         assert_eq!(choose_format("flac", &["ogg".into()]), None);
         // Empty list falls back to the preference.
@@ -396,5 +407,30 @@ mod tests {
             ..Default::default()
         };
         assert!(failed.is_failed());
+    }
+
+    /// #699: a delivered format makes a row servable even when its state is
+    /// terminal — the error is only an attempt record, never a blocker.
+    #[test]
+    fn failed_state_with_formats_is_ready() {
+        let status = TrackStatus {
+            isrc: "A".into(),
+            state: Some("failed".into()),
+            formats: vec!["flac".into()],
+            error: Some("track ... is gone (404)".into()),
+            ..Default::default()
+        };
+        assert!(status.is_ready(), "a delivered format is servable");
+        assert!(!status.is_failed(), "a delivered format is never a failure");
+
+        // And the pending/absent variants collapse the same way when formats
+        // are present.
+        let pending = TrackStatus {
+            isrc: "B".into(),
+            state: Some("pending".into()),
+            formats: vec!["128".into(), "flac".into()],
+            ..Default::default()
+        };
+        assert!(pending.is_ready() && !pending.is_failed());
     }
 }

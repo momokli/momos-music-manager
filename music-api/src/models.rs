@@ -42,10 +42,18 @@ pub struct Track {
     /// Set while `downloading`, refreshed as a heartbeat; drives the reaper.
     pub lease_expires_at: Option<i64>,
     /// Highest tier ever requested for this ISRC (`flac` | `mp3-320` | `mp3-128`).
-    /// `None` = whatever `download_quality` says.
+    /// `None` = whatever `download_quality` says. Kept for compatibility; still
+    /// maintained as the highest tier in `wanted_formats`.
     pub wanted_quality: Option<String>,
     /// What is actually on disk (`flac` | `mp3-320` | `mp3-128`).
     pub quality_tier: Option<String>,
+    /// Requested delivery formats for this ISRC, comma-separated
+    /// (`flac,320,128`). Additive across orders — the *demand set* (#699).
+    pub wanted_formats: Option<String>,
+    /// The terminal outcome (`failed` | `absent`) for a row with no servable
+    /// format, written by `mark_terminal`; `NULL` while work may still run. The
+    /// state itself is always derived by `db::recompute_state` (#699).
+    pub terminal_state: Option<String>,
     /// `library` (DJ: analysis wanted) or `toys` (tonie: 128k, no analysis).
     /// Max-merged across orders — `library` wins.
     pub intent: String,
@@ -85,6 +93,84 @@ impl Track {
             "128" => self.path_128.as_deref(),
             _ => None,
         }
+    }
+
+    /// The requested format set (additive demand), parsed from `wanted_formats`.
+    pub fn wanted_formats(&self) -> Vec<String> {
+        parse_formats(self.wanted_formats.as_deref())
+    }
+}
+
+/// Rank of a delivery format token: `flac` > `320` > `128`.
+pub fn format_rank(token: &str) -> u8 {
+    match token {
+        "flac" => 3,
+        "320" => 2,
+        "128" => 1,
+        _ => 0,
+    }
+}
+
+/// `true` when a servable format `have` can satisfy a demand for `wanted`: a
+/// lossless/higher format is transcoded down, so `flac` covers `128`.
+pub fn format_covers(have: &str, wanted: &str) -> bool {
+    format_rank(have) >= format_rank(wanted) && format_rank(wanted) > 0
+}
+
+/// Formats that are on disk for the given path columns (parallel to
+/// [`Track::formats`]).
+pub fn have_formats(
+    path_flac: Option<&str>,
+    path_320: Option<&str>,
+    path_128: Option<&str>,
+) -> Vec<&'static str> {
+    let mut v = Vec::new();
+    if path_flac.is_some() {
+        v.push("flac");
+    }
+    if path_320.is_some() {
+        v.push("320");
+    }
+    if path_128.is_some() {
+        v.push("128");
+    }
+    v
+}
+
+/// Parse a comma-separated format set (`flac,320,128`) into canonical tokens,
+/// dropping blanks and duplicates. Unknown tokens are kept verbatim so a future
+/// format is not silently dropped.
+pub fn parse_formats(raw: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in raw.unwrap_or_default().split(',') {
+        let t = part.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|x| x == t) {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
+
+/// The format token for an order target tier (`mp3-320` → `320`).
+pub fn tier_token(tier: &str) -> Option<&'static str> {
+    match tier {
+        "flac" => Some("flac"),
+        "mp3-320" => Some("320"),
+        "mp3-128" => Some("128"),
+        _ => None,
+    }
+}
+
+/// The store tier for a format token (`320` → `mp3-320`).
+pub fn token_tier(token: &str) -> Option<&'static str> {
+    match token {
+        "flac" => Some("flac"),
+        "320" => Some("mp3-320"),
+        "128" => Some("mp3-128"),
+        _ => None,
     }
 }
 
