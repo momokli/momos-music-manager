@@ -64,17 +64,34 @@ async fn mock_spotify() -> String {
     }
     async fn playlist_items(Path(id): Path<String>) -> Json<Value> {
         let items = match id.as_str() {
-            "pl-owned" => vec![item("trk-p1", "Playlist One", "ISRC-P1"), item("trk-l1", "Liked One", "ISRC-L1")],
+            "pl-owned" => vec![
+                item("trk-p1", "Playlist One", "ISRC-P1"),
+                item("trk-l1", "Liked One", "ISRC-L1"),
+            ],
             _ => vec![],
         };
         Json(json!({ "items": items, "next": null }))
+    }
+
+    /// Batch track objects for `GET /tracks?ids=…` (used by the ISRC backfill).
+    async fn batch_tracks(
+        axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    ) -> Json<Value> {
+        let ids = q.get("ids").cloned().unwrap_or_default();
+        let tracks: Vec<Value> = ids
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|id| json!({ "id": id, "external_ids": { "isrc": "ISRC-FILLED" } }))
+            .collect();
+        Json(json!({ "tracks": tracks }))
     }
 
     let app = Router::new()
         .route("/me", get(me))
         .route("/me/tracks", get(tracks))
         .route("/me/playlists", get(playlists))
-        .route("/playlists/{id}/items", get(playlist_items));
+        .route("/playlists/{id}/items", get(playlist_items))
+        .route("/tracks", get(batch_tracks));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -129,7 +146,9 @@ async fn ingest_classifies_playlists_and_dedups_tracks() {
     let fx = setup().await;
     link_account(&fx.pool, "dave").await;
 
-    let summary = ingest::ingest_user(&fx.pool, &fx.cfg, "dave").await.unwrap();
+    let summary = ingest::ingest_user(&fx.pool, &fx.cfg, "dave")
+        .await
+        .unwrap();
 
     assert_eq!(summary.playlists, 2);
     assert_eq!(summary.followed, 1);
@@ -156,8 +175,139 @@ async fn ingest_classifies_playlists_and_dedups_tracks() {
     assert_eq!(owned_items, 1);
     assert_eq!(followed_items, 0);
 
-    assert_eq!(count(&fx.pool, "SELECT COUNT(*) FROM hub_liked_tracks").await, 2);
-    assert_eq!(count(&fx.pool, "SELECT COUNT(*) FROM hub_playlist_tracks").await, 2);
+    assert_eq!(
+        count(&fx.pool, "SELECT COUNT(*) FROM hub_liked_tracks").await,
+        2
+    );
+    assert_eq!(
+        count(&fx.pool, "SELECT COUNT(*) FROM hub_playlist_tracks").await,
+        2
+    );
+}
+
+#[tokio::test]
+async fn ingest_writes_one_external_id_row_per_track() {
+    let fx = setup().await;
+    link_account(&fx.pool, "dave").await;
+
+    ingest::ingest_user(&fx.pool, &fx.cfg, "dave")
+        .await
+        .unwrap();
+
+    // Playlist/likes ingest used to write only `hub_tracks`, which made those
+    // tracks invisible to discovery, the feature backfill and the track page.
+    assert_eq!(
+        count(&fx.pool, "SELECT COUNT(*) FROM hub_track_external_ids").await,
+        3
+    );
+    assert_eq!(
+        count(
+            &fx.pool,
+            "SELECT COUNT(*) FROM hub_tracks t WHERE NOT EXISTS \
+             (SELECT 1 FROM hub_track_external_ids e WHERE e.track_id = t.id)",
+        )
+        .await,
+        0
+    );
+
+    // `source` records where the track was first seen.
+    let sources: Vec<(String, String)> = sqlx::query_as(
+        "SELECT t.service_track_id, e.source FROM hub_track_external_ids e \
+         JOIN hub_tracks t ON t.id = e.track_id ORDER BY t.service_track_id",
+    )
+    .fetch_all(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        sources,
+        vec![
+            ("trk-l1".to_string(), "likes".to_string()),
+            ("trk-l2".to_string(), "likes".to_string()),
+            ("trk-p1".to_string(), "playlist".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn isrc_backfill_fills_user_owned_tracks_only() {
+    let fx = setup().await;
+    link_account(&fx.pool, "dave").await;
+    let user_id = ingest::ensure_user(&fx.pool, "dave").await.unwrap();
+    sqlx::query(
+        "INSERT INTO hub_playlists (user_id, service, playlist_id, name, items_available, fetched_at)
+         VALUES (?1, 'spotify', 'pl-x', 'X', 1, ?2)",
+    )
+    .bind(user_id)
+    .bind(NOW)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let playlist: i64 =
+        sqlx::query_scalar("SELECT id FROM hub_playlists WHERE playlist_id = 'pl-x'")
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    let owned: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_tracks (service, service_track_id, title, first_seen_at)
+         VALUES ('spotify', 'trk-owned', 'Owned', ?1) RETURNING id",
+    )
+    .bind(NOW)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    let discovery: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_tracks (service, service_track_id, title, first_seen_at)
+         VALUES ('spotify', 'trk-discovery', 'Discovery', ?1) RETURNING id",
+    )
+    .bind(NOW)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position, added_at)
+         VALUES (?1, ?2, 0, ?3)",
+    )
+    .bind(playlist)
+    .bind(owned)
+    .bind(NOW)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+
+    // Dry run reports the candidate but touches nothing.
+    let dry = ingest::backfill_isrc(&fx.pool, &fx.cfg, "dave", true, None, true)
+        .await
+        .unwrap();
+    assert_eq!(dry.candidates, 1);
+    assert_eq!(dry.updated, 1);
+    assert_eq!(dry.batches, 1);
+
+    let before: Option<String> = sqlx::query_scalar("SELECT isrc FROM hub_tracks WHERE id = ?1")
+        .bind(owned)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(before, None);
+
+    let report = ingest::backfill_isrc(&fx.pool, &fx.cfg, "dave", true, None, false)
+        .await
+        .unwrap();
+    assert_eq!(report.updated, 1);
+
+    let filled: Option<String> = sqlx::query_scalar("SELECT isrc FROM hub_tracks WHERE id = ?1")
+        .bind(owned)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(filled.as_deref(), Some("ISRC-FILLED"));
+
+    // Discovery rows are deliberately left alone (resolved lazily).
+    let untouched: Option<String> = sqlx::query_scalar("SELECT isrc FROM hub_tracks WHERE id = ?1")
+        .bind(discovery)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(untouched, None);
 }
 
 #[tokio::test]
@@ -166,8 +316,12 @@ async fn second_user_shares_tracks_without_duplicating_rows() {
     link_account(&fx.pool, "dave").await;
     link_account(&fx.pool, "erin").await;
 
-    ingest::ingest_user(&fx.pool, &fx.cfg, "dave").await.unwrap();
-    ingest::ingest_user(&fx.pool, &fx.cfg, "erin").await.unwrap();
+    ingest::ingest_user(&fx.pool, &fx.cfg, "dave")
+        .await
+        .unwrap();
+    ingest::ingest_user(&fx.pool, &fx.cfg, "erin")
+        .await
+        .unwrap();
 
     // Same global track rows for both users — no duplication.
     assert_eq!(count(&fx.pool, "SELECT COUNT(*) FROM hub_tracks").await, 3);
@@ -192,10 +346,17 @@ async fn re_ingest_replaces_likes_idempotently() {
     let fx = setup().await;
     link_account(&fx.pool, "dave").await;
 
-    ingest::ingest_user(&fx.pool, &fx.cfg, "dave").await.unwrap();
-    ingest::ingest_user(&fx.pool, &fx.cfg, "dave").await.unwrap();
+    ingest::ingest_user(&fx.pool, &fx.cfg, "dave")
+        .await
+        .unwrap();
+    ingest::ingest_user(&fx.pool, &fx.cfg, "dave")
+        .await
+        .unwrap();
 
-    assert_eq!(count(&fx.pool, "SELECT COUNT(*) FROM hub_liked_tracks").await, 2);
+    assert_eq!(
+        count(&fx.pool, "SELECT COUNT(*) FROM hub_liked_tracks").await,
+        2
+    );
     assert_eq!(count(&fx.pool, "SELECT COUNT(*) FROM hub_tracks").await, 3);
     assert_eq!(
         count(&fx.pool, "SELECT COUNT(*) FROM hub_playlist_tracks").await,

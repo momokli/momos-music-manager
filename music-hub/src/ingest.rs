@@ -264,7 +264,7 @@ pub(crate) async fn store_playlist_items(
         let Some(t) = track_object(entry) else {
             continue;
         };
-        let Some(track_id) = upsert_track(pool, t).await? else {
+        let Some(track_id) = upsert_track(pool, t, "playlist").await? else {
             continue;
         };
         sqlx::query(
@@ -343,7 +343,7 @@ pub(crate) async fn store_likes(
         let Some(t) = track_object(entry) else {
             continue;
         };
-        let Some(track_id) = upsert_track(pool, t).await? else {
+        let Some(track_id) = upsert_track(pool, t, "likes").await? else {
             continue;
         };
         sqlx::query(
@@ -542,8 +542,14 @@ fn track_object(entry: &Value) -> Option<&Value> {
     Some(t)
 }
 
-/// Upsert a track object into `hub_tracks`, returning its local id.
-async fn upsert_track(pool: &SqlitePool, t: &Value) -> Result<Option<i64>> {
+/// Upsert a track object into `hub_tracks` and record its Spotify id in
+/// `hub_track_external_ids`, returning the local track id.
+///
+/// The external-id row is written here (not at the call sites) so every path
+/// that ingests a Spotify track keeps the satellite complete. Tracks first seen
+/// through a playlist/likes fetch used to miss it, which hid them from
+/// discovery, the feature backfill and the track page.
+async fn upsert_track(pool: &SqlitePool, t: &Value, source: &str) -> Result<Option<i64>> {
     let Some(service_track_id) = t["id"].as_str() else {
         return Ok(None);
     };
@@ -595,7 +601,148 @@ async fn upsert_track(pool: &SqlitePool, t: &Value) -> Result<Option<i64>> {
     // stays as a display cache; the entity tables are the source of truth.
     crate::artists::upsert_track_artists(pool, id, &t["artists"]).await?;
     crate::artists::upsert_track_album(pool, id, &t["album"]).await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO hub_track_external_ids
+             (track_id, service, external_id, url, source, fetched_at)
+         VALUES (?1, 'spotify', ?2, ?3, ?4, ?5)",
+    )
+    .bind(id)
+    .bind(service_track_id)
+    .bind(format!("https://open.spotify.com/track/{service_track_id}"))
+    .bind(source)
+    .bind(now_iso())
+    .execute(pool)
+    .await?;
     Ok(Some(id))
+}
+
+// ── ISRC backfill ──
+
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsrcFillReport {
+    pub candidates: usize,
+    pub batches: usize,
+    pub updated: usize,
+    /// Spotify answered, but the track object carries no ISRC.
+    pub no_isrc: usize,
+    /// The track id was not returned at all (removed/unavailable).
+    pub missing: usize,
+    pub dry_run: bool,
+}
+
+/// Fill `hub_tracks.isrc` from Spotify's full track objects.
+///
+/// Playlist and likes payloads carry the ISRC, but the simplified objects used
+/// by artist/album crawl do not — those rows were never enriched. With
+/// `user_owned_only` only tracks reachable from a playlist, like or backpack are
+/// resolved; discovery rows stay empty and are filled lazily when someone acts
+/// on them.
+pub async fn backfill_isrc(
+    pool: &SqlitePool,
+    cfg: &Config,
+    slug: &str,
+    user_owned_only: bool,
+    limit: Option<usize>,
+    dry_run: bool,
+) -> Result<IsrcFillReport> {
+    let user_id = ensure_user(pool, slug).await?;
+    let mut token = access_token(pool, cfg, user_id).await?;
+
+    let owned_filter = if user_owned_only {
+        " AND (EXISTS (SELECT 1 FROM hub_playlist_tracks p WHERE p.track_id = t.id)
+                 OR EXISTS (SELECT 1 FROM hub_liked_tracks l WHERE l.track_id = t.id)
+                 OR EXISTS (SELECT 1 FROM hub_backpack_items b
+                             WHERE b.source_kind = 'track' AND b.source_track_id = t.id)
+                 OR EXISTS (SELECT 1 FROM hub_backpack_item_tracks bt WHERE bt.track_id = t.id))"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT t.id, t.service_track_id FROM hub_tracks t
+          WHERE t.service = 'spotify'
+            AND t.service_track_id IS NOT NULL AND TRIM(t.service_track_id) <> ''
+            AND (t.isrc IS NULL OR LENGTH(TRIM(t.isrc)) = 0){owned_filter}
+          ORDER BY t.id
+          LIMIT ?1"
+    );
+    let rows: Vec<(i64, String)> = sqlx::query_as(&sql)
+        .bind(limit.map(|l| l as i64).unwrap_or(-1))
+        .fetch_all(pool)
+        .await?;
+
+    let mut report = IsrcFillReport {
+        candidates: rows.len(),
+        dry_run,
+        ..Default::default()
+    };
+    let total = rows.len();
+
+    for chunk in rows.chunks(50) {
+        report.batches += 1;
+        let ids: Vec<&str> = chunk.iter().map(|(_, sid)| sid.as_str()).collect();
+        let path = format!("/tracks?ids={}", ids.join(","));
+        let (mut status, mut body) = spotify::api_get(&cfg.spotify_api_base, &token, &path).await?;
+        if status == 401 {
+            token = force_refresh(pool, cfg, user_id).await?;
+            (status, body) = spotify::api_get(&cfg.spotify_api_base, &token, &path).await?;
+        }
+        if status != 200 {
+            bail!("Spotify /tracks returned HTTP {status}");
+        }
+
+        let mut by_id: std::collections::HashMap<&str, Option<&str>> =
+            std::collections::HashMap::new();
+        for track in body["tracks"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+            let Some(id) = track["id"].as_str() else {
+                continue;
+            };
+            by_id.insert(id, track["external_ids"]["isrc"].as_str());
+        }
+
+        for (hub_id, sid) in chunk {
+            match by_id.get(sid.as_str()) {
+                None => report.missing += 1,
+                Some(None) => report.no_isrc += 1,
+                Some(Some(isrc)) => {
+                    if !dry_run {
+                        sqlx::query(
+                            "UPDATE hub_tracks SET isrc = ?2 WHERE id = ?1
+                              AND (isrc IS NULL OR LENGTH(TRIM(isrc)) = 0)",
+                        )
+                        .bind(hub_id)
+                        .bind(*isrc)
+                        .execute(pool)
+                        .await?;
+                    }
+                    report.updated += 1;
+                }
+            }
+        }
+
+        // Stay well inside Spotify's rate limit on large runs.
+        if total > 50 && report.batches % 20 == 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+
+    Ok(report)
+}
+
+/// Refresh the stored token even if its recorded expiry still looks valid.
+async fn force_refresh(pool: &SqlitePool, cfg: &Config, user_id: i64) -> Result<String> {
+    let account = load_account(pool, user_id)
+        .await?
+        .context("no linked Spotify account — connect Spotify in the web UI first")?;
+    let (client_id, client_secret) = cfg.spotify_creds()?;
+    let refresh_token = account
+        .refresh_token
+        .context("no refresh token stored — reconnect Spotify in the web UI")?;
+    let tokens = spotify::refresh(client_id, client_secret, &refresh_token)
+        .await
+        .context("refresh Spotify token")?;
+    store_refreshed_tokens(pool, user_id, &tokens).await?;
+    Ok(tokens.access_token)
 }
 
 // ── YouTube ingest ──
@@ -604,23 +751,8 @@ async fn upsert_track(pool: &SqlitePool, t: &Value) -> Result<Option<i64>> {
 /// playlist items), recording its external id too. Used to ingest an unknown
 /// track on the fly from the now-playing poll (#319).
 pub async fn ingest_spotify_item(pool: &SqlitePool, item: &Value) -> Result<Option<i64>> {
-    let Some(id) = upsert_track(pool, item).await? else {
-        return Ok(None);
-    };
-    if let Some(sid) = item["id"].as_str().filter(|s| !s.is_empty()) {
-        sqlx::query(
-            "INSERT OR IGNORE INTO hub_track_external_ids
-                 (track_id, service, external_id, url, source, fetched_at)
-             VALUES (?1, 'spotify', ?2, ?3, 'nowplaying', ?4)",
-        )
-        .bind(id)
-        .bind(sid)
-        .bind(format!("https://open.spotify.com/track/{sid}"))
-        .bind(now_iso())
-        .execute(pool)
-        .await?;
-    }
-    Ok(Some(id))
+    // `upsert_track` records the external id with source `nowplaying`.
+    upsert_track(pool, item, "nowplaying").await
 }
 
 /// Upsert a track from yt-dlp JSON into hub_tracks, returning its local id.
