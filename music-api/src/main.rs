@@ -61,6 +61,38 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Legacy archive relocation (#702). Moves only provably-duplicate legacy
+    // copies under `_archive/` (rename, never delete/copy). `--dry-run` writes
+    // neither file nor row. Never on the boot path: needs file IO + ffmpeg.
+    if std::env::args().skip(1).any(|a| a == "archive-legacy") {
+        let args: Vec<String> = std::env::args().collect();
+        let apply = args.iter().any(|a| a == "--apply");
+        let dry = args.iter().any(|a| a == "--dry-run");
+        if apply == dry {
+            anyhow::bail!("usage: music-api archive-legacy <--dry-run|--apply>");
+        }
+        let pool = connect_db(&config).await?;
+        db::init(&pool).await?;
+        let store = music_api::store::Store::new(
+            config.store_root.clone(),
+            config.store_max_upload_bytes,
+        );
+        music_api::store::init(&pool, &store).await?;
+        let report =
+            music_api::archive::archive_legacy(&pool, &config, &store, apply).await?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if report.aborted {
+            eprintln!(
+                "warning: aborted — {}",
+                report.aborted_reason.as_deref().unwrap_or("unknown reason")
+            );
+            // A partial/aborted relocation is a failure, not a success: signal
+            // it with a non-zero exit code so scripts can detect it.
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+
     // One-shot vault backfill. Deliberately **off the boot path**: the server
     // never blocks on it. Batched, transactional and idempotent — safe to re-run.
     if std::env::args().skip(1).any(|a| a == "backfill-vault") {

@@ -8,6 +8,26 @@ Versioning: per-component tag line `api-v<x.y.z>` (see
 
 ## [Unreleased]
 
+### Changed
+
+- **Legacy archive relocation — `music-api archive-legacy <--dry-run|--apply>`** (#702)
+  — moves provably-duplicate legacy copies under `DATA_DIR/_archive/` (FLAC copies
+  identical to the delivery FLAC → `flac-copies/<ISRC>-<hash8>.flac`; anonymous
+  bundles with a named twin → `duplicate-bundles/<hash>`; MP3 copies identical to
+  the 128 reference → `mp3-copies/<ISRC>/<name>`) and relocates orphan bundles into
+  `tracks/<ISRC>/<ISRC>.stem.m4a`. Duplication is proven by a PCM MD5
+  (`ffmpeg -f md5`), never guessed from tags; a non-identical candidate stays put
+  and is listed in the report. **Nothing is deleted or copied** — only
+  `std::fs::rename` inside the data dataset. `_archive` entries (A/B/D) are
+  recorded as `track_files.role='archived'` with a `stem_part` discriminator for
+  the unique index; a relocated bundle (C) lives in the active track folder and is
+  catalogued as `role='stem'` with `stem_part=NULL`. Untrusted ISRCs / file names
+  (`store_objects`, tags) are validated and confined under the archive/tracks root;
+  an invalid source is skipped. `--dry-run` writes neither file nor row; a second
+  `--apply` is a no-op; an occupied target is skipped (no global abort — only a
+  real I/O failure aborts, with exit code 2). `/storage/stats` reports the `archived`
+  role separately from `stem`.
+
 ## [0.8.0] - 2026-11-22
 
 ### Added
