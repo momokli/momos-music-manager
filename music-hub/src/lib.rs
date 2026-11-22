@@ -14,6 +14,7 @@ pub const GIT_DESCRIBE: &str = env!("BUILD_GIT_DESCRIBE");
 pub const LONG_VERSION: &str =
     concat!(env!("BUILD_VERSION"), " (", env!("BUILD_GIT_DESCRIBE"), ")");
 
+pub mod account;
 pub mod albums;
 pub mod analysis;
 pub mod analyze;
@@ -21,6 +22,7 @@ pub mod analyzer;
 pub mod api;
 pub mod artists;
 pub mod audio;
+pub mod auth;
 pub mod backpack_api;
 pub mod backpacks;
 pub mod clusters;
@@ -41,6 +43,8 @@ pub mod history;
 pub mod hub_ops;
 pub mod ingest;
 pub mod lastfm;
+pub mod mail;
+pub mod mail_tokens;
 pub mod listening;
 pub mod mmm_import;
 pub mod music_api;

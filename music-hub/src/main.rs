@@ -18,8 +18,8 @@ use tokio::net::TcpListener;
 
 use music_hub::config::Config;
 use music_hub::{
-    analyze, analyzer, api, artists, audio, db, features, freqblog, genres, ingest, mmm_import,
-    music_api, settings, spotify, tags, traktor, worker,
+    analyze, analyzer, api, artists, audio, auth, db, features, freqblog, genres, ingest,
+    mail_tokens, mmm_import, music_api, settings, spotify, tags, traktor, worker,
 };
 
 #[derive(Parser)]
@@ -59,8 +59,29 @@ enum Command {
     SetPassword {
         #[arg(long)]
         user: String,
+        /// Password literal. Prefer `--password-stdin`: an argument is visible in
+        /// the process list and ends up in shell history.
+        #[arg(long, conflicts_with = "password_stdin")]
+        password: Option<String>,
+        /// Read the password from stdin (trailing newline stripped).
         #[arg(long)]
-        password: String,
+        password_stdin: bool,
+    },
+    /// Set a user's e-mail address (required for password reset by mail).
+    SetEmail {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        email: String,
+    },
+    /// Print a one-time password-reset link for a user (admin fallback when no
+    /// mail is configured). The token is shown exactly once.
+    Link {
+        #[arg(long)]
+        user: String,
+        /// Slug of the admin issuing the link (stored as `created_by`).
+        #[arg(long)]
+        by: Option<String>,
     },
     /// Queue a full initial load: enable all playlists + (re)fetch likes for all users.
     Backfill,
@@ -178,7 +199,16 @@ async fn main() -> Result<()> {
         Command::Auth { user, port } => cmd_auth(cfg, &user, port).await,
         Command::Ingest { user } => cmd_ingest(cfg, &user).await,
         Command::FetchPlaylists { user } => cmd_fetch_playlists(cfg, &user).await,
-        Command::SetPassword { user, password } => cmd_set_password(cfg, &user, &password).await,
+        Command::SetPassword {
+            user,
+            password,
+            password_stdin,
+        } => {
+            let password = resolve_password(password, password_stdin)?;
+            cmd_set_password(cfg, &user, &password).await
+        }
+        Command::SetEmail { user, email } => cmd_set_email(cfg, &user, &email).await,
+        Command::Link { user, by } => cmd_link(cfg, &user, by.as_deref()).await,
         Command::Backfill => cmd_backfill(cfg).await,
         Command::BackfillArtists => cmd_backfill_artists(cfg).await,
         Command::Features { limit } => cmd_features(cfg, limit).await,
@@ -224,6 +254,7 @@ async fn cmd_serve(cfg: Config, host: Option<String>, port: Option<u16>) -> Resu
         cfg: Arc::new(cfg.clone()),
         oauth_states: Arc::new(Mutex::new(HashMap::new())),
         worker_health,
+        mailer: music_hub::mail::from_config(&cfg),
     };
     let app = api::app(state.clone());
 
@@ -616,18 +647,123 @@ async fn cmd_backfill_artists(cfg: Config) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the password for `set-password` from the flag or stdin.
+fn resolve_password(password: Option<String>, from_stdin: bool) -> Result<String> {
+    let pw = if from_stdin {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+        buf.trim_end_matches(['\r', '\n']).to_string()
+    } else {
+        password.ok_or_else(|| {
+            anyhow::anyhow!("pass --password <pw> or --password-stdin (recommended)")
+        })?
+    };
+    if pw.chars().count() < auth::MIN_PASSWORD_LEN {
+        bail!(
+            "password too short: at least {} characters",
+            auth::MIN_PASSWORD_LEN
+        );
+    }
+    Ok(pw)
+}
+
 async fn cmd_set_password(cfg: Config, slug: &str, password: &str) -> Result<()> {
     let pool = db::connect(&cfg.database_url).await?;
-    let hash = bcrypt::hash(password, 10)?;
-    let res = sqlx::query("UPDATE hub_users SET password_hash = ?2 WHERE slug = ?1 COLLATE NOCASE")
-        .bind(slug)
+    let uid: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM hub_users WHERE slug = ?1 COLLATE NOCASE")
+            .bind(slug)
+            .fetch_optional(&pool)
+            .await?;
+    let Some(uid) = uid else {
+        bail!("user '{slug}' not found");
+    };
+
+    let hash = auth::hash_password(password)?;
+    sqlx::query("UPDATE hub_users SET password_hash = ?2 WHERE id = ?1")
+        .bind(uid)
         .bind(&hash)
         .execute(&pool)
         .await?;
-    if res.rows_affected() == 0 {
-        bail!("user '{slug}' not found");
+
+    // A reset means "the old credential is compromised": no session that was
+    // opened with it may survive.
+    let ended = auth::invalidate_sessions(&pool, uid, None).await?;
+    println!("✓ Passwort für '{slug}' gesetzt ({ended} Session(s) beendet).");
+    Ok(())
+}
+
+async fn cmd_set_email(cfg: Config, slug: &str, email: &str) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    let email = email.trim().to_ascii_lowercase();
+    if !email.contains('@') {
+        bail!("'{email}' does not look like an e-mail address");
     }
-    println!("✓ Passwort für '{slug}' gesetzt.");
+    let uid: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM hub_users WHERE slug = ?1 COLLATE NOCASE")
+            .bind(slug)
+            .fetch_optional(&pool)
+            .await?;
+    let Some(uid) = uid else {
+        bail!("user '{slug}' not found");
+    };
+    let taken: Option<String> =
+        sqlx::query_scalar("SELECT slug FROM hub_users WHERE email = ?1 COLLATE NOCASE AND id <> ?2")
+            .bind(&email)
+            .bind(uid)
+            .fetch_optional(&pool)
+            .await?;
+    if let Some(other) = taken {
+        bail!("address already belongs to user '{other}'");
+    }
+    sqlx::query("UPDATE hub_users SET email = ?2 WHERE id = ?1")
+        .bind(uid)
+        .bind(&email)
+        .execute(&pool)
+        .await?;
+    println!("✓ E-Mail für '{slug}' gesetzt: {email}");
+    Ok(())
+}
+
+/// Mint a reset link and print it once. This is the fallback that keeps password
+/// resets working while no mail relay is configured.
+async fn cmd_link(cfg: Config, slug: &str, by: Option<&str>) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    let row: Option<(i64, Option<String>)> =
+        sqlx::query_as("SELECT id, email FROM hub_users WHERE slug = ?1 COLLATE NOCASE")
+            .bind(slug)
+            .fetch_optional(&pool)
+            .await?;
+    let Some((uid, email)) = row else {
+        bail!("user '{slug}' not found");
+    };
+    let Some(email) = email.filter(|e| !e.trim().is_empty()) else {
+        bail!("user '{slug}' has no e-mail address — set one with `set-email` first");
+    };
+    let created_by: Option<i64> = match by {
+        Some(admin) => {
+            sqlx::query_scalar("SELECT id FROM hub_users WHERE slug = ?1 COLLATE NOCASE")
+                .bind(admin)
+                .fetch_optional(&pool)
+                .await?
+        }
+        None => None,
+    };
+
+    let token = mail_tokens::issue(
+        &pool,
+        Some(uid),
+        &email,
+        mail_tokens::PURPOSE_RESET,
+        chrono::Duration::minutes(mail_tokens::RESET_TTL_MINUTES),
+        created_by,
+    )
+    .await?;
+    println!("Link für '{slug}' ({email}), gültig {} Minuten:", mail_tokens::RESET_TTL_MINUTES);
+    println!(
+        "{}/reset?token={token}",
+        cfg.public_url.trim_end_matches('/')
+    );
+    println!("Nur diese Ausgabe enthält das Token; in der DB steht nur der Hash.");
     Ok(())
 }
 

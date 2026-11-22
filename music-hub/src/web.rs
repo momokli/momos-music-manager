@@ -16,7 +16,7 @@ use sqlx::{QueryBuilder, Row, SqlitePool};
 use crate::api::AppState;
 use crate::spotify;
 
-const SESSION_COOKIE: &str = "hub_session";
+pub const SESSION_COOKIE: &str = "hub_session";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30;
 
 pub fn router(state: AppState) -> Router {
@@ -109,7 +109,7 @@ fn now_iso() -> String {
 
 // ── sessions ────────────────────────────────────────────────────────────────
 
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+pub fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let raw = headers.get(header::COOKIE)?.to_str().ok()?;
     for part in raw.split(';') {
         let part = part.trim();
@@ -210,6 +210,7 @@ struct ErrorPage {
 struct LoginPage {
     error: String,
     registration_open: bool,
+    flash: String,
 }
 
 #[derive(Template)]
@@ -326,10 +327,11 @@ struct SqlPage {
     table_html: String,
 }
 
-fn login_form_html(err: Option<&str>, registration_open: bool) -> Response {
+fn login_form_html(err: Option<&str>, registration_open: bool, flash: &str) -> Response {
     render(&LoginPage {
         error: err.unwrap_or("").to_string(),
         registration_open,
+        flash: flash.to_string(),
     })
 }
 
@@ -3339,9 +3341,9 @@ async fn track_fetch(
     crate::flash::redirect(&format!("/track/{id}"), &msg, "ok")
 }
 
-async fn login_form(State(st): State<AppState>) -> Response {
+async fn login_form(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let open = crate::settings::registration_open(&st.pool).await;
-    login_form_html(None, open)
+    login_form_html(None, open, &crate::flash::from_headers(&headers))
 }
 
 async fn signup_form(State(st): State<AppState>) -> Response {
@@ -3358,20 +3360,27 @@ async fn login_submit(State(st): State<AppState>, Form(c): Form<Creds>) -> Respo
         .ok()
         .flatten();
 
-    let ok = match &row {
-        Some(r) => {
-            let hash: Option<String> = r.get("password_hash");
-            hash.map(|h| bcrypt::verify(&c.password, &h).unwrap_or(false))
-                .unwrap_or(false)
-        }
-        None => false,
+    let (ok, uid, stored) = match &row {
+        Some(r) => (
+            crate::auth::verify_password(&c.password, r.get::<Option<String>, _>("password_hash").as_deref()),
+            r.get::<i64, _>("id"),
+            r.get::<Option<String>, _>("password_hash"),
+        ),
+        None => (false, 0, None),
     };
     if !ok {
         let open = crate::settings::registration_open(&st.pool).await;
-        return login_form_html(Some("Benutzername oder Passwort falsch."), open);
+        return login_form_html(Some("Benutzername oder Passwort falsch."), open, "");
     }
 
-    let uid: i64 = row.unwrap().get("id");
+    // Opportunistic upgrade: a hash below the current work factor is re-written
+    // on the one occasion the plaintext is available. A failure here must never
+    // block a valid login.
+    if let Some(hash) = stored.as_deref() {
+        if let Err(e) = crate::auth::rehash_if_stale(&st.pool, uid, &c.password, hash).await {
+            tracing::warn!("bcrypt rehash failed for user {uid}: {e}");
+        }
+    }
     match create_session(&st.pool, uid).await {
         Ok(tok) => with_cookie(Redirect::to("/").into_response(), session_cookie(&tok)),
         Err(e) => error_page(&format!("Session-Fehler: {e}")),
@@ -3383,14 +3392,15 @@ async fn signup_submit(State(st): State<AppState>, Form(c): Form<Creds>) -> Resp
         return signup_form_html(Some("Die Registrierung ist geschlossen."), false);
     }
     let username = c.username.trim();
-    if username.len() < 2 || c.password.len() < 4 {
-        return signup_form_html(
-            Some("Benutzername (min. 2) und Passwort (min. 4) sind zu kurz."),
-            true,
+    if username.len() < 2 || c.password.chars().count() < crate::auth::MIN_PASSWORD_LEN {
+        let msg = format!(
+            "Benutzername (min. 2) und Passwort (min. {}) sind zu kurz.",
+            crate::auth::MIN_PASSWORD_LEN
         );
+        return signup_form_html(Some(&msg), true);
     }
 
-    let hash = match bcrypt::hash(&c.password, 10) {
+    let hash = match crate::auth::hash_password(&c.password) {
         Ok(h) => h,
         Err(e) => return error_page(&format!("Hash-Fehler: {e}")),
     };

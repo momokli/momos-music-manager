@@ -1,0 +1,36 @@
+{% extends "auth.html" %} {% block title %}Neues Passwort — Spelunke{% endblock %} {%
+block content %}
+<h1>Spelunke</h1>
+<p class="hub-muted">Neues Passwort setzen</p>
+{% if error != "" %}
+<p class="hub-flash-err">{{ error }}</p>
+{% endif %} {% if flash != "" %}
+<p class="hub-flash-err">{{ flash }}</p>
+{% endif %} {% if show_form %}
+<form method="post" action="/reset">
+    <input type="hidden" name="token" value="{{ token }}" />
+    <input
+        name="new_password"
+        type="password"
+        placeholder="Neues Passwort (min. {{ min_len }} Zeichen)"
+        autocomplete="new-password"
+        minlength="{{ min_len }}"
+        autofocus
+        required
+    />
+    <input
+        name="confirm"
+        type="password"
+        placeholder="Neues Passwort wiederholen"
+        autocomplete="new-password"
+        minlength="{{ min_len }}"
+        required
+    />
+    <button type="submit">Passwort speichern</button>
+</form>
+<p class="hub-muted">Alle bestehenden Sitzungen dieses Kontos werden dabei beendet.</p>
+{% else %}
+<p class="hub-muted"><a href="/forgot">Neuen Link anfordern</a></p>
+{% endif %}
+<p class="hub-muted"><a href="/login">Zum Login</a></p>
+{% endblock %}
