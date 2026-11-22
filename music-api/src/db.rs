@@ -298,6 +298,9 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     // the tables above stay the operational queue. See `crate::vault`.
     crate::vault::init(pool).await?;
 
+    // Per-file inventory (#700): additive tables, filled by `archive-backfill`.
+    crate::archive::init(pool).await?;
+
     Ok(())
 }
 

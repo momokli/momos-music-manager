@@ -10,6 +10,16 @@ Versioning: per-component tag line `api-v<x.y.z>` (see
 
 ### Added
 
+- **`track_files` catalogue + `archive-backfill` + `/storage/stats`** (#700) — one
+  additive table maps every physical file to `(isrc, role, stem_part)`; the
+  `music-api archive-backfill <--dry-run|--apply>` CLI fills it from
+  `tracks.path_*`, the object store (bundle ISRC from the tag/column, stem WAVs
+  inherit it by base name) and legacy `store_objects.isrc` copies. Read-only on
+  media files and idempotent: a second `--apply` writes nothing, `--dry-run`
+  writes no rows and lists unattributable files as `unmanaged`.
+  `GET /storage/stats` now aggregates `track_files` only (files/bytes per role,
+  `tracksWithoutFiles`, `incompleteTracks`, `unmanagedFiles`) instead of
+  scanning per request; `servableButNotReady` (#699) stays as a DB-only counter.
 - **Album length in the artist album list** (#621) — `GET /deezer/artist/{id}/albums`
   now carries `seconds` per album, filled from the own catalogue
   (`catalogue_albums.seconds`) in one batched query. `null` while the album is
