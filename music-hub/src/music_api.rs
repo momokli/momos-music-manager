@@ -28,8 +28,11 @@ impl IsrcState {
     pub fn known(&self) -> bool {
         self.error.is_none() && self.state.is_some()
     }
+    /// Available when a delivered format is present (#699); `state == "ready"`
+    /// is the legacy fallback.
     pub fn ready(&self) -> bool {
-        self.state.as_deref() == Some("ready")
+        self.formats.as_ref().is_some_and(|f| !f.is_empty())
+            || self.state.as_deref() == Some("ready")
     }
     pub fn formats_str(&self) -> String {
         self.formats
@@ -52,8 +55,10 @@ pub struct CachedState {
 }
 
 impl CachedState {
+    /// Available when a delivered format is cached (#699); `state == "ready"` is
+    /// the legacy fallback.
     pub fn ready(&self) -> bool {
-        self.state == "ready"
+        !self.formats.is_empty() || self.state == "ready"
     }
 
     /// Human label like `ready · flac` / `pending` / `absent · no data` — the
@@ -180,7 +185,11 @@ pub async fn deezer_artist_albums(
 
 /// `GET /deezer/album/{id}` — metadata plus tracklist (carries the ISRCs).
 pub async fn deezer_album(cfg: &Config, album_id: &str) -> Result<DeezerAlbum> {
-    deezer_get(cfg, &format!("/deezer/album/{}", urlencoding::encode(album_id))).await
+    deezer_get(
+        cfg,
+        &format!("/deezer/album/{}", urlencoding::encode(album_id)),
+    )
+    .await
 }
 
 /// `GET /deezer/search/artist?q=` — name search for the picker.
@@ -426,7 +435,8 @@ pub async fn refresh_states(
             )
             .await;
             refreshed += 1;
-            if state == "ready" {
+            // Availability is the delivered format set (#699), not the state.
+            if st.formats.as_ref().is_some_and(|f| !f.is_empty()) || state == "ready" {
                 ready += 1;
             }
         }
@@ -894,7 +904,9 @@ pub async fn missing_isrcs(pool: &SqlitePool, isrcs: &[String]) -> Vec<String> {
     let mut ready: std::collections::HashSet<String> = std::collections::HashSet::new();
     for chunk in isrcs.chunks(900) {
         let mut qb = sqlx::QueryBuilder::new(
-            "SELECT isrc FROM hub_music_state WHERE state = 'ready' AND isrc IN (",
+            "SELECT isrc FROM hub_music_state
+              WHERE ((formats IS NOT NULL AND formats <> '') OR state = 'ready')
+                AND isrc IN (",
         );
         let mut sep = qb.separated(", ");
         for i in chunk {
@@ -919,8 +931,9 @@ pub async fn cached_counts(pool: &SqlitePool, isrcs: &[String]) -> (usize, usize
     let mut ready = 0usize;
     let mut seen = 0usize;
     for chunk in isrcs.chunks(900) {
-        let mut qb =
-            sqlx::QueryBuilder::new("SELECT isrc, state FROM hub_music_state WHERE isrc IN (");
+        let mut qb = sqlx::QueryBuilder::new(
+            "SELECT isrc, state, formats FROM hub_music_state WHERE isrc IN (",
+        );
         let mut sep = qb.separated(", ");
         for i in chunk {
             sep.push_bind(i.clone());
@@ -929,7 +942,11 @@ pub async fn cached_counts(pool: &SqlitePool, isrcs: &[String]) -> (usize, usize
         for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
             use sqlx::Row;
             seen += 1;
-            if r.get::<Option<String>, _>("state").as_deref() == Some("ready") {
+            // Availability is the delivered format set (#699).
+            let has_formats = r
+                .get::<Option<String>, _>("formats")
+                .is_some_and(|f| !f.trim().is_empty());
+            if has_formats || r.get::<Option<String>, _>("state").as_deref() == Some("ready") {
                 ready += 1;
             }
         }
@@ -1168,7 +1185,11 @@ pub fn parse_musical_key(s: &str) -> Option<String> {
     }
     rest.extend(tail[idx..].iter());
     let pitch = note_pitch(letter, accidental)?;
-    let mode = match rest.trim_start_matches(['-', ' ']).to_ascii_lowercase().as_str() {
+    let mode = match rest
+        .trim_start_matches(['-', ' '])
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "" | "major" | "maj" | "d" | "dur" => 1,
         "m" | "min" | "minor" => 0,
         _ => return None,

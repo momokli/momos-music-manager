@@ -15,6 +15,30 @@ Versioning: per-component tag line `api-v<x.y.z>` (see
   (`catalogue_albums.seconds`) in one batched query. `null` while the album is
   not catalogued, and never baked into the page cache (the hint is re-read per
   request, so it cannot go stale).
+- **`GET /storage/stats` and `repair-states` CLI** (#699) — visibility and repair
+  for the format-completeness fix: `servableButNotReady` (must be `0`) and
+  `pathsMissingOnDisk`, plus `music-api repair-states [--dry-run|--apply]`.
+
+### Fixed
+
+- **Format completeness instead of a quality rank** (#699) — a track is
+  `ready` while any requested format is servable; paths are additive and a
+  failed attempt never degrades a servable row.
+  - `tracks.state` is now derived by a single writer, `db::recompute_state`,
+    from the on-disk formats (`path_*`) and the additive demand set
+    (`tracks.wanted_formats`, new column).
+  - `mark_ready` writes each `path_*` additively (`COALESCE`) — a download at
+    another quality no longer clears a path already on disk.
+  - `mark_terminal` records the outcome in the new `tracks.terminal_state` and
+    keeps `error`; a row with a servable format stays `ready` instead of being
+    degraded to `failed`/`absent` (~2,500 rows in production).
+  - Demand is a **format set** (`wanted_formats`, additive across orders) rather
+    than a scalar tier: re-arm happens only for a genuinely new, not-yet-servable
+    format, and never again for a format that terminally failed.
+  - `kellner` and `music-hub` gate availability on the delivered `formats`, not
+    on `state == "ready"`, so those tracks are fetched and shown again.
+  - `repair-states --apply` stats every path first and only then re-derives the
+    state; `error` is preserved.
 
 ## [0.7.0] - 2026-11-19
 

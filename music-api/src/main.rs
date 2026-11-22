@@ -50,6 +50,26 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // One-shot repair of degraded rows (#699): a track with a `path_*` on disk
+    // is servable and must not stay `failed`/`absent`/`pending`. `--dry-run`
+    // (the default) only reports; `--apply` stats each path and re-derives the
+    // state (never a blind `UPDATE`; `error` is preserved).
+    if std::env::args().skip(1).any(|a| a == "repair-states") {
+        let apply = std::env::args().skip(1).any(|a| a == "--apply");
+        let pool = connect_db(&config).await?;
+        db::init(&pool).await?;
+        let stats = db::repair_states(&pool, apply).await?;
+        println!(
+            "repair-states ({}): {} checked, {} {}, {} with paths missing on disk",
+            if apply { "apply" } else { "dry-run" },
+            stats.checked,
+            stats.repaired,
+            if apply { "repaired" } else { "repairable" },
+            stats.paths_missing_on_disk,
+        );
+        return Ok(());
+    }
+
     for dir in [
         config.data_dir.clone(),
         config.flac_dir(),

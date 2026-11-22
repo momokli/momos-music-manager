@@ -482,6 +482,9 @@ async fn polls_until_ready() {
 async fn failed_state_exits_nonzero() {
     let (url, state) = start_mock().await;
     set_states(&state, &[("USAB12345678", "failed")]);
+    // #699: failure requires an empty format set — a `failed` row that still
+    // has a delivered format is servable.
+    set_formats(&state, "USAB12345678", &[]);
     let tmp = tempfile::tempdir().unwrap();
     let coll = tmp.path().join("collection");
     std::fs::create_dir_all(&coll).unwrap();

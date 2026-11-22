@@ -108,15 +108,27 @@ pub struct TrackStatus {
 
 impl TrackStatus {
     /// `true` once the file is servable.
+    ///
+    /// Availability is a property of the delivered **formats** (#699): a row
+    /// that carries at least one format is servable even when its derived
+    /// `state` is not `ready` (e.g. a failed upgrade attempt on a track that
+    /// still has a lower format on disk). The `state == "ready"` fallback keeps
+    /// older servers working.
     pub fn is_ready(&self) -> bool {
-        self.state.as_deref() == Some("ready") && !self.unknown
+        !self.unknown && (!self.formats.is_empty() || self.state.as_deref() == Some("ready"))
     }
 
-    /// Non-recoverable outcome (explicit failure, error text or unknown ISRC) —
-    /// neither ready nor still pending.
+    /// Non-recoverable outcome — neither ready nor still pending.
+    ///
+    /// A row with a delivered format is never a failure (the error text is only
+    /// an attempt record); failure requires an empty format set *and* a terminal
+    /// state, or an unknown ISRC.
     pub fn is_failed(&self) -> bool {
-        if self.unknown || self.error.as_deref().is_some_and(|e| !e.is_empty()) {
+        if self.unknown {
             return true;
+        }
+        if !self.formats.is_empty() {
+            return false;
         }
         matches!(self.state.as_deref(), Some("failed" | "error" | "absent"))
     }

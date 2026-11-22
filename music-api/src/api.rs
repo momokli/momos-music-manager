@@ -62,6 +62,9 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/tracks", get(get_tracks))
         // Native-queue view + recent service events + worker control.
         .route("/queue", get(get_queue))
+        // Format-completeness visibility (#699): servable-but-not-ready and
+        // paths missing on disk.
+        .route("/storage/stats", get(storage_stats))
         .route("/logs", get(get_logs))
         // Deezer account tier behind the configured ARL (protected).
         .route("/account", get(get_account))
@@ -132,7 +135,12 @@ async fn create_order(
     } else {
         state.config.download_quality.tier()
     };
-    let target = match req.target.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+    let target = match req
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
         Some(raw) => match crate::deezer_dl::Quality::from_tier(raw) {
             Some(q) => q.tier().to_string(),
             None => {
@@ -146,9 +154,15 @@ async fn create_order(
     };
 
     let order_id = uuid::Uuid::new_v4().to_string();
-    if let Err(e) =
-        db::create_order(&state.pool, &order_id, &isrcs, req.priority, &intent, Some(&target))
-            .await
+    if let Err(e) = db::create_order(
+        &state.pool,
+        &order_id,
+        &isrcs,
+        req.priority,
+        &intent,
+        Some(&target),
+    )
+    .await
     {
         tracing::error!("create_order failed: {e:#}");
         return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to create order");
@@ -397,6 +411,25 @@ async fn get_tracks(State(state): State<Arc<AppState>>, Query(q): Query<TracksQu
 async fn get_queue(State(state): State<Arc<AppState>>) -> Response {
     let counts = db::queue_counts(&state.pool).await.unwrap_or_default();
     Json(json!({ "items": [], "counts": counts })).into_response()
+}
+
+/// `GET /storage/stats` — format-completeness visibility (#699).
+///
+/// * `servableButNotReady` — rows with a `path_*` that are not `ready` (the
+///   degradation this issue removes; must be `0`);
+/// * `pathsMissingOnDisk` — rows whose set `path_*` no longer exists (a
+///   filesystem `stat` per path).
+async fn storage_stats(State(state): State<Arc<AppState>>) -> Response {
+    match db::storage_stats(&state.pool).await {
+        Ok(s) => Json(s).into_response(),
+        Err(e) => {
+            tracing::error!("storage_stats failed: {e:#}");
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to read storage stats",
+            )
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
