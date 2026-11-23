@@ -1,3 +1,4 @@
+pub mod seed;
 pub mod testing;
 
 use std::str::FromStr;
