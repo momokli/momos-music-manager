@@ -15,9 +15,7 @@ const ISRC: &str = "USAAA0000009";
 
 /// Mock music-api `/vault/track/{isrc}` with a configurable download satellite.
 async fn mock_vault(state: Option<&'static str>, formats: &'static [&'static str]) -> String {
-    let download = state.map(|s| {
-        json!({ "state": s, "sourceFormat": "flac", "formats": formats })
-    });
+    let download = state.map(|s| json!({ "state": s, "sourceFormat": "flac", "formats": formats }));
     let body = json!({
         "isrc": ISRC,
         "resolved": { "bpm": 126.0, "key": "11m", "camelot": "8A", "source": "essentia" },
@@ -84,9 +82,7 @@ async fn ready_track_page_offers_one_button_per_format() {
         "FLAC button missing: {html}"
     );
     assert!(
-        html.contains(&format!(
-            "/track/{id}/download/check?format=mp3-320"
-        )),
+        html.contains(&format!("/track/{id}/download/check?format=mp3-320")),
         "MP3 320 button missing: {html}"
     );
     assert!(html.contains("FLAC laden"), "FLAC label missing");
@@ -141,7 +137,9 @@ async fn check_redirects_to_the_file_when_ready() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     assert_eq!(
-        resp.headers().get("HX-Redirect").and_then(|v| v.to_str().ok()),
+        resp.headers()
+            .get("HX-Redirect")
+            .and_then(|v| v.to_str().ok()),
         Some(format!("/track/{id}/download?format=flac").as_str())
     );
     assert!(hx_trigger(&resp).contains("\"kind\":\"ok\""));
@@ -233,7 +231,9 @@ async fn check_keeps_the_hyphenated_format() {
         .await
         .unwrap();
     assert_eq!(
-        resp.headers().get("HX-Redirect").and_then(|v| v.to_str().ok()),
+        resp.headers()
+            .get("HX-Redirect")
+            .and_then(|v| v.to_str().ok()),
         Some(format!("/track/{id}/download?format=mp3-320").as_str())
     );
 }

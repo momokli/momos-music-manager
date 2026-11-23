@@ -15,11 +15,11 @@
 //! the ingest paths. Nothing here depends on `tags`/`web`/`pages`.
 
 use askama::Template;
+use axum::Router;
 use axum::extract::{Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
-use axum::Router;
 use serde::Deserialize;
 use sqlx::{QueryBuilder, Row, SqlitePool};
 
@@ -688,8 +688,11 @@ async fn history_page(
     let run_count = runs.len();
     let event_count = events.len();
 
-    let events_filter_active =
-        run.is_some() || change.is_some() || !q.is_empty() || !source.is_empty() || !user.is_empty();
+    let events_filter_active = run.is_some()
+        || change.is_some()
+        || !q.is_empty()
+        || !source.is_empty()
+        || !user.is_empty();
     let run_filter_active = run.is_some();
     let events_reset_href = hist_url(&query_drop(rawq, &["run", "change", "source", "user", "q"]));
     let run_chip_href = hist_url(&query_with(rawq, "run", None));

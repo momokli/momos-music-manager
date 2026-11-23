@@ -92,7 +92,10 @@ async fn insert_sync(pool: &SqlitePool, binding_id: i64) -> i64 {
 }
 
 async fn count(pool: &SqlitePool, sql: &str) -> i64 {
-    sqlx::query_scalar(sql).fetch_one(pool).await.expect("count")
+    sqlx::query_scalar(sql)
+        .fetch_one(pool)
+        .await
+        .expect("count")
 }
 
 #[tokio::test]
@@ -120,7 +123,9 @@ async fn column_defaults() {
     let (_dir, pool) = setup().await;
     let user = insert_user(&pool, "alice").await;
     let pl = insert_playlist(&pool, user, "pl-1").await;
-    insert_binding(&pool, user, "ct1", pl).await.expect("insert");
+    insert_binding(&pool, user, "ct1", pl)
+        .await
+        .expect("insert");
 
     let (kind, format, mode, cap): (String, String, String, i64) = sqlx::query_as(
         "SELECT source_kind, format, mode, cap_seconds FROM hub_tonie_bindings WHERE tonie_id = 'ct1'",
@@ -143,13 +148,21 @@ async fn unique_per_user_and_tonie() {
 
     // Same (user, tonie) again → rejected.
     let dup = insert_binding(&pool, user, "ct1", pl).await;
-    assert!(dup.is_err(), "duplicate (user_id, tonie_id) must be rejected");
+    assert!(
+        dup.is_err(),
+        "duplicate (user_id, tonie_id) must be rejected"
+    );
 
     // A different user may bind the same Tonie id.
     let bob = insert_user(&pool, "bob").await;
     let pl_b = insert_playlist(&pool, bob, "pl-b").await;
-    insert_binding(&pool, bob, "ct1", pl_b).await.expect("other user ok");
-    assert_eq!(count(&pool, "SELECT COUNT(*) FROM hub_tonie_bindings").await, 2);
+    insert_binding(&pool, bob, "ct1", pl_b)
+        .await
+        .expect("other user ok");
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM hub_tonie_bindings").await,
+        2
+    );
 }
 
 #[tokio::test]
@@ -157,14 +170,19 @@ async fn user_delete_cascades() {
     let (_dir, pool) = setup().await;
     let user = insert_user(&pool, "alice").await;
     let pl = insert_playlist(&pool, user, "pl-1").await;
-    insert_binding(&pool, user, "ct1", pl).await.expect("insert");
+    insert_binding(&pool, user, "ct1", pl)
+        .await
+        .expect("insert");
 
     sqlx::query("DELETE FROM hub_users WHERE id = ?1")
         .bind(user)
         .execute(&pool)
         .await
         .expect("delete user");
-    assert_eq!(count(&pool, "SELECT COUNT(*) FROM hub_tonie_bindings").await, 0);
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM hub_tonie_bindings").await,
+        0
+    );
 }
 
 #[tokio::test]
@@ -175,7 +193,9 @@ async fn playlist_delete_keeps_binding() {
     let (_dir, pool) = setup().await;
     let user = insert_user(&pool, "alice").await;
     let pl = insert_playlist(&pool, user, "pl-1").await;
-    insert_binding(&pool, user, "ct1", pl).await.expect("insert");
+    insert_binding(&pool, user, "ct1", pl)
+        .await
+        .expect("insert");
 
     sqlx::query("DELETE FROM hub_playlists WHERE id = ?1")
         .bind(pl)
@@ -218,7 +238,9 @@ async fn source_name_column_defaults_to_null() {
     let (_dir, pool) = setup().await;
     let user = insert_user(&pool, "alice").await;
     let pl = insert_playlist(&pool, user, "pl-1").await;
-    insert_binding(&pool, user, "ct1", pl).await.expect("insert");
+    insert_binding(&pool, user, "ct1", pl)
+        .await
+        .expect("insert");
 
     let name: Option<String> =
         sqlx::query_scalar("SELECT source_name FROM hub_tonie_bindings WHERE tonie_id = 'ct1'")
@@ -242,7 +264,9 @@ async fn fk_enforcement_is_active() {
 
     let user = insert_user(&pool, "alice").await;
     let pl = insert_playlist(&pool, user, "pl-1").await;
-    let binding = insert_binding(&pool, user, "ct1", pl).await.expect("insert");
+    let binding = insert_binding(&pool, user, "ct1", pl)
+        .await
+        .expect("insert");
     insert_sync(&pool, binding).await;
 
     // Deleting the binding must cascade its run log — the FK is live.
@@ -270,7 +294,9 @@ async fn migration_060_rebuild_keeps_binding_and_sync_rows() {
 
     let user = insert_user(&pool, "alice").await;
     let pl = insert_playlist(&pool, user, "pl-1").await;
-    let binding = insert_binding(&pool, user, "ct1", pl).await.expect("binding");
+    let binding = insert_binding(&pool, user, "ct1", pl)
+        .await
+        .expect("binding");
     let sync = insert_sync(&pool, binding).await;
 
     let fk_before: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
@@ -310,7 +336,10 @@ async fn migration_060_rebuild_keeps_binding_and_sync_rows() {
         .fetch_one(&pool)
         .await
         .expect("sync row still present");
-    assert_eq!(kept, binding, "run log must still point at the same binding");
+    assert_eq!(
+        kept, binding,
+        "run log must still point at the same binding"
+    );
 
     // `source_id` lost its FK; the `user_id` FK stays.
     let fk_rows: Vec<(String, String)> = sqlx::query_as(
@@ -342,7 +371,10 @@ async fn migration_060_rebuild_keeps_binding_and_sync_rows() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(idx, 1, "idx_hub_tonie_bindings_user must survive the rebuild");
+    assert_eq!(
+        idx, 1,
+        "idx_hub_tonie_bindings_user must survive the rebuild"
+    );
 
     // The migration re-enables FK enforcement on the connection.
     let fk_after: i64 = sqlx::query_scalar("PRAGMA foreign_keys")

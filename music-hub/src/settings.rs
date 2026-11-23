@@ -256,7 +256,11 @@ pub const SETTINGS: &[SettingSpec] = &[
     text(TONIES_AUTH_BASE, "Tonies Auth-Base (Keycloak)", false),
     text(TONIES_API_BASE, "Tonies API-Base", false),
     text(TONIES_CLIENT_ID, "Tonies Client-ID (Keycloak)", false),
-    text(TONIES_SECRET_KEY, "Tonies Secret-Key (Token-Verschluesselung)", true),
+    text(
+        TONIES_SECRET_KEY,
+        "Tonies Secret-Key (Token-Verschluesselung)",
+        true,
+    ),
     // ── Touch-cascade (#hub-crawl-everything) ───────────────────────────────
     flag(CRAWL_ENABLED, "Touch-Cascade aktiv", "1"),
     num(
@@ -514,11 +518,7 @@ pub const SETTINGS: &[SettingSpec] = &[
     ),
     flag(ENGINE_DESCRIBES_MERKMAL, "Beschreibt: Merkmal", "1"),
     flag(ENGINE_DESCRIBES_SETLIST, "Beschreibt: Setlist", "0"),
-    flag(
-        ENGINE_DESCRIBES_RUMPELKISTE,
-        "Beschreibt: Rumpelkiste",
-        "0",
-    ),
+    flag(ENGINE_DESCRIBES_RUMPELKISTE, "Beschreibt: Rumpelkiste", "0"),
     num(
         ENGINE_SIM_FACTOR,
         "Engine: Faktor Similarity v2 (Digging/Overlap)",

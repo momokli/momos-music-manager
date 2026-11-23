@@ -135,11 +135,7 @@ pub async fn effective_owners(
 /// neither a valid query param nor a stored setting. Used by the track/queue
 /// detail, which keeps its legacy "all owners" default when the scope was never
 /// configured (so existing recommendation links stay backwards compatible).
-pub async fn requested(
-    pool: &SqlitePool,
-    viewer_id: i64,
-    query: Option<&str>,
-) -> Option<TagScope> {
+pub async fn requested(pool: &SqlitePool, viewer_id: i64, query: Option<&str>) -> Option<TagScope> {
     if let Some(scope) = TagScope::parse(query) {
         return Some(scope);
     }
@@ -186,7 +182,10 @@ mod tests {
     #[test]
     fn parse_accepts_only_known_values() {
         assert_eq!(TagScope::parse(Some("own")), Some(TagScope::Own));
-        assert_eq!(TagScope::parse(Some(" Collective ")), Some(TagScope::Collective));
+        assert_eq!(
+            TagScope::parse(Some(" Collective ")),
+            Some(TagScope::Collective)
+        );
         assert_eq!(TagScope::parse(Some("OWN")), Some(TagScope::Own));
         assert_eq!(TagScope::parse(Some("bogus")), None);
         assert_eq!(TagScope::parse(Some("")), None);
@@ -197,7 +196,10 @@ mod tests {
     fn from_setting_defaults_to_own() {
         assert_eq!(TagScope::from_setting(None), TagScope::Own);
         assert_eq!(TagScope::from_setting(Some("bogus")), TagScope::Own);
-        assert_eq!(TagScope::from_setting(Some("collective")), TagScope::Collective);
+        assert_eq!(
+            TagScope::from_setting(Some("collective")),
+            TagScope::Collective
+        );
     }
 
     #[test]

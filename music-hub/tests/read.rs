@@ -28,10 +28,7 @@ async fn users_lists_three_sorted_slugs() {
     let users = v["data"].as_array().expect("data is an array");
     assert_eq!(users.len(), 3, "three seeded users");
 
-    let slugs: Vec<&str> = users
-        .iter()
-        .map(|u| u["slug"].as_str().unwrap())
-        .collect();
+    let slugs: Vec<&str> = users.iter().map(|u| u["slug"].as_str().unwrap()).collect();
     assert_eq!(slugs, vec!["alice", "bob", "carol"]);
 
     let ids: Vec<i64> = users.iter().map(|u| u["id"].as_i64().unwrap()).collect();
@@ -79,25 +76,29 @@ async fn track_detail_reports_presence() {
 
     // alice liked it.
     assert!(
-        presence.iter().any(|p| p["user"] == "alice" && p["source"] == "liked"),
+        presence
+            .iter()
+            .any(|p| p["user"] == "alice" && p["source"] == "liked"),
         "alice liked t_all"
     );
     // alice also has it via her "Deep House" playlist.
     assert!(
-        presence
-            .iter()
-            .any(|p| p["user"] == "alice"
-                && p["source"] == "playlist"
-                && p["playlistName"] == "Deep House"),
+        presence.iter().any(|p| p["user"] == "alice"
+            && p["source"] == "playlist"
+            && p["playlistName"] == "Deep House"),
         "alice has t_all in the Deep House playlist"
     );
     // bob + carol liked it.
     assert!(
-        presence.iter().any(|p| p["user"] == "bob" && p["source"] == "liked"),
+        presence
+            .iter()
+            .any(|p| p["user"] == "bob" && p["source"] == "liked"),
         "bob liked t_all"
     );
     assert!(
-        presence.iter().any(|p| p["user"] == "carol" && p["source"] == "liked"),
+        presence
+            .iter()
+            .any(|p| p["user"] == "carol" && p["source"] == "liked"),
         "carol liked t_all"
     );
 
@@ -127,7 +128,10 @@ async fn track_present_only_via_likes_has_no_playlist_name() {
     assert_eq!(presence.len(), 2, "alice + bob liked t_two");
     for p in presence {
         assert_eq!(p["source"], "liked");
-        assert!(p["playlistName"].is_null(), "no playlistName on a liked-only track");
+        assert!(
+            p["playlistName"].is_null(),
+            "no playlistName on a liked-only track"
+        );
     }
 }
 

@@ -50,9 +50,9 @@ async fn get_page(app: &common::TestApp, cookie: &str) -> String {
 /// The HTML fragment of the card whose track-home link is `/track/{id}`.
 fn card_html(html: &str, id: i64) -> String {
     let anchor = format!("/track/{id}\"");
-    let start = html.find(&anchor).unwrap_or_else(|| {
-        panic!("card for track {id} not found (anchor {anchor} missing)")
-    });
+    let start = html
+        .find(&anchor)
+        .unwrap_or_else(|| panic!("card for track {id} not found (anchor {anchor} missing)"));
     let rest = &html[start..];
     let end = rest.find("</article>").expect("card must close") + "</article>".len();
     rest[..end].to_string()
@@ -81,7 +81,10 @@ async fn page_renders_cards_most_played_first() {
     // Most-played track must be ranked first (rendered before the other one).
     let first = html.find(&format!("/track/{}", app.seed.t_two)).unwrap();
     let second = html.find(&format!("/track/{}", app.seed.t_all)).unwrap();
-    assert!(first < second, "t_two (10 plays) must come before t_all (3)");
+    assert!(
+        first < second,
+        "t_two (10 plays) must come before t_all (3)"
+    );
     assert!(html.contains("#1"), "rank badge missing");
     assert!(html.contains("10 Plays"), "plays count missing");
 

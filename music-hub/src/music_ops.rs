@@ -591,7 +591,10 @@ mod tests {
         }
         .render()
         .unwrap();
-        assert!(!html.contains("Quelle:"), "source badge must be gone: {html}");
+        assert!(
+            !html.contains("Quelle:"),
+            "source badge must be gone: {html}"
+        );
         assert!(html.contains("ARL: HiFi"), "tier missing: {html}");
         assert!(html.contains("(lossless)"), "lossless flag missing: {html}");
     }
@@ -609,7 +612,10 @@ mod tests {
         }
         .render()
         .unwrap();
-        assert!(!html.contains("Quelle:"), "source badge must be gone: {html}");
+        assert!(
+            !html.contains("Quelle:"),
+            "source badge must be gone: {html}"
+        );
         assert!(html.contains("ARL: –"), "placeholder missing: {html}");
     }
 }

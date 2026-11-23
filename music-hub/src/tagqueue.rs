@@ -268,14 +268,8 @@ async fn build_detail(
     tag_scope_raw: Option<&str>,
 ) -> Option<QueueDetail> {
     let requested = crate::scope::requested(&st.pool, me, tag_scope_raw).await;
-    let owners = crate::scope::detail_owners(
-        &st.pool,
-        me,
-        scope.is_mine(),
-        scope_explicit,
-        requested,
-    )
-    .await;
+    let owners =
+        crate::scope::detail_owners(&st.pool, me, scope.is_mine(), scope_explicit, requested).await;
     let row = sqlx::query(
         "SELECT COALESCE(t.title,'') AS title,
                 COALESCE(t.album,'') AS album, t.duration_ms,
@@ -491,7 +485,16 @@ async fn queue_detail(
         return Redirect::to("/login").into_response();
     };
     let scope = crate::recommend::RecScope::parse(q.scope.as_deref());
-    match build_detail(&st, nav.id, id, scope, q.scope.is_some(), q.tag_scope.as_deref()).await {
+    match build_detail(
+        &st,
+        nav.id,
+        id,
+        scope,
+        q.scope.is_some(),
+        q.tag_scope.as_deref(),
+    )
+    .await
+    {
         Some(d) => render(&d),
         None => (StatusCode::NOT_FOUND, "Track nicht gefunden.").into_response(),
     }
@@ -536,7 +539,16 @@ async fn queue_tag(
         let _ = crate::tags::tag_track(&st.pool, &st.cfg, nav.id, id, tag_id).await;
     }
     let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
-    match build_detail(&st, nav.id, id, scope, f.scope.is_some(), f.tag_scope.as_deref()).await {
+    match build_detail(
+        &st,
+        nav.id,
+        id,
+        scope,
+        f.scope.is_some(),
+        f.tag_scope.as_deref(),
+    )
+    .await
+    {
         Some(d) => render(&d),
         None => (StatusCode::NOT_FOUND, "Track nicht gefunden.").into_response(),
     }
@@ -555,7 +567,16 @@ async fn queue_untag(
         let _ = crate::tags::untag_track(&st.pool, &st.cfg, nav.id, id, tag_id).await;
     }
     let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
-    match build_detail(&st, nav.id, id, scope, f.scope.is_some(), f.tag_scope.as_deref()).await {
+    match build_detail(
+        &st,
+        nav.id,
+        id,
+        scope,
+        f.scope.is_some(),
+        f.tag_scope.as_deref(),
+    )
+    .await
+    {
         Some(d) => render(&d),
         None => (StatusCode::NOT_FOUND, "Track nicht gefunden.").into_response(),
     }

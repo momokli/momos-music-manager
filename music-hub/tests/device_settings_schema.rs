@@ -74,14 +74,13 @@ async fn insert_backpack(pool: &SqlitePool, user_id: i64, name: &str) -> i64 {
 }
 
 async fn object_exists(pool: &SqlitePool, kind: &str, name: &str) -> bool {
-    let n: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
-    )
-    .bind(kind)
-    .bind(name)
-    .fetch_one(pool)
-    .await
-    .expect("sqlite_master");
+    let n: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2")
+            .bind(kind)
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .expect("sqlite_master");
     n == 1
 }
 
@@ -229,12 +228,13 @@ async fn comment_template_ref_fk_visible_and_set_null_on_delete() {
     .await
     .expect("insert with reference");
 
-    let stored: Option<i64> =
-        sqlx::query_scalar("SELECT comment_template_id FROM hub_device_settings WHERE device_id = ?1")
-            .bind(did)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let stored: Option<i64> = sqlx::query_scalar(
+        "SELECT comment_template_id FROM hub_device_settings WHERE device_id = ?1",
+    )
+    .bind(did)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(stored, Some(tid), "reference stored");
 
     // A dangling id violates the FK.
@@ -252,12 +252,12 @@ async fn comment_template_ref_fk_visible_and_set_null_on_delete() {
         .execute(&pool)
         .await
         .expect("delete template");
-    let after: Option<i64> =
-        sqlx::query_scalar("SELECT comment_template_id FROM hub_device_settings WHERE device_id = ?1")
-            .bind(did)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let after: Option<i64> = sqlx::query_scalar(
+        "SELECT comment_template_id FROM hub_device_settings WHERE device_id = ?1",
+    )
+    .bind(did)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(after, None, "ON DELETE SET NULL clears the reference");
 }
-

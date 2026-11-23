@@ -36,7 +36,10 @@ pub const PENDING_TTL_SECS: i64 = 15 * 60;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/hub/devices", post(register).get(list))
-        .route("/api/hub/devices/{id}", axum::routing::delete(revoke_handler))
+        .route(
+            "/api/hub/devices/{id}",
+            axum::routing::delete(revoke_handler),
+        )
         .route(
             "/kellner/anheuern",
             get(approval_page).post(approval_submit),
@@ -560,10 +563,7 @@ async fn approval_submit(
             device_name: device.name,
             token: String::new(),
         }),
-        Ok(false) => token_error_page(
-            StatusCode::GONE,
-            "Dieses Gerät wurde bereits angeheuert.",
-        ),
+        Ok(false) => token_error_page(StatusCode::GONE, "Dieses Gerät wurde bereits angeheuert."),
         Err(e) => {
             tracing::warn!(error = %e, "bind device failed");
             err(StatusCode::INTERNAL_SERVER_ERROR, "bind failed")

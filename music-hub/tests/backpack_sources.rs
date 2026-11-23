@@ -102,8 +102,23 @@ async fn backpack_updated_at(pool: &SqlitePool, backpack_id: i64) -> String {
 }
 
 /// (kind, tag, playlist, lens, track) of one persisted row, by item id.
-async fn source_columns(pool: &SqlitePool, item_id: i64) -> (String, Option<i64>, Option<i64>, Option<String>, Option<i64>) {
-    let row: (String, Option<i64>, Option<i64>, Option<String>, Option<i64>) = sqlx::query_as(
+async fn source_columns(
+    pool: &SqlitePool,
+    item_id: i64,
+) -> (
+    String,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+) {
+    let row: (
+        String,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+    ) = sqlx::query_as(
         "SELECT source_kind, source_tag_id, source_playlist_id, source_lens, source_track_id
            FROM hub_backpack_items WHERE id = ?1",
     )
@@ -148,7 +163,12 @@ fn assert_exactly_one(item: &BackpackItem) {
 
 #[test]
 fn source_kind_round_trips_and_rejects_unknown() {
-    for kind in [SourceKind::Tag, SourceKind::Playlist, SourceKind::Lens, SourceKind::Track] {
+    for kind in [
+        SourceKind::Tag,
+        SourceKind::Playlist,
+        SourceKind::Lens,
+        SourceKind::Track,
+    ] {
         let parsed: SourceKind = SourceKind::from_str(kind.as_str()).expect("parse");
         assert_eq!(parsed, kind);
     }
@@ -176,10 +196,18 @@ async fn add_and_list_round_trip_per_kind() {
     let pl = insert_playlist(&pool, user, "pl-1").await;
     let tr = insert_track(&pool, "t-1").await;
 
-    let tag_item = backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
-    let pl_item = backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap();
-    let lens_item = backpacks::add_source(&pool, bp, SourceRef::Lens("newest".into())).await.unwrap();
-    let tr_item = backpacks::add_source(&pool, bp, SourceRef::Track(tr)).await.unwrap();
+    let tag_item = backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
+    let pl_item = backpacks::add_source(&pool, bp, SourceRef::Playlist(pl))
+        .await
+        .unwrap();
+    let lens_item = backpacks::add_source(&pool, bp, SourceRef::Lens("newest".into()))
+        .await
+        .unwrap();
+    let tr_item = backpacks::add_source(&pool, bp, SourceRef::Track(tr))
+        .await
+        .unwrap();
 
     let items = backpacks::list_sources(&pool, bp).await.unwrap();
     assert_eq!(items.len(), 4);
@@ -206,15 +234,32 @@ async fn exactly_one_source_column_per_row() {
     let pl = insert_playlist(&pool, user, "pl-1").await;
     let tr = insert_track(&pool, "t-1").await;
 
-    let tag_item = backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
-    let pl_item = backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap();
-    let lens_item = backpacks::add_source(&pool, bp, SourceRef::Lens("liked".into())).await.unwrap();
-    let tr_item = backpacks::add_source(&pool, bp, SourceRef::Track(tr)).await.unwrap();
+    let tag_item = backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
+    let pl_item = backpacks::add_source(&pool, bp, SourceRef::Playlist(pl))
+        .await
+        .unwrap();
+    let lens_item = backpacks::add_source(&pool, bp, SourceRef::Lens("liked".into()))
+        .await
+        .unwrap();
+    let tr_item = backpacks::add_source(&pool, bp, SourceRef::Track(tr))
+        .await
+        .unwrap();
 
     for id in [tag_item, pl_item, lens_item, tr_item] {
         let (kind, tag_c, pl_c, lens_c, tr_c) = source_columns(&pool, id).await;
-        let set = [tag_c.is_some(), pl_c.is_some(), lens_c.is_some(), tr_c.is_some()];
-        assert_eq!(set.iter().filter(|b| **b).count(), 1, "row {id} kind={kind}");
+        let set = [
+            tag_c.is_some(),
+            pl_c.is_some(),
+            lens_c.is_some(),
+            tr_c.is_some(),
+        ];
+        assert_eq!(
+            set.iter().filter(|b| **b).count(),
+            1,
+            "row {id} kind={kind}"
+        );
         match kind.as_str() {
             "tag" => assert_eq!(tag_c, Some(tag)),
             "playlist" => assert_eq!(pl_c, Some(pl)),
@@ -241,7 +286,11 @@ async fn lens_validation() {
         err.to_string().contains("unknown lens key"),
         "error should name the bad key, got: {err}"
     );
-    assert_eq!(count_items(&pool, bp).await, 1, "no row written for bad lens");
+    assert_eq!(
+        count_items(&pool, bp).await,
+        1,
+        "no row written for bad lens"
+    );
 }
 
 #[tokio::test]
@@ -250,11 +299,19 @@ async fn remove_source_returns_true_then_false() {
     let user = insert_user(&pool, "alice").await;
     let bp = insert_backpack(&pool, user, "B", 0).await;
     let tag = insert_tag(&pool, user, "dark").await;
-    let item = backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
+    let item = backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
 
-    assert!(backpacks::remove_source(&pool, item).await.unwrap(), "first delete removes");
+    assert!(
+        backpacks::remove_source(&pool, item).await.unwrap(),
+        "first delete removes"
+    );
     assert_eq!(count_items(&pool, bp).await, 0);
-    assert!(!backpacks::remove_source(&pool, item).await.unwrap(), "second delete is a no-op");
+    assert!(
+        !backpacks::remove_source(&pool, item).await.unwrap(),
+        "second delete is a no-op"
+    );
 }
 
 #[tokio::test]
@@ -266,9 +323,15 @@ async fn position_preserves_append_order() {
     let t2 = insert_tag(&pool, user, "two").await;
     let t3 = insert_tag(&pool, user, "three").await;
 
-    let a = backpacks::add_source(&pool, bp, SourceRef::Tag(t1)).await.unwrap();
-    let b = backpacks::add_source(&pool, bp, SourceRef::Tag(t2)).await.unwrap();
-    let c = backpacks::add_source(&pool, bp, SourceRef::Tag(t3)).await.unwrap();
+    let a = backpacks::add_source(&pool, bp, SourceRef::Tag(t1))
+        .await
+        .unwrap();
+    let b = backpacks::add_source(&pool, bp, SourceRef::Tag(t2))
+        .await
+        .unwrap();
+    let c = backpacks::add_source(&pool, bp, SourceRef::Tag(t3))
+        .await
+        .unwrap();
 
     let items = backpacks::list_sources(&pool, bp).await.unwrap();
     let ids: Vec<i64> = items.iter().map(|i| i.id).collect();
@@ -285,8 +348,12 @@ async fn cascade_deletes_items() {
     let tag = insert_tag(&pool, user, "dark").await;
     let tr = insert_track(&pool, "t-1").await;
 
-    backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Track(tr)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Track(tr))
+        .await
+        .unwrap();
     assert_eq!(count_items(&pool, bp).await, 2);
 
     // Deleting the source tag cascades to its item.
@@ -295,7 +362,11 @@ async fn cascade_deletes_items() {
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(count_items(&pool, bp).await, 1, "tag delete cascades to item");
+    assert_eq!(
+        count_items(&pool, bp).await,
+        1,
+        "tag delete cascades to item"
+    );
 
     // Deleting the backpack cascades to the remaining items.
     sqlx::query("DELETE FROM hub_backpacks WHERE id = ?1")
@@ -303,7 +374,11 @@ async fn cascade_deletes_items() {
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(count_items(&pool, bp).await, 0, "backpack delete cascades to items");
+    assert_eq!(
+        count_items(&pool, bp).await,
+        0,
+        "backpack delete cascades to items"
+    );
 }
 
 #[tokio::test]
@@ -316,20 +391,30 @@ async fn writes_bump_backpack_updated_at() {
 
     assert_eq!(backpack_updated_at(&pool, bp).await, TS);
 
-    let item = backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
+    let item = backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
     let after_add = backpack_updated_at(&pool, bp).await;
     assert_ne!(after_add, TS, "add_source must bump updated_at");
 
-    backpacks::add_source(&pool, bp, SourceRef::Track(tr)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Track(tr))
+        .await
+        .unwrap();
 
     assert!(backpacks::remove_source(&pool, item).await.unwrap());
     let after_remove = backpack_updated_at(&pool, bp).await;
-    assert!(after_remove > after_add, "remove_source must advance updated_at");
+    assert!(
+        after_remove > after_add,
+        "remove_source must advance updated_at"
+    );
 
     let removed = backpacks::clear_sources(&pool, bp).await.unwrap();
     assert_eq!(removed, 1, "clear_sources reports rows deleted");
     let after_clear = backpack_updated_at(&pool, bp).await;
-    assert!(after_clear > after_remove, "clear_sources must advance updated_at");
+    assert!(
+        after_clear > after_remove,
+        "clear_sources must advance updated_at"
+    );
 }
 
 #[tokio::test]
@@ -367,7 +452,9 @@ async fn unknown_lens_writes_no_row_and_does_not_bump_updated_at() {
 
     let before = backpack_updated_at(&pool, bp).await;
     assert!(
-        backpacks::add_source(&pool, bp, SourceRef::Lens("bogus".into())).await.is_err()
+        backpacks::add_source(&pool, bp, SourceRef::Lens("bogus".into()))
+            .await
+            .is_err()
     );
     assert_eq!(count_items(&pool, bp).await, 0);
     assert_eq!(
@@ -388,9 +475,15 @@ async fn position_is_per_backpack_and_monotonic_after_delete() {
     let t1 = insert_tag(&pool, user, "one").await;
     let t2 = insert_tag(&pool, user, "two").await;
 
-    backpacks::add_source(&pool, a, SourceRef::Tag(t1)).await.unwrap();
-    backpacks::add_source(&pool, b, SourceRef::Tag(t1)).await.unwrap();
-    backpacks::add_source(&pool, b, SourceRef::Tag(t2)).await.unwrap();
+    backpacks::add_source(&pool, a, SourceRef::Tag(t1))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, b, SourceRef::Tag(t1))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, b, SourceRef::Tag(t2))
+        .await
+        .unwrap();
 
     let pos_a: Vec<i64> = backpacks::list_sources(&pool, a)
         .await
@@ -404,14 +497,20 @@ async fn position_is_per_backpack_and_monotonic_after_delete() {
         .iter()
         .map(|i| i.position)
         .collect();
-    assert_eq!(pos_a, vec![1], "each backpack numbers its sources independently");
+    assert_eq!(
+        pos_a,
+        vec![1],
+        "each backpack numbers its sources independently"
+    );
     assert_eq!(pos_b, vec![1, 2]);
 
     // Delete the *first* item: the surviving item keeps position 2 (no compaction)
     // and a fresh append takes MAX+1 = 3.
     let first = backpacks::list_sources(&pool, b).await.unwrap().remove(0);
     assert!(backpacks::remove_source(&pool, first.id).await.unwrap());
-    backpacks::add_source(&pool, b, SourceRef::Tag(t1)).await.unwrap();
+    backpacks::add_source(&pool, b, SourceRef::Tag(t1))
+        .await
+        .unwrap();
 
     let pos_b2: Vec<i64> = backpacks::list_sources(&pool, b)
         .await
@@ -419,7 +518,11 @@ async fn position_is_per_backpack_and_monotonic_after_delete() {
         .iter()
         .map(|i| i.position)
         .collect();
-    assert_eq!(pos_b2, vec![2, 3], "append uses MAX+1; existing positions are not compacted");
+    assert_eq!(
+        pos_b2,
+        vec![2, 3],
+        "append uses MAX+1; existing positions are not compacted"
+    );
 }
 
 /// `clear_sources` returns 0 for an empty backpack and only touches its target.
@@ -437,8 +540,12 @@ async fn clear_sources_empty_and_isolated_to_target_backpack() {
         "clearing an empty backpack deletes nothing"
     );
 
-    backpacks::add_source(&pool, a, SourceRef::Tag(tag)).await.unwrap();
-    backpacks::add_source(&pool, b, SourceRef::Tag(tag)).await.unwrap();
+    backpacks::add_source(&pool, a, SourceRef::Tag(tag))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, b, SourceRef::Tag(tag))
+        .await
+        .unwrap();
 
     assert_eq!(backpacks::clear_sources(&pool, a).await.unwrap(), 1);
     assert_eq!(count_items(&pool, a).await, 0);
@@ -454,8 +561,12 @@ async fn cascade_deletes_playlist_and_track_items() {
     let pl = insert_playlist(&pool, user, "pl-9").await;
     let tr = insert_track(&pool, "t-9").await;
 
-    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Track(tr)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Track(tr))
+        .await
+        .unwrap();
     assert_eq!(count_items(&pool, bp).await, 2);
 
     sqlx::query("DELETE FROM hub_playlists WHERE id = ?1")
@@ -463,14 +574,22 @@ async fn cascade_deletes_playlist_and_track_items() {
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(count_items(&pool, bp).await, 1, "playlist delete cascades to item");
+    assert_eq!(
+        count_items(&pool, bp).await,
+        1,
+        "playlist delete cascades to item"
+    );
 
     sqlx::query("DELETE FROM hub_tracks WHERE id = ?1")
         .bind(tr)
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(count_items(&pool, bp).await, 0, "track delete cascades to item");
+    assert_eq!(
+        count_items(&pool, bp).await,
+        0,
+        "track delete cascades to item"
+    );
 }
 
 /// Removing a non-existent item returns false and must not bump any timestamp.
@@ -498,13 +617,17 @@ async fn add_source_with_unknown_reference_fails_and_writes_nothing() {
     let tr = insert_track(&pool, "t-1").await;
 
     assert!(
-        backpacks::add_source(&pool, bp, SourceRef::Tag(9999)).await.is_err(),
+        backpacks::add_source(&pool, bp, SourceRef::Tag(9999))
+            .await
+            .is_err(),
         "unknown tag id must violate the FK"
     );
     assert_eq!(count_items(&pool, bp).await, 0);
 
     assert!(
-        backpacks::add_source(&pool, 8888, SourceRef::Track(tr)).await.is_err(),
+        backpacks::add_source(&pool, 8888, SourceRef::Track(tr))
+            .await
+            .is_err(),
         "unknown backpack id must violate the FK"
     );
 }
@@ -529,7 +652,10 @@ async fn db_check_rejects_two_source_columns() {
     .bind(TS)
     .execute(&pool)
     .await;
-    assert!(res.is_err(), "the exactly-one-source CHECK must reject two columns");
+    assert!(
+        res.is_err(),
+        "the exactly-one-source CHECK must reject two columns"
+    );
     assert_eq!(count_items(&pool, bp).await, 0);
 }
 
@@ -547,26 +673,66 @@ async fn source_exists_dedups_by_target() {
     let tr = insert_track(&pool, "t-1").await;
 
     // Nothing attached yet.
-    assert!(!backpacks::source_exists(&pool, bp, &SourceRef::Tag(tag)).await.unwrap());
+    assert!(
+        !backpacks::source_exists(&pool, bp, &SourceRef::Tag(tag))
+            .await
+            .unwrap()
+    );
 
-    backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Lens("newest".into())).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Track(tr)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Lens("newest".into()))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Track(tr))
+        .await
+        .unwrap();
 
     // Exact same target -> true.
-    assert!(backpacks::source_exists(&pool, bp, &SourceRef::Tag(tag)).await.unwrap());
-    assert!(backpacks::source_exists(&pool, bp, &SourceRef::Playlist(pl)).await.unwrap());
-    assert!(backpacks::source_exists(&pool, bp, &SourceRef::Lens("newest".into())).await.unwrap());
-    assert!(backpacks::source_exists(&pool, bp, &SourceRef::Track(tr)).await.unwrap());
+    assert!(
+        backpacks::source_exists(&pool, bp, &SourceRef::Tag(tag))
+            .await
+            .unwrap()
+    );
+    assert!(
+        backpacks::source_exists(&pool, bp, &SourceRef::Playlist(pl))
+            .await
+            .unwrap()
+    );
+    assert!(
+        backpacks::source_exists(&pool, bp, &SourceRef::Lens("newest".into()))
+            .await
+            .unwrap()
+    );
+    assert!(
+        backpacks::source_exists(&pool, bp, &SourceRef::Track(tr))
+            .await
+            .unwrap()
+    );
 
     // Same kind, different id/key -> false (no false positive).
     let tag2 = insert_tag(&pool, alice, "bright").await;
-    assert!(!backpacks::source_exists(&pool, bp, &SourceRef::Tag(tag2)).await.unwrap());
-    assert!(!backpacks::source_exists(&pool, bp, &SourceRef::Lens("liked".into())).await.unwrap());
+    assert!(
+        !backpacks::source_exists(&pool, bp, &SourceRef::Tag(tag2))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !backpacks::source_exists(&pool, bp, &SourceRef::Lens("liked".into()))
+            .await
+            .unwrap()
+    );
 
     // Same target in a *different* backpack -> false (scoped per backpack).
-    assert!(!backpacks::source_exists(&pool, other, &SourceRef::Tag(tag)).await.unwrap());
+    assert!(
+        !backpacks::source_exists(&pool, other, &SourceRef::Tag(tag))
+            .await
+            .unwrap()
+    );
 
     // The helper never writes: the dedup probe leaves the row count unchanged.
     assert_eq!(count_items(&pool, bp).await, 4);

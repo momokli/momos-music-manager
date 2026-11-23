@@ -102,7 +102,9 @@ async fn json_body(resp: reqwest::Response) -> (StatusCode, Value) {
 }
 
 async fn get(app: &common::TestApp, cookie: Option<&str>, id: i64) -> (StatusCode, Value) {
-    let mut req = app.client().get(app.url(&format!("/api/hub/devices/{id}/settings")));
+    let mut req = app
+        .client()
+        .get(app.url(&format!("/api/hub/devices/{id}/settings")));
     if let Some(c) = cookie {
         req = req.header("Cookie", c);
     }
@@ -247,7 +249,13 @@ async fn removing_backpack_prunes_only_that_link() {
     let bp1 = backpack(&app, uid, "bp-1").await;
     let bp2 = backpack(&app, uid, "bp-2").await;
 
-    let (s, _) = put(&app, &cookie, did, json!({ "active_backpack_ids": [bp1, bp2] })).await;
+    let (s, _) = put(
+        &app,
+        &cookie,
+        did,
+        json!({ "active_backpack_ids": [bp1, bp2] }),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
 
     let (s, v) = put(&app, &cookie, did, json!({ "active_backpack_ids": [bp2] })).await;
@@ -290,7 +298,13 @@ async fn unknown_placeholder_is_400() {
     let (uid, cookie) = app.user_with_password("ds-alice", "1234").await;
     let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
 
-    let (status, v) = put(&app, &cookie, did, json!({ "comment_template": "{title} {tags}" })).await;
+    let (status, v) = put(
+        &app,
+        &cookie,
+        did,
+        json!({ "comment_template": "{title} {tags}" }),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
     let err = v["error"].as_str().unwrap_or_default();
     assert!(err.contains("{title}"), "names the token: {err}");
@@ -307,7 +321,12 @@ async fn valid_placeholders_and_brace_edge_cases_are_200() {
     let (uid, cookie) = app.user_with_password("ds-alice", "1234").await;
     let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
 
-    for tpl in ["{tags} {bpm} {key} {energy}", "{{tags}}", "pre: {key}", "{{ literal"] {
+    for tpl in [
+        "{tags} {bpm} {key} {energy}",
+        "{{tags}}",
+        "pre: {key}",
+        "{{ literal",
+    ] {
         let (status, v) = put(&app, &cookie, did, json!({ "comment_template": tpl })).await;
         assert_eq!(status, StatusCode::OK, "{tpl:?} rejected: {v}");
     }
@@ -365,7 +384,13 @@ async fn owner_scoping_hides_foreign_and_unknown() {
     let (status, v) = get(&app, Some(&bob_cookie), alice_dev).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
     // Bob PUTting Alice's device → 404.
-    let (status, _) = put(&app, &bob_cookie, alice_dev, json!({ "preferred_format": "mp3" })).await;
+    let (status, _) = put(
+        &app,
+        &bob_cookie,
+        alice_dev,
+        json!({ "preferred_format": "mp3" }),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     // Bob reading his own device is fine (control).
     let (status, _) = get(&app, Some(&bob_cookie), bob_dev).await;
@@ -391,12 +416,18 @@ async fn responses_never_leak_token_hash() {
 
     let (_, v) = put(&app, &cookie, did, json!({ "active_backpack_ids": [bp] })).await;
     let body = v.to_string();
-    assert!(!body.contains(&hash_token(&raw)), "token hash leaked in PUT");
+    assert!(
+        !body.contains(&hash_token(&raw)),
+        "token hash leaked in PUT"
+    );
     assert!(!body.contains(&raw), "token leaked in PUT");
 
     let (_, v) = get(&app, Some(&cookie), did).await;
     let body = v.to_string();
-    assert!(!body.contains(&hash_token(&raw)), "token hash leaked in GET");
+    assert!(
+        !body.contains(&hash_token(&raw)),
+        "token hash leaked in GET"
+    );
     assert!(!body.contains("token_hash"));
 
     // The rendered page must not leak either.
@@ -409,7 +440,10 @@ async fn responses_never_leak_token_hash() {
         .expect("page");
     assert_eq!(resp.status(), StatusCode::OK);
     let html = resp.text().await.expect("html");
-    assert!(!html.contains(&hash_token(&raw)), "token hash leaked in page");
+    assert!(
+        !html.contains(&hash_token(&raw)),
+        "token hash leaked in page"
+    );
     assert!(!html.contains(&raw));
 }
 
@@ -474,7 +508,8 @@ async fn kellner_page_lists_devices_and_form_saves() {
     assert!(html.contains("kellner-1"), "device listed");
 
     // Submit the plain form (repeated active_backpack_ids key).
-    let form = format!("preferred_format=wav&comment_template=hello+world&active_backpack_ids={bp}");
+    let form =
+        format!("preferred_format=wav&comment_template=hello+world&active_backpack_ids={bp}");
     let resp = app
         .client()
         .post(app.url(&format!("/kellner/{did}/settings")))
@@ -495,7 +530,12 @@ async fn kellner_page_lists_devices_and_form_saves() {
 #[tokio::test]
 async fn kellner_page_requires_session() {
     let app = common::spawn().await;
-    let resp = app.client().get(app.url("/kellner")).send().await.expect("page");
+    let resp = app
+        .client()
+        .get(app.url("/kellner"))
+        .send()
+        .await
+        .expect("page");
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let loc = resp
         .headers()
@@ -667,18 +707,39 @@ async fn shared_template_selectable_private_rejected() {
     let private = template(&app, Some(bob), "bob-private", "{tags}", false).await;
 
     // Shared by another user -> selectable.
-    let (status, v) = put(&app, &alice_cookie, did, json!({ "comment_template_id": shared })).await;
+    let (status, v) = put(
+        &app,
+        &alice_cookie,
+        did,
+        json!({ "comment_template_id": shared }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["comment_template_id"], shared);
 
     // Foreign private -> 400, unchanged.
-    let (status, v) = put(&app, &alice_cookie, did, json!({ "comment_template_id": private })).await;
+    let (status, v) = put(
+        &app,
+        &alice_cookie,
+        did,
+        json!({ "comment_template_id": private }),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
     let (_, v) = get(&app, Some(&alice_cookie), did).await;
-    assert_eq!(v["comment_template_id"], shared, "rejected write leaves the ref");
+    assert_eq!(
+        v["comment_template_id"], shared,
+        "rejected write leaves the ref"
+    );
 
     // Unknown id -> 400 too.
-    let (status, _) = put(&app, &alice_cookie, did, json!({ "comment_template_id": 999_999 })).await;
+    let (status, _) = put(
+        &app,
+        &alice_cookie,
+        did,
+        json!({ "comment_template_id": 999_999 }),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // Form POST with the foreign private template -> flash error, no write.
@@ -687,13 +748,18 @@ async fn shared_template_selectable_private_rejected() {
         .post(app.url(&format!("/kellner/{did}/settings")))
         .header("Cookie", &alice_cookie)
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(format!("preferred_format=wav&comment_template_id={private}"))
+        .body(format!(
+            "preferred_format=wav&comment_template_id={private}"
+        ))
         .send()
         .await
         .expect("form post");
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let (_, v) = get(&app, Some(&alice_cookie), did).await;
-    assert_eq!(v["comment_template_id"], shared, "form reject leaves the ref");
+    assert_eq!(
+        v["comment_template_id"], shared,
+        "form reject leaves the ref"
+    );
     assert_eq!(v["preferred_format"], "flac", "nothing written");
 }
 
@@ -728,9 +794,15 @@ async fn kellner_form_saves_template_and_page_previews() {
         .expect("page");
     assert_eq!(resp.status(), StatusCode::OK);
     let html = resp.text().await.expect("html");
-    assert!(html.contains("name=\"comment_template_id\""), "select rendered");
+    assert!(
+        html.contains("name=\"comment_template_id\""),
+        "select rendered"
+    );
     assert!(html.contains("Mix-Key"), "option rendered");
-    assert!(html.contains("Vorschau: {key} / {bpm}"), "preview line: {html}");
+    assert!(
+        html.contains("Vorschau: {key} / {bpm}"),
+        "preview line: {html}"
+    );
 }
 
 /// #669: an explicit clear drops the reference; the resolution chain then falls
@@ -758,17 +830,24 @@ async fn resolution_after_clear_falls_back_to_legacy() {
     );
 
     // Explicit clear via the JSON API.
-    let (status, v) = put(&app, &cookie, did, json!({ "clear_comment_template": true })).await;
+    let (status, v) = put(
+        &app,
+        &cookie,
+        did,
+        json!({ "clear_comment_template": true }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert!(v["comment_template_id"].is_null(), "reference cleared: {v}");
 
     // The DB column is really NULL, not merely masked in the response.
-    let stored: Option<i64> =
-        sqlx::query_scalar("SELECT comment_template_id FROM hub_device_settings WHERE device_id = ?1")
-            .bind(did)
-            .fetch_one(&app.pool)
-            .await
-            .expect("row");
+    let stored: Option<i64> = sqlx::query_scalar(
+        "SELECT comment_template_id FROM hub_device_settings WHERE device_id = ?1",
+    )
+    .bind(did)
+    .fetch_one(&app.pool)
+    .await
+    .expect("row");
     assert_eq!(stored, None, "column NULL after clear");
 
     // Resolution falls back to the legacy free text (export + preview use it).
@@ -830,12 +909,13 @@ async fn kellner_form_clears_reference_with_zero_option() {
 
     let (_, v) = get(&app, Some(&cookie), did).await;
     assert!(v["comment_template_id"].is_null(), "reference cleared: {v}");
-    let stored: Option<i64> =
-        sqlx::query_scalar("SELECT comment_template_id FROM hub_device_settings WHERE device_id = ?1")
-            .bind(did)
-            .fetch_one(&app.pool)
-            .await
-            .expect("row");
+    let stored: Option<i64> = sqlx::query_scalar(
+        "SELECT comment_template_id FROM hub_device_settings WHERE device_id = ?1",
+    )
+    .bind(did)
+    .fetch_one(&app.pool)
+    .await
+    .expect("row");
     assert_eq!(stored, None, "column NULL after form clear");
 }
 
@@ -866,6 +946,8 @@ async fn clear_and_id_conflict_is_400_without_write() {
     );
 
     let (_, v) = get(&app, Some(&cookie), did).await;
-    assert_eq!(v["comment_template_id"], tid, "rejected write leaves the ref");
+    assert_eq!(
+        v["comment_template_id"], tid,
+        "rejected write leaves the ref"
+    );
 }
-

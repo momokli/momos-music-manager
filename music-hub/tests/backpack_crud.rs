@@ -102,7 +102,9 @@ async fn create_trims_and_rejects_empty_and_duplicates() {
     let bob = insert_user(&pool, "bob").await;
 
     // Trimming: the stored name is the trimmed one.
-    let id = backpacks::create_backpack(&pool, alice, "  Chill  ").await.unwrap();
+    let id = backpacks::create_backpack(&pool, alice, "  Chill  ")
+        .await
+        .unwrap();
     let bps = backpacks::list_backpacks(&pool, alice).await.unwrap();
     assert_eq!(bps.len(), 1);
     assert_eq!(bps[0].name, "Chill");
@@ -111,18 +113,26 @@ async fn create_trims_and_rejects_empty_and_duplicates() {
 
     // Case-insensitive duplicate of the *same* user is rejected, no insert.
     assert!(
-        backpacks::create_backpack(&pool, alice, "chill").await.is_err(),
+        backpacks::create_backpack(&pool, alice, "chill")
+            .await
+            .is_err(),
         "case-insensitive duplicate rejected"
     );
     assert_eq!(backpack_count(&pool, alice).await, 1, "no second row");
 
     // Empty / whitespace-only rejected.
     assert!(backpacks::create_backpack(&pool, alice, "").await.is_err());
-    assert!(backpacks::create_backpack(&pool, alice, "   ").await.is_err());
+    assert!(
+        backpacks::create_backpack(&pool, alice, "   ")
+            .await
+            .is_err()
+    );
     assert_eq!(backpack_count(&pool, alice).await, 1);
 
     // The same name is fine for another user.
-    backpacks::create_backpack(&pool, bob, "chill").await.unwrap();
+    backpacks::create_backpack(&pool, bob, "chill")
+        .await
+        .unwrap();
     assert_eq!(backpack_count(&pool, bob).await, 1);
 }
 
@@ -136,12 +146,22 @@ async fn rename_enforces_ownership_and_bumps_updated_at() {
     let bob_bp = insert_backpack(&pool, bob, "Bob's", 0).await;
 
     // Renaming to another of the user's names is a duplicate error.
-    assert!(backpacks::rename_backpack(&pool, alice, a, "B").await.is_err());
+    assert!(
+        backpacks::rename_backpack(&pool, alice, a, "B")
+            .await
+            .is_err()
+    );
     // Empty name rejected.
-    assert!(backpacks::rename_backpack(&pool, alice, a, "  ").await.is_err());
+    assert!(
+        backpacks::rename_backpack(&pool, alice, a, "  ")
+            .await
+            .is_err()
+    );
 
     // Trims and bumps updated_at.
-    backpacks::rename_backpack(&pool, alice, a, "  Alpha  ").await.unwrap();
+    backpacks::rename_backpack(&pool, alice, a, "  Alpha  ")
+        .await
+        .unwrap();
     let (name, updated): (String, String) =
         sqlx::query_as("SELECT name, updated_at FROM hub_backpacks WHERE id = ?1")
             .bind(a)
@@ -152,23 +172,30 @@ async fn rename_enforces_ownership_and_bumps_updated_at() {
     assert_ne!(updated, TS, "updated_at bumped on rename");
 
     // Case-insensitive clash also rejected.
-    assert!(backpacks::rename_backpack(&pool, alice, a, "b").await.is_err());
+    assert!(
+        backpacks::rename_backpack(&pool, alice, a, "b")
+            .await
+            .is_err()
+    );
 
     // Foreign / missing target: error, no write.
     assert!(
-        backpacks::rename_backpack(&pool, alice, bob_bp, "hacked").await.is_err(),
+        backpacks::rename_backpack(&pool, alice, bob_bp, "hacked")
+            .await
+            .is_err(),
         "cross-user rename rejected"
     );
-    let bob_name: String =
-        sqlx::query_scalar("SELECT name FROM hub_backpacks WHERE id = ?1")
-            .bind(bob_bp)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let bob_name: String = sqlx::query_scalar("SELECT name FROM hub_backpacks WHERE id = ?1")
+        .bind(bob_bp)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(bob_name, "Bob's", "foreign backpack untouched");
 
     assert!(
-        backpacks::rename_backpack(&pool, alice, 999_999, "ghost").await.is_err(),
+        backpacks::rename_backpack(&pool, alice, 999_999, "ghost")
+            .await
+            .is_err(),
         "missing target rejected"
     );
     let _ = b; // keep B alive (used as duplicate target above)
@@ -184,13 +211,23 @@ async fn delete_cascades_and_enforces_ownership() {
 
     // Give A a source so CASCADE is observable.
     let tag = insert_tag(&pool, alice, "dark").await;
-    backpacks::add_source(&pool, a, SourceRef::Tag(tag)).await.unwrap();
+    backpacks::add_source(&pool, a, SourceRef::Tag(tag))
+        .await
+        .unwrap();
     assert_eq!(item_count(&pool, a).await, 1);
 
     // Foreign / missing -> false, nothing removed.
-    assert!(!backpacks::delete_backpack(&pool, alice, bob_bp).await.unwrap());
+    assert!(
+        !backpacks::delete_backpack(&pool, alice, bob_bp)
+            .await
+            .unwrap()
+    );
     assert_eq!(backpack_count(&pool, bob).await, 1);
-    assert!(!backpacks::delete_backpack(&pool, alice, 999_999).await.unwrap());
+    assert!(
+        !backpacks::delete_backpack(&pool, alice, 999_999)
+            .await
+            .unwrap()
+    );
 
     // Own backpack -> true, items cascade away.
     assert!(backpacks::delete_backpack(&pool, alice, a).await.unwrap());
@@ -271,7 +308,10 @@ async fn http_create_then_duplicate_flash() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
     assert_eq!(location(&resp), "/backpacks");
-    assert!(flash_cookie(&resp).starts_with("hub_flash=ok:"), "flash on duplicate");
+    assert!(
+        flash_cookie(&resp).starts_with("hub_flash=ok:"),
+        "flash on duplicate"
+    );
 
     let body = get_backpacks(&app, &cookie).await;
     assert_eq!(count_cards(&body), 1, "no second entry after duplicate");
@@ -309,9 +349,15 @@ async fn http_rename_and_foreign_noop() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
     assert_eq!(location(&resp), "/backpacks");
-    assert!(flash_cookie(&resp).starts_with("hub_flash=ok:"), "flash on foreign rename");
+    assert!(
+        flash_cookie(&resp).starts_with("hub_flash=ok:"),
+        "flash on foreign rename"
+    );
     let body = get_backpacks(&app, &alice_cookie).await;
-    assert!(body.contains("New") && !body.contains("Stolen"), "foreign rename had no effect");
+    assert!(
+        body.contains("New") && !body.contains("Stolen"),
+        "foreign rename had no effect"
+    );
 
     let _ = bob_bp;
 }
@@ -334,7 +380,10 @@ async fn http_delete_removes_only_own() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
     assert_eq!(location(&resp), "/backpacks");
-    assert!(flash_cookie(&resp).starts_with("hub_flash=ok:"), "flash on foreign delete");
+    assert!(
+        flash_cookie(&resp).starts_with("hub_flash=ok:"),
+        "flash on foreign delete"
+    );
     let bob_body = get_backpacks(&app, &bob_cookie).await;
     assert!(bob_body.contains("Survivor"), "foreign backpack survives");
 
@@ -372,7 +421,10 @@ async fn http_toggle_active_and_foreign_flash() {
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
     assert_eq!(location(&resp), "/backpacks");
     assert_eq!(
-        backpacks::active_backpack(&app.pool, alice_id).await.unwrap().map(|b| b.id),
+        backpacks::active_backpack(&app.pool, alice_id)
+            .await
+            .unwrap()
+            .map(|b| b.id),
         Some(bp1)
     );
 
@@ -384,7 +436,10 @@ async fn http_toggle_active_and_foreign_flash() {
         .await
         .unwrap();
     assert!(
-        backpacks::active_backpack(&app.pool, alice_id).await.unwrap().is_none(),
+        backpacks::active_backpack(&app.pool, alice_id)
+            .await
+            .unwrap()
+            .is_none(),
         "second toggle deactivates"
     );
 
@@ -406,7 +461,10 @@ async fn http_toggle_active_and_foreign_flash() {
     .unwrap();
     assert_eq!(active_rows, 1, "at most one active row");
     assert_eq!(
-        backpacks::active_backpack(&app.pool, alice_id).await.unwrap().map(|b| b.id),
+        backpacks::active_backpack(&app.pool, alice_id)
+            .await
+            .unwrap()
+            .map(|b| b.id),
         Some(bp1)
     );
 
@@ -420,14 +478,23 @@ async fn http_toggle_active_and_foreign_flash() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
     assert_eq!(location(&resp), "/backpacks");
-    assert!(flash_cookie(&resp).starts_with("hub_flash=ok:"), "flash on foreign toggle");
+    assert!(
+        flash_cookie(&resp).starts_with("hub_flash=ok:"),
+        "flash on foreign toggle"
+    );
     assert_eq!(
-        backpacks::active_backpack(&app.pool, alice_id).await.unwrap().map(|b| b.id),
+        backpacks::active_backpack(&app.pool, alice_id)
+            .await
+            .unwrap()
+            .map(|b| b.id),
         Some(bp1),
         "foreign toggle left Alice's active backpack intact"
     );
     assert!(
-        backpacks::active_backpack(&app.pool, bob_id).await.unwrap().is_none(),
+        backpacks::active_backpack(&app.pool, bob_id)
+            .await
+            .unwrap()
+            .is_none(),
         "no silent foreign activation"
     );
     let body = get_backpacks(&app, &alice_cookie).await;
@@ -472,7 +539,11 @@ async fn http_auth_gate_redirects_to_login() {
         ("delete", delete),
         ("toggle", toggle),
     ] {
-        assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER, "{name} status");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::SEE_OTHER,
+            "{name} status"
+        );
         assert_eq!(location(&resp), "/login", "{name} redirects to login");
     }
 }

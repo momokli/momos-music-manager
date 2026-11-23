@@ -188,7 +188,10 @@ async fn retry(State(st): State<AppState>, headers: HeaderMap) -> Response {
     };
 
     let (msg, kind) = if playlists == 0 && likes == 0 {
-        ("Nichts zu tun - keine fehlgeschlagenen Jobs".to_string(), "info")
+        (
+            "Nichts zu tun - keine fehlgeschlagenen Jobs".to_string(),
+            "info",
+        )
     } else {
         (
             format!("{playlists} Playlists, {likes} Likes erneut eingereiht"),

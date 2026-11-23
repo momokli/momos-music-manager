@@ -160,14 +160,18 @@ fn client() -> Result<reqwest::Client> {
 /// Adds `wait=20` so a track FreqBlog has to analyse on demand (`202`) is
 /// usually returned inline (`200`) in the same request — one quota unit, one
 /// round-trip.
-pub async fn lookup(
-    cfg: &Config,
-    isrc: Option<&str>,
-    artist: &str,
-    title: &str,
-) -> Result<Lookup> {
-    let Some(key) = cfg.freqblog_api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) else {
-        return Ok(Lookup { feature: None, charged: 0, stop: true });
+pub async fn lookup(cfg: &Config, isrc: Option<&str>, artist: &str, title: &str) -> Result<Lookup> {
+    let Some(key) = cfg
+        .freqblog_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    else {
+        return Ok(Lookup {
+            feature: None,
+            charged: 0,
+            stop: true,
+        });
     };
     let isrc = isrc.map(str::trim).filter(|s| !s.is_empty());
 
@@ -206,14 +210,30 @@ pub async fn lookup(
                 acousticness: None,
                 loudness_db: None,
             });
-            Ok(Lookup { feature: Some(body.into_feature()), charged: 1, stop: false })
+            Ok(Lookup {
+                feature: Some(body.into_feature()),
+                charged: 1,
+                stop: false,
+            })
         }
         // 202 = queued for on-demand analysis; billed, retry later.
-        202 => Ok(Lookup { feature: None, charged: 1, stop: false }),
+        202 => Ok(Lookup {
+            feature: None,
+            charged: 1,
+            stop: false,
+        }),
         // 404 = no match anywhere (free). Mark as tried so we don't re-query.
-        404 => Ok(Lookup { feature: None, charged: 0, stop: false }),
+        404 => Ok(Lookup {
+            feature: None,
+            charged: 0,
+            stop: false,
+        }),
         // 429 = quota or concurrency wall; 401/403 = auth/tier. Stop.
-        _ => Ok(Lookup { feature: None, charged: 0, stop: true }),
+        _ => Ok(Lookup {
+            feature: None,
+            charged: 0,
+            stop: true,
+        }),
     }
 }
 

@@ -432,5 +432,8 @@ async fn order_all_redirects_with_flash_when_unconfigured() {
         .filter_map(|v| v.to_str().ok())
         .find(|v| v.starts_with("hub_flash="))
         .unwrap_or_default();
-    assert!(flash.starts_with("hub_flash="), "should carry a flash cookie");
+    assert!(
+        flash.starts_with("hub_flash="),
+        "should carry a flash cookie"
+    );
 }

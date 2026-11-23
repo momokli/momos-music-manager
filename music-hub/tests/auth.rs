@@ -103,9 +103,7 @@ async fn me_without_cookie_is_unauthorized() {
 #[tokio::test]
 async fn login_with_wrong_password_rerenders_form() {
     let app = common::spawn().await;
-    let _ = app
-        .user_with_password("erin", "correct-horse")
-        .await;
+    let _ = app.user_with_password("erin", "correct-horse").await;
 
     let resp = app
         .client()
@@ -126,9 +124,7 @@ async fn login_with_wrong_password_rerenders_form() {
 #[tokio::test]
 async fn login_username_is_case_insensitive() {
     let app = common::spawn().await;
-    let _ = app
-        .user_with_password("CarolTest", "carolpass")
-        .await;
+    let _ = app.user_with_password("CarolTest", "carolpass").await;
 
     let resp = app
         .client()

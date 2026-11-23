@@ -70,7 +70,9 @@ async fn tagging_syncs_to_linked_playlist() {
     .await
     .unwrap();
     // (The seed may already contain it; record the baseline.)
-    tags::tag_track(&app.pool, &app.cfg, alice, track, tag).await.unwrap();
+    tags::tag_track(&app.pool, &app.cfg, alice, track, tag)
+        .await
+        .unwrap();
 
     let after: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM hub_playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",

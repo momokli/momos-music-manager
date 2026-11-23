@@ -170,6 +170,11 @@ pub async fn seed(pool: &SqlitePool) -> Result<Seed> {
     // real ingest path does this atomically; tests insert raw rows).
     crate::artists::backfill_artist_entities(pool).await?;
 
+    // Seed default tag types for test users (required by migration 070)
+    crate::tagtypes::seed_types(pool, alice).await?;
+    crate::tagtypes::seed_types(pool, bob).await?;
+    crate::tagtypes::seed_types(pool, carol).await?;
+
     Ok(Seed {
         alice,
         bob,

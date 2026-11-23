@@ -142,7 +142,10 @@ async fn umlaut_flash_cookie_round_trips_and_renders() {
     assert!(clear.starts_with("hub_flash=;"), "cookie cleared: {clear}");
     assert!(clear.contains("Max-Age=0"), "cleared immediately: {clear}");
     let body = page.text().await.unwrap();
-    assert!(body.contains("id=\"hub-flash-init\""), "flash block rendered");
+    assert!(
+        body.contains("id=\"hub-flash-init\""),
+        "flash block rendered"
+    );
     assert!(
         body.contains(&format!("data-msg=\"{msg}\"")),
         "umlaut flash text rendered verbatim"
@@ -166,7 +169,10 @@ async fn double_reload_shows_toast_once() {
         .unwrap();
     assert!(first_flash(&first).contains("Max-Age=0"), "first clears");
     let first_body = first.text().await.unwrap();
-    assert!(first_body.contains("id=\"hub-flash-init\""), "first shows toast");
+    assert!(
+        first_body.contains("id=\"hub-flash-init\""),
+        "first shows toast"
+    );
     assert!(first_body.contains("data-msg=\"Doppel-Reload\""));
 
     // Browser sends only the session cookie now (flash cookie was cleared).
@@ -208,4 +214,3 @@ async fn request_without_cookie_sets_no_clear_header() {
         "no hub_flash Set-Cookie without a flash cookie"
     );
 }
-

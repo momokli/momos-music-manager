@@ -412,7 +412,14 @@ pub async fn sync_tag_to_playlists(
             continue;
         }
         let Some(uri) = uri.as_deref() else {
-            record_push(pool, s.playlist_id, "skipped", Some("kein Spotify-Track"), "add").await;
+            record_push(
+                pool,
+                s.playlist_id,
+                "skipped",
+                Some("kein Spotify-Track"),
+                "add",
+            )
+            .await;
             continue;
         };
         if s.remote_id.is_empty() {
@@ -434,8 +441,14 @@ pub async fn sync_tag_to_playlists(
             match crate::ingest::access_token(pool, cfg, user_id).await {
                 Ok(t) => token = Some(t),
                 Err(e) => {
-                    record_push(pool, s.playlist_id, "error", Some(&short(&e.to_string())), "add")
-                        .await;
+                    record_push(
+                        pool,
+                        s.playlist_id,
+                        "error",
+                        Some(&short(&e.to_string())),
+                        "add",
+                    )
+                    .await;
                     continue;
                 }
             }
@@ -509,7 +522,14 @@ pub async fn unsync_tag_from_playlists(
         // keep_on_remove: keep the tag link (archive), do NOT touch Spotify.
         if s.keep_on_remove {
             let _ = archive_tag(pool, tag_id, track_id, Some(s.playlist_id)).await;
-            record_push(pool, s.playlist_id, "skipped", Some("keep_on_remove"), "remove").await;
+            record_push(
+                pool,
+                s.playlist_id,
+                "skipped",
+                Some("keep_on_remove"),
+                "remove",
+            )
+            .await;
             continue;
         }
         let in_playlist = sqlx::query_scalar::<_, i64>(
@@ -523,7 +543,14 @@ pub async fn unsync_tag_from_playlists(
         .flatten()
         .is_some();
         if !in_playlist {
-            record_push(pool, s.playlist_id, "skipped", Some("nicht in Playlist"), "remove").await;
+            record_push(
+                pool,
+                s.playlist_id,
+                "skipped",
+                Some("nicht in Playlist"),
+                "remove",
+            )
+            .await;
             continue;
         }
         if !(s.is_owned || s.collaborative) {
@@ -538,8 +565,14 @@ pub async fn unsync_tag_from_playlists(
             .bind(track_id)
             .execute(pool)
             .await;
-            record_push(pool, s.playlist_id, "skipped", Some("kein Spotify-Track"), "remove")
-                .await;
+            record_push(
+                pool,
+                s.playlist_id,
+                "skipped",
+                Some("kein Spotify-Track"),
+                "remove",
+            )
+            .await;
             continue;
         };
         if s.remote_id.is_empty() {
@@ -561,8 +594,14 @@ pub async fn unsync_tag_from_playlists(
             match crate::ingest::access_token(pool, cfg, user_id).await {
                 Ok(t) => token = Some(t),
                 Err(e) => {
-                    record_push(pool, s.playlist_id, "error", Some(&short(&e.to_string())), "remove")
-                        .await;
+                    record_push(
+                        pool,
+                        s.playlist_id,
+                        "error",
+                        Some(&short(&e.to_string())),
+                        "remove",
+                    )
+                    .await;
                     continue;
                 }
             }
@@ -745,7 +784,10 @@ pub async fn delete_tag(pool: &SqlitePool, owner_user_id: i64, tag_id: i64) -> R
 pub enum RenameOutcome {
     Renamed,
     /// Another tag of the same owner already uses this name/slug.
-    Clash { tag_id: i64, name: String },
+    Clash {
+        tag_id: i64,
+        name: String,
+    },
 }
 
 /// Rename a tag (owner only). Sources are linked by id, so they stay intact.
@@ -902,11 +944,7 @@ pub async fn similar_tags(
         b.0.cmp(&a.0)
             .then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()))
     });
-    scored
-        .into_iter()
-        .take(limit)
-        .map(|(_, s)| s)
-        .collect()
+    scored.into_iter().take(limit).map(|(_, s)| s).collect()
 }
 
 /// Per-table row counts of one merge (#456) — for tests and the UI.
@@ -951,30 +989,28 @@ pub async fn merge_tags(
     let mut tx = pool.begin().await?;
 
     // Owner scope for the target first (it must exist and be ours).
-    let target_owned = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2",
-    )
-    .bind(target_id)
-    .bind(owner_user_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .ok()
-    .flatten();
+    let target_owned =
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2")
+            .bind(target_id)
+            .bind(owner_user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .ok()
+            .flatten();
     if target_owned.is_none() {
         tx.rollback().await?;
         bail!("Ziel-Tag gehört dir nicht");
     }
 
     // Source: gone -> idempotent no-op; present but foreign -> error.
-    let source_owned = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2",
-    )
-    .bind(source_id)
-    .bind(owner_user_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .ok()
-    .flatten();
+    let source_owned =
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2")
+            .bind(source_id)
+            .bind(owner_user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .ok()
+            .flatten();
     if source_owned.is_none() {
         let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_tags WHERE id = ?1")
             .bind(source_id)
@@ -1053,12 +1089,13 @@ pub async fn merge_tags(
         .await?;
 
     // hub_tag_membership_history — no PK; 1:1 re-point keeps the history.
-    sum.history = sqlx::query("UPDATE hub_tag_membership_history SET tag_id = ?1 WHERE tag_id = ?2")
-        .bind(target_id)
-        .bind(source_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+    sum.history =
+        sqlx::query("UPDATE hub_tag_membership_history SET tag_id = ?1 WHERE tag_id = ?2")
+            .bind(target_id)
+            .bind(source_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
 
     // hub_tag_parents — PK (tag_id, parent_tag_id); both dims re-point, then
     // leftover source rows and the resulting self-loop are removed.
@@ -1069,13 +1106,14 @@ pub async fn merge_tags(
         .execute(&mut *tx)
         .await?
         .rows_affected();
-    parents +=
-        sqlx::query("UPDATE OR IGNORE hub_tag_parents SET parent_tag_id = ?1 WHERE parent_tag_id = ?2")
-            .bind(target_id)
-            .bind(source_id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+    parents += sqlx::query(
+        "UPDATE OR IGNORE hub_tag_parents SET parent_tag_id = ?1 WHERE parent_tag_id = ?2",
+    )
+    .bind(target_id)
+    .bind(source_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
     sqlx::query("DELETE FROM hub_tag_parents WHERE tag_id = ?1 OR parent_tag_id = ?1")
         .bind(source_id)
         .execute(&mut *tx)
@@ -1087,14 +1125,13 @@ pub async fn merge_tags(
     sum.parents = parents;
 
     // hub_tag_cluster_members — PK (cluster_id, tag_id).
-    sum.cluster_members = sqlx::query(
-        "UPDATE OR IGNORE hub_tag_cluster_members SET tag_id = ?1 WHERE tag_id = ?2",
-    )
-    .bind(target_id)
-    .bind(source_id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
+    sum.cluster_members =
+        sqlx::query("UPDATE OR IGNORE hub_tag_cluster_members SET tag_id = ?1 WHERE tag_id = ?2")
+            .bind(target_id)
+            .bind(source_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
     sqlx::query("DELETE FROM hub_tag_cluster_members WHERE tag_id = ?1")
         .bind(source_id)
         .execute(&mut *tx)
@@ -1110,14 +1147,13 @@ pub async fn merge_tags(
             .rows_affected();
 
     // hub_curated_playlists.fill_tag_id — plain nullable FK (ON DELETE SET NULL).
-    sum.curated = sqlx::query(
-        "UPDATE hub_curated_playlists SET fill_tag_id = ?1 WHERE fill_tag_id = ?2",
-    )
-    .bind(target_id)
-    .bind(source_id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
+    sum.curated =
+        sqlx::query("UPDATE hub_curated_playlists SET fill_tag_id = ?1 WHERE fill_tag_id = ?2")
+            .bind(target_id)
+            .bind(source_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
 
     // hub_smart_tags.filter_json — remap `tag_ids` (dedup) in every affected row.
     sum.smart_tags = remap_smart_filters(&mut tx, source_id, target_id).await?;
@@ -1156,10 +1192,9 @@ async fn remap_smart_filters(
     source_id: i64,
     target_id: i64,
 ) -> Result<u64> {
-    let rows: Vec<(i64, String)> =
-        sqlx::query_as("SELECT tag_id, filter_json FROM hub_smart_tags")
-            .fetch_all(&mut **tx)
-            .await?;
+    let rows: Vec<(i64, String)> = sqlx::query_as("SELECT tag_id, filter_json FROM hub_smart_tags")
+        .fetch_all(&mut **tx)
+        .await?;
     let mut touched = 0u64;
     for (tag_id, json) in rows {
         let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&json) else {
@@ -1951,7 +1986,9 @@ pub async fn tag_detail(pool: &SqlitePool, tag_id: i64) -> Option<TagDetail> {
     let smart = smart_filter(pool, tag_id).await;
     let dynamic = smart.is_some();
     let tracks = if dynamic {
-        resolve_smart_tag_full(pool, tag_id).await.unwrap_or_default()
+        resolve_smart_tag_full(pool, tag_id)
+            .await
+            .unwrap_or_default()
     } else {
         sqlx::query_as::<_, (i64, String, String)>(
             "SELECT tr.id, COALESCE(tr.title,''), COALESCE(tr.artists,'')
@@ -2538,10 +2575,9 @@ mod tests {
 
     #[test]
     fn smart_filter_roundtrip_and_defaults() {
-        let f: SmartFilter = serde_json::from_str(
-            r#"{"tag_ids":[1,2],"bpm_min":120.0,"limit":5000,"sort":"bpm"}"#,
-        )
-        .unwrap();
+        let f: SmartFilter =
+            serde_json::from_str(r#"{"tag_ids":[1,2],"bpm_min":120.0,"limit":5000,"sort":"bpm"}"#)
+                .unwrap();
         assert_eq!(f.version, 1, "missing version -> 1");
         assert_eq!(f.effective_limit(), 1000, "limit clamped to 1..=1000");
         assert_eq!(f.effective_sort(), "bpm");

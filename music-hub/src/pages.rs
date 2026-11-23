@@ -40,14 +40,23 @@ pub fn router(state: AppState) -> Router {
         .route("/backpacks/{id}/export", get(backpack_export))
         .route("/comment-templates", get(comment_templates_page))
         .route("/comment-templates/create", post(comment_template_create))
-        .route("/comment-templates/{id}/rename", post(comment_template_rename))
+        .route(
+            "/comment-templates/{id}/rename",
+            post(comment_template_rename),
+        )
         .route("/comment-templates/{id}/body", post(comment_template_body))
-        .route("/comment-templates/{id}/share", post(comment_template_share))
+        .route(
+            "/comment-templates/{id}/share",
+            post(comment_template_share),
+        )
         .route(
             "/comment-templates/{id}/duplicate",
             post(comment_template_duplicate),
         )
-        .route("/comment-templates/{id}/delete", post(comment_template_delete))
+        .route(
+            "/comment-templates/{id}/delete",
+            post(comment_template_delete),
+        )
         .route(
             "/comment-templates/{id}/preview",
             post(comment_template_preview),
@@ -1831,9 +1840,11 @@ async fn playlist_tag(
     match crate::tags::create_from_playlist(&st.pool, user_id, id).await {
         // Jump straight to the freshly created (or existing) tag.
         Ok(tag_id) => Redirect::to(&format!("/tag/{tag_id}")).into_response(),
-        Err(e) => {
-            crate::flash::redirect(&format!("/playlist/{id}"), &format!("Tag anlegen fehlgeschlagen: {e}"), "ok")
-        }
+        Err(e) => crate::flash::redirect(
+            &format!("/playlist/{id}"),
+            &format!("Tag anlegen fehlgeschlagen: {e}"),
+            "ok",
+        ),
     }
 }
 
@@ -1937,7 +1948,10 @@ impl OverlapFilters {
             url.push_str(&format!("&tag={}", urlencoding::encode(&self.tag)));
         }
         if !self.tag_scope.is_empty() {
-            url.push_str(&format!("&tag_scope={}", urlencoding::encode(&self.tag_scope)));
+            url.push_str(&format!(
+                "&tag_scope={}",
+                urlencoding::encode(&self.tag_scope)
+            ));
         }
         url
     }
@@ -3656,7 +3670,8 @@ async fn digging_page(
             &owners,
         )
         .await;
-        let ripe_map = crate::scoring::ripeness_many(&st.pool, &matched_ids, &engine, &owners).await;
+        let ripe_map =
+            crate::scoring::ripeness_many(&st.pool, &matched_ids, &engine, &owners).await;
         for r in cand.values_mut() {
             if !r.matched {
                 continue;
@@ -4102,13 +4117,34 @@ async fn status_panel(State(st): State<AppState>, headers: HeaderMap) -> Respons
 
     let b = crate::api::backlog_counts(&st.ro_pool).await;
     let backlog = vec![
-        BacklogRow { label: "Features".to_string(), count: b.features_pending },
-        BacklogRow { label: "Requests".to_string(), count: b.feature_requests },
-        BacklogRow { label: "Genres".to_string(), count: b.genres_pending },
-        BacklogRow { label: "Crawl".to_string(), count: b.crawl_pending },
-        BacklogRow { label: "Curation fällig".to_string(), count: b.curation_due },
-        BacklogRow { label: "Likes".to_string(), count: b.likes_queued },
-        BacklogRow { label: "Playlists".to_string(), count: b.playlists_pending },
+        BacklogRow {
+            label: "Features".to_string(),
+            count: b.features_pending,
+        },
+        BacklogRow {
+            label: "Requests".to_string(),
+            count: b.feature_requests,
+        },
+        BacklogRow {
+            label: "Genres".to_string(),
+            count: b.genres_pending,
+        },
+        BacklogRow {
+            label: "Crawl".to_string(),
+            count: b.crawl_pending,
+        },
+        BacklogRow {
+            label: "Curation fällig".to_string(),
+            count: b.curation_due,
+        },
+        BacklogRow {
+            label: "Likes".to_string(),
+            count: b.likes_queued,
+        },
+        BacklogRow {
+            label: "Playlists".to_string(),
+            count: b.playlists_pending,
+        },
     ];
 
     let configured = st.cfg.music_api_token.is_some();
@@ -4824,7 +4860,11 @@ async fn tag_create(
 /// The form is read as a raw urlencoded body so repeated `tag_ids` checkboxes
 /// (base tags) are handled — `axum::Form` over `serde_urlencoded` cannot
 /// deserialize a repeated key into a `Vec`, so we reuse [`form_params`].
-async fn smart_tag_create(State(st): State<AppState>, headers: HeaderMap, body: String) -> Response {
+async fn smart_tag_create(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
         return Redirect::to("/login").into_response();
     };
@@ -5286,7 +5326,9 @@ async fn backpack_source_add(
     }
 
     match crate::backpacks::source_exists(&st.pool, id, &src).await {
-        Ok(true) => return flash_redirect("/backpacks", "Quelle ist bereits enthalten".to_string()),
+        Ok(true) => {
+            return flash_redirect("/backpacks", "Quelle ist bereits enthalten".to_string());
+        }
         Ok(false) => {}
         Err(e) => return flash_redirect("/backpacks", format!("Fehler: {e}")),
     }
@@ -5378,7 +5420,8 @@ async fn backpack_prioritize(
     if isrcs.is_empty() {
         return flash_redirect("/backpacks", "Keine fehlenden ISRCs".to_string());
     }
-    let msg = match crate::music_api::order_with_priority(&st.cfg, &isrcs, BACKPACK_PRIORITY).await {
+    let msg = match crate::music_api::order_with_priority(&st.cfg, &isrcs, BACKPACK_PRIORITY).await
+    {
         Ok(oid) => format!("{} priorisiert (Order {oid})", isrcs.len()),
         Err(e) => format!("music-api Fehler: {e}"),
     };
@@ -5846,11 +5889,7 @@ async fn comment_template_preview(
         Ok(p) => render(&p),
         Err(e) => {
             tracing::warn!("comment template preview failed for user {}: {e:#}", nav.id);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Vorschau fehlgeschlagen",
-            )
-                .into_response()
+            (StatusCode::INTERNAL_SERVER_ERROR, "Vorschau fehlgeschlagen").into_response()
         }
     }
 }
@@ -6264,15 +6303,17 @@ async fn tag_detail_page(
         .await
         .unwrap_or_default()
         .into_iter()
-        .map(|(id, name, owner, keep, push_status, push_error, push_at)| TagSource {
-            id,
-            name,
-            owner,
-            keep: keep != 0,
-            push_status,
-            push_error,
-            push_at,
-        })
+        .map(
+            |(id, name, owner, keep, push_status, push_error, push_at)| TagSource {
+                id,
+                name,
+                owner,
+                keep: keep != 0,
+                push_status,
+                push_error,
+                push_at,
+            },
+        )
         .collect();
     let owner_user_id: Option<i64> =
         sqlx::query_scalar("SELECT owner_user_id FROM hub_tags WHERE id = ?1")
@@ -6308,11 +6349,7 @@ async fn tag_detail_page(
     let smart_bpm_max = fmt_f(d.smart.as_ref().and_then(|s| s.bpm_max));
     let smart_energy_min = fmt_f(d.smart.as_ref().and_then(|s| s.energy_min));
     let smart_energy_max = fmt_f(d.smart.as_ref().and_then(|s| s.energy_max));
-    let smart_limit = d
-        .smart
-        .as_ref()
-        .map(|s| s.effective_limit())
-        .unwrap_or(100);
+    let smart_limit = d.smart.as_ref().map(|s| s.effective_limit()).unwrap_or(100);
     let smart_sort = d
         .smart
         .as_ref()
@@ -6468,7 +6505,10 @@ async fn tag_merge(
             &format!("/tag/{}", f.into),
             "Tags bereits zusammengef\u{fc}hrt".into(),
         ),
-        Ok(_) => flash_redirect(&format!("/tag/{}", f.into), "Tags zusammengef\u{fc}hrt".into()),
+        Ok(_) => flash_redirect(
+            &format!("/tag/{}", f.into),
+            "Tags zusammengef\u{fc}hrt".into(),
+        ),
         Err(e) => flash_redirect(&format!("/tag/{id}"), format!("Fehler: {e}")),
     }
 }
@@ -6973,10 +7013,7 @@ struct SettingsPage {
     tag_scope_collective_selected: bool,
 }
 
-async fn settings_page(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+async fn settings_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "settings").await else {
         return Redirect::to("/login").into_response();
     };

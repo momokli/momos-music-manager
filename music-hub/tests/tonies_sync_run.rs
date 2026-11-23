@@ -1241,10 +1241,7 @@ async fn playlist_binding_orders_nothing_when_all_ready() {
     *m.seconds_present.lock().unwrap() = 5300;
 
     let pl = insert_playlist(&pool, uid, "pl-ready", "Ready Mix").await;
-    for (i, (sid, isrc, title)) in [("r0", "a", "A"), ("r1", "b", "B")]
-        .iter()
-        .enumerate()
-    {
+    for (i, (sid, isrc, title)) in [("r0", "a", "A"), ("r1", "b", "B")].iter().enumerate() {
         let t = insert_track(&pool, sid, Some(isrc), title, 30_000).await;
         sqlx::query(
             "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",

@@ -1673,14 +1673,9 @@ async fn build_track_page(
 
     let e = crate::settings::engine(&st.pool).await;
     let requested = crate::scope::requested(&st.pool, nav.id, tag_scope_raw).await;
-    let owners = crate::scope::detail_owners(
-        &st.pool,
-        nav.id,
-        scope.is_mine(),
-        scope_explicit,
-        requested,
-    )
-    .await;
+    let owners =
+        crate::scope::detail_owners(&st.pool, nav.id, scope.is_mine(), scope_explicit, requested)
+            .await;
     let rip = crate::scoring::ripeness(&st.pool, id, &e, &owners).await;
     let recommended: Vec<RecTag> =
         crate::recommend::recommend_tags_scoped(&st.pool, id, 12, &owners)
@@ -1939,7 +1934,11 @@ async fn track_tag(
     let tag_scope_q = crate::scope::TagScope::parse(f.tag_scope.as_deref())
         .map(|s| format!("&tag_scope={}", s.as_str()))
         .unwrap_or_default();
-    Redirect::to(&format!("/track/{id}?scope={}{tag_scope_q}", scope.as_str())).into_response()
+    Redirect::to(&format!(
+        "/track/{id}?scope={}{tag_scope_q}",
+        scope.as_str()
+    ))
+    .into_response()
 }
 
 /// Remove a direct (manual) tag from the track.
@@ -1959,7 +1958,11 @@ async fn track_untag(
     let tag_scope_q = crate::scope::TagScope::parse(f.tag_scope.as_deref())
         .map(|s| format!("&tag_scope={}", s.as_str()))
         .unwrap_or_default();
-    Redirect::to(&format!("/track/{id}?scope={}{tag_scope_q}", scope.as_str())).into_response()
+    Redirect::to(&format!(
+        "/track/{id}?scope={}{tag_scope_q}",
+        scope.as_str()
+    ))
+    .into_response()
 }
 
 // ── now playing (issue #293/#294) ───────────────────────────────────────────
@@ -3420,6 +3423,11 @@ async fn signup_submit(State(st): State<AppState>, Form(c): Form<Creds>) -> Resp
         Err(e) => return error_page(&format!("DB-Fehler: {e}")),
     };
 
+    // Seed default tag types for the new user
+    if let Err(e) = crate::tagtypes::seed_types(&st.pool, uid).await {
+        return error_page(&format!("Tag-Typen-Seed fehlgeschlagen: {e}"));
+    }
+
     match create_session(&st.pool, uid).await {
         Ok(tok) => with_cookie(Redirect::to("/").into_response(), session_cookie(&tok)),
         Err(e) => error_page(&format!("Session-Fehler: {e}")),
@@ -3879,23 +3887,22 @@ async fn tonies_connect_inner(
         Err(e) => return render_plain_error(format!("{e}")),
     };
 
-    let tokens =
-        match crate::tonies::client::login(
-            &st.cfg.tonies_auth_base,
-            &st.cfg.tonies_client_id,
-            &form.email,
-            &form.password,
-        )
-            .await
-        {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!("tonies login failed for user {uid}: {e}");
-                return render_plain_error(
-                    "Login fehlgeschlagen — E-Mail oder Passwort falsch.".to_string(),
-                );
-            }
-        };
+    let tokens = match crate::tonies::client::login(
+        &st.cfg.tonies_auth_base,
+        &st.cfg.tonies_client_id,
+        &form.email,
+        &form.password,
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("tonies login failed for user {uid}: {e}");
+            return render_plain_error(
+                "Login fehlgeschlagen — E-Mail oder Passwort falsch.".to_string(),
+            );
+        }
+    };
 
     let Some(refresh_token) = tokens.refresh_token.clone() else {
         return render_plain_error(
@@ -4134,12 +4141,7 @@ fn parse_source(kind_hint: Option<&str>, raw: &str) -> Option<(String, i64)> {
 
 /// The display name of `user_id`'s own source of `kind`/`id`, or `None` when it
 /// does not exist or is not owned by the user (ownership is checked per kind).
-async fn owned_source_name(
-    pool: &SqlitePool,
-    uid: i64,
-    kind: &str,
-    id: i64,
-) -> Option<String> {
+async fn owned_source_name(pool: &SqlitePool, uid: i64, kind: &str, id: i64) -> Option<String> {
     use crate::tonies::bindings::{SOURCE_BACKPACK, SOURCE_PLAYLIST, SOURCE_TAG};
     let sql = match kind {
         SOURCE_PLAYLIST => {
@@ -4223,7 +4225,9 @@ async fn tonies_binding_save(
                                     )
                                     .await
                                 {
-                                    tracing::warn!("tonies order_by save failed for user {uid}: {e:#}");
+                                    tracing::warn!(
+                                        "tonies order_by save failed for user {uid}: {e:#}"
+                                    );
                                 }
                                 (format!("Quelle „{name}“ gespeichert"), "ok")
                             }
@@ -4254,8 +4258,7 @@ async fn tonies_binding_delete(
         Ok(()) => ("Quelle entfernt".to_string(), "ok"),
         Err(e) => (format!("Fehler: {e}"), "err"),
     };
-    let resp =
-        tonies_card_fragment(&st, uid, &tonie_id, form.tonie_name.unwrap_or_default()).await;
+    let resp = tonies_card_fragment(&st, uid, &tonie_id, form.tonie_name.unwrap_or_default()).await;
     crate::toast::apply(resp, &msg, kind)
 }
 
@@ -4317,9 +4320,7 @@ async fn tonies_sync(
         Some("playlist") if binding.source_kind == crate::tonies::bindings::SOURCE_PLAYLIST => {
             match binding.source_id {
                 Some(pid) => {
-                    match crate::worker::refresh_playlist_items(&st.pool, &st.cfg, uid, pid)
-                        .await
-                    {
+                    match crate::worker::refresh_playlist_items(&st.pool, &st.cfg, uid, pid).await {
                         Ok(n) => format!(" · Playlist aktualisiert ({n} Tracks)"),
                         Err(e) => {
                             tracing::warn!("tonies playlist refresh failed for user {uid}: {e:#}");
@@ -4692,10 +4693,7 @@ async fn tonie_albums_render(
 
 /// Album `(title, seconds)` from music-api, which owns the catalogue cache
 /// (U0a). `None` when the album cannot be resolved at all.
-async fn album_meta_from_api(
-    cfg: &crate::config::Config,
-    album_id: &str,
-) -> Option<(String, i64)> {
+async fn album_meta_from_api(cfg: &crate::config::Config, album_id: &str) -> Option<(String, i64)> {
     crate::music_api::deezer_album(cfg, album_id)
         .await
         .ok()

@@ -140,9 +140,7 @@ pub async fn recommend_tags_scoped(
 ) -> Vec<Recommendation> {
     let e = crate::settings::engine(pool).await;
     // Owner ids are bound as parameters (consistent with similarity/scoring/pages).
-    let mut qb = sqlx::QueryBuilder::new(
-        "WITH s AS (SELECT ",
-    );
+    let mut qb = sqlx::QueryBuilder::new("WITH s AS (SELECT ");
     qb.push_bind(track_id);
     qb.push(
         " AS id),

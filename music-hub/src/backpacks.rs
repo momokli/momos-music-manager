@@ -122,18 +122,22 @@ pub async fn add_source_with_limit(
     let kind = src.kind().as_str();
 
     // App-level lens validation (DB CHECK allows any lens text on purpose).
-    let (tag_id, playlist_id, lens, track_id): (Option<i64>, Option<i64>, Option<String>, Option<i64>) =
-        match &src {
-            SourceRef::Tag(id) => (Some(*id), None, None, None),
-            SourceRef::Playlist(id) => (None, Some(*id), None, None),
-            SourceRef::Lens(key) => {
-                if !crate::curate::LENSES.iter().any(|(k, _)| k == key) {
-                    bail!("unknown lens key: {key}");
-                }
-                (None, None, Some(key.clone()), None)
+    let (tag_id, playlist_id, lens, track_id): (
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+    ) = match &src {
+        SourceRef::Tag(id) => (Some(*id), None, None, None),
+        SourceRef::Playlist(id) => (None, Some(*id), None, None),
+        SourceRef::Lens(key) => {
+            if !crate::curate::LENSES.iter().any(|(k, _)| k == key) {
+                bail!("unknown lens key: {key}");
             }
-            SourceRef::Track(id) => (None, None, None, Some(*id)),
-        };
+            (None, None, Some(key.clone()), None)
+        }
+        SourceRef::Track(id) => (None, None, None, Some(*id)),
+    };
 
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO hub_backpack_items
@@ -346,11 +350,13 @@ pub async fn list_source_views(pool: &SqlitePool, backpack_id: i64) -> Result<Ve
     for item in items {
         let label = match item.source_kind.as_str() {
             "tag" => match item.source_tag_id {
-                Some(id) => sqlx::query_scalar::<_, String>("SELECT name FROM hub_tags WHERE id = ?1")
-                    .bind(id)
-                    .fetch_optional(pool)
-                    .await?
-                    .unwrap_or_else(|| format!("#{id}")),
+                Some(id) => {
+                    sqlx::query_scalar::<_, String>("SELECT name FROM hub_tags WHERE id = ?1")
+                        .bind(id)
+                        .fetch_optional(pool)
+                        .await?
+                        .unwrap_or_else(|| format!("#{id}"))
+                }
                 None => "—".to_string(),
             },
             "playlist" => match item.source_playlist_id {
@@ -364,15 +370,16 @@ pub async fn list_source_views(pool: &SqlitePool, backpack_id: i64) -> Result<Ve
                 .unwrap_or_else(|| format!("#{id}")),
                 None => "—".to_string(),
             },
-            "lens" => crate::curate::lens_label(item.source_lens.as_deref().unwrap_or("")).to_string(),
+            "lens" => {
+                crate::curate::lens_label(item.source_lens.as_deref().unwrap_or("")).to_string()
+            }
             "track" => match item.source_track_id {
                 Some(id) => {
-                    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-                        "SELECT title, artists FROM hub_tracks WHERE id = ?1",
-                    )
-                    .bind(id)
-                    .fetch_optional(pool)
-                    .await?;
+                    let row: Option<(Option<String>, Option<String>)> =
+                        sqlx::query_as("SELECT title, artists FROM hub_tracks WHERE id = ?1")
+                            .bind(id)
+                            .fetch_optional(pool)
+                            .await?;
                     match row {
                         Some((Some(title), Some(artists))) if !title.is_empty() => {
                             if artists.is_empty() {
@@ -411,12 +418,11 @@ pub async fn resolve_count(pool: &SqlitePool, backpack_id: i64) -> Result<usize>
 /// owning backpack's `updated_at` (a no-op bump when nothing was deleted).
 pub async fn remove_source(pool: &SqlitePool, item_id: i64) -> Result<bool> {
     let now = chrono::Utc::now().to_rfc3339();
-    let backpack_id: Option<i64> = sqlx::query_scalar(
-        "DELETE FROM hub_backpack_items WHERE id = ?1 RETURNING backpack_id",
-    )
-    .bind(item_id)
-    .fetch_optional(pool)
-    .await?;
+    let backpack_id: Option<i64> =
+        sqlx::query_scalar("DELETE FROM hub_backpack_items WHERE id = ?1 RETURNING backpack_id")
+            .bind(item_id)
+            .fetch_optional(pool)
+            .await?;
 
     if let Some(bp) = backpack_id {
         sqlx::query("UPDATE hub_backpacks SET updated_at = ?2 WHERE id = ?1")
@@ -654,7 +660,9 @@ pub async fn active_scope_for_views(pool: &SqlitePool, user_id: i64) -> Option<H
     match active_scope_track_ids(pool, user_id).await {
         Ok(scope) => scope,
         Err(e) => {
-            tracing::warn!("active backpack scope load failed for user {user_id}: {e:#}; falling back to unscoped");
+            tracing::warn!(
+                "active backpack scope load failed for user {user_id}: {e:#}; falling back to unscoped"
+            );
             None
         }
     }
@@ -761,7 +769,9 @@ async fn resolve_with_limit(
 /// resolvable target (missing source column / unknown kind).
 fn resolved_source_of(item: &BackpackItem) -> Option<ResolvedSource> {
     match item.source_kind.as_str() {
-        "tag" => item.source_tag_id.map(|tag_id| ResolvedSource::Tag { tag_id }),
+        "tag" => item
+            .source_tag_id
+            .map(|tag_id| ResolvedSource::Tag { tag_id }),
         "playlist" => item
             .source_playlist_id
             .map(|playlist_id| ResolvedSource::Playlist { playlist_id }),
@@ -880,11 +890,7 @@ fn fold_sources(
             ResolvedTrack {
                 track_id,
                 score: acc.score,
-                sources: acc
-                    .sources
-                    .into_iter()
-                    .map(|(_, _, src)| src)
-                    .collect(),
+                sources: acc.sources.into_iter().map(|(_, _, src)| src).collect(),
             }
         })
         .collect();
@@ -971,12 +977,11 @@ pub async fn refresh_item_tracks(pool: &SqlitePool, item_id: i64) -> Result<usiz
         return Ok(0);
     };
 
-    let user_id: Option<i64> = sqlx::query_scalar(
-        "SELECT user_id FROM hub_backpacks WHERE id = ?1",
-    )
-    .bind(item.backpack_id)
-    .fetch_optional(pool)
-    .await?;
+    let user_id: Option<i64> =
+        sqlx::query_scalar("SELECT user_id FROM hub_backpacks WHERE id = ?1")
+            .bind(item.backpack_id)
+            .fetch_optional(pool)
+            .await?;
     // An item always belongs to an existing backpack (FK); be defensive anyway.
     let Some(user_id) = user_id else {
         return Ok(0);
@@ -985,17 +990,14 @@ pub async fn refresh_item_tracks(pool: &SqlitePool, item_id: i64) -> Result<usiz
     let (backend, track_ids) = tracks_for_item(pool, user_id, &item).await?;
 
     // Desired set: (track_id, backend), deduped.
-    let desired: HashSet<(i64, String)> = track_ids
-        .iter()
-        .map(|id| (*id, backend.clone()))
-        .collect();
+    let desired: HashSet<(i64, String)> =
+        track_ids.iter().map(|id| (*id, backend.clone())).collect();
 
-    let current: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT track_id, backend FROM hub_backpack_item_tracks WHERE item_id = ?1",
-    )
-    .bind(item_id)
-    .fetch_all(pool)
-    .await?;
+    let current: Vec<(i64, String)> =
+        sqlx::query_as("SELECT track_id, backend FROM hub_backpack_item_tracks WHERE item_id = ?1")
+            .bind(item_id)
+            .fetch_all(pool)
+            .await?;
     let current: HashSet<(i64, String)> = current.into_iter().collect();
 
     if desired == current {

@@ -379,10 +379,11 @@ fn is_operational(key: &str) -> bool {
 /// Returns the mapped `(hub_key, value)` rows plus the skip counters.
 pub async fn plan_settings(mmm_db: &str) -> Result<(Vec<(String, String)>, SettingsSummary)> {
     let mmm = open_mmm(mmm_db).await?;
-    let rows = sqlx::query_as::<_, (String, String)>("SELECT key, value FROM settings ORDER BY key")
-        .fetch_all(&mmm)
-        .await
-        .context("read settings (is this a MMM db?)")?;
+    let rows =
+        sqlx::query_as::<_, (String, String)>("SELECT key, value FROM settings ORDER BY key")
+            .fetch_all(&mmm)
+            .await
+            .context("read settings (is this a MMM db?)")?;
 
     let mut out = Vec::new();
     let mut summary = SettingsSummary::default();

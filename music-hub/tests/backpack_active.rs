@@ -106,17 +106,28 @@ async fn active_backpack_none_then_set_then_shift_then_clear() {
     let a = insert_backpack(&pool, alice, "A", 0).await;
     let b = insert_backpack(&pool, alice, "B", 0).await;
 
-    assert!(backpacks::active_backpack(&pool, alice).await.unwrap().is_none());
+    assert!(
+        backpacks::active_backpack(&pool, alice)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     backpacks::set_active(&pool, alice, a).await.unwrap();
-    let active = backpacks::active_backpack(&pool, alice).await.unwrap().unwrap();
+    let active = backpacks::active_backpack(&pool, alice)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(active.id, a);
     assert_eq!(active.name, "A");
     assert_eq!(active.is_active, 1);
 
     // Shifting to B must not violate the partial UNIQUE index.
     backpacks::set_active(&pool, alice, b).await.unwrap();
-    let active = backpacks::active_backpack(&pool, alice).await.unwrap().unwrap();
+    let active = backpacks::active_backpack(&pool, alice)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(active.id, b, "only B stays active");
     let active_rows: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM hub_backpacks WHERE user_id = ?1 AND is_active = 1",
@@ -125,12 +136,24 @@ async fn active_backpack_none_then_set_then_shift_then_clear() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(active_rows, 1, "partial-unique holds at most one active row");
+    assert_eq!(
+        active_rows, 1,
+        "partial-unique holds at most one active row"
+    );
 
     let cleared = backpacks::clear_active(&pool, alice).await.unwrap();
     assert_eq!(cleared, 1, "one row deactivated");
-    assert!(backpacks::active_backpack(&pool, alice).await.unwrap().is_none());
-    assert_eq!(backpacks::clear_active(&pool, alice).await.unwrap(), 0, "idempotent");
+    assert!(
+        backpacks::active_backpack(&pool, alice)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        backpacks::clear_active(&pool, alice).await.unwrap(),
+        0,
+        "idempotent"
+    );
 }
 
 #[tokio::test]
@@ -143,7 +166,10 @@ async fn set_active_rejects_foreign_backpack() {
     let err = backpacks::set_active(&pool, alice, bob_bp).await;
     assert!(err.is_err(), "cross-user activation must fail");
     assert!(
-        backpacks::active_backpack(&pool, bob).await.unwrap().is_none(),
+        backpacks::active_backpack(&pool, bob)
+            .await
+            .unwrap()
+            .is_none(),
         "no silent foreign activation"
     );
 }
@@ -159,10 +185,17 @@ async fn active_scope_track_ids_none_and_some() {
     let t3 = insert_track(&pool, "t3").await;
     insert_resolved_tag(&pool, tag, t1).await;
     insert_resolved_tag(&pool, tag, t2).await;
-    backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
 
     // No active backpack -> None (unscoped).
-    assert!(backpacks::active_scope_track_ids(&pool, alice).await.unwrap().is_none());
+    assert!(
+        backpacks::active_scope_track_ids(&pool, alice)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     backpacks::set_active(&pool, alice, bp).await.unwrap();
     let scope = backpacks::active_scope_track_ids(&pool, alice)
@@ -174,7 +207,12 @@ async fn active_scope_track_ids_none_and_some() {
     assert!(!scope.contains(&t3));
 
     backpacks::clear_active(&pool, alice).await.unwrap();
-    assert!(backpacks::active_scope_track_ids(&pool, alice).await.unwrap().is_none());
+    assert!(
+        backpacks::active_scope_track_ids(&pool, alice)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 // ── HTTP view filters + clear roundtrip ──────────────────────────────────────
@@ -201,7 +239,9 @@ async fn insert_tags_for_scope(app: &common::TestApp, owner: i64) {
 
     // An active backpack owning tag-a as its only source.
     let bp = insert_backpack(&app.pool, owner, "scope-bp", 0).await;
-    backpacks::add_source(&app.pool, bp, SourceRef::Tag(tag_a)).await.unwrap();
+    backpacks::add_source(&app.pool, bp, SourceRef::Tag(tag_a))
+        .await
+        .unwrap();
     backpacks::set_active(&app.pool, owner, bp).await.unwrap();
 }
 
@@ -224,7 +264,10 @@ async fn views_are_scoped_and_clear_restores_unscoped() {
 
     // Baseline before any backpack exists: unscoped list.
     let body = get(&app, "/tags", &cookie).await;
-    assert!(!body.contains("tag-a") && !body.contains("tag-b"), "no tags yet");
+    assert!(
+        !body.contains("tag-a") && !body.contains("tag-b"),
+        "no tags yet"
+    );
     insert_tags_for_scope(&app, owner).await;
 
     // Scoped: only the tags/artists/albums with >= 1 track in the scope survive.
@@ -257,10 +300,16 @@ async fn views_are_scoped_and_clear_restores_unscoped() {
 
     // Unscoped again: every tag is back.
     let tags = get(&app, "/tags", &cookie).await;
-    assert!(tags.contains("tag-a") && tags.contains("tag-b"), "scope cleared");
+    assert!(
+        tags.contains("tag-a") && tags.contains("tag-b"),
+        "scope cleared"
+    );
 
     // Clear form is gone from the topbar (no active backpack).
-    assert!(!tags.contains("Scope:"), "no scope badge without an active backpack");
+    assert!(
+        !tags.contains("Scope:"),
+        "no scope badge without an active backpack"
+    );
 }
 
 #[tokio::test]
@@ -282,7 +331,9 @@ async fn empty_active_scope_yields_200_and_empty_lists() {
     let bp = insert_backpack(&app.pool, owner, "empty-bp", 0).await;
     backpacks::set_active(&app.pool, owner, bp).await.unwrap();
 
-    let scope = backpacks::active_scope_track_ids(&app.pool, owner).await.unwrap();
+    let scope = backpacks::active_scope_track_ids(&app.pool, owner)
+        .await
+        .unwrap();
     assert_eq!(
         scope,
         Some(HashSet::<i64>::new()),
@@ -373,12 +424,19 @@ async fn large_scope_filters_views_without_variable_explosion() {
         .await
         .unwrap()
         .expect("some");
-    assert!(scope.len() > 500, "scope exceeds the old clamp: {}", scope.len());
+    assert!(
+        scope.len() > 500,
+        "scope exceeds the old clamp: {}",
+        scope.len()
+    );
 
     // Must be a 200 (no SQLITE_MAX_VARIABLE_NUMBER error), with in-scope tags
     // listed and a tag without tracks hidden.
     let tags = get(&app, "/tags", &cookie).await;
     assert!(tags.contains("bulk-tag"), "in-scope tag is listed");
-    assert!(!tags.contains("no-track-tag"), "tag without scoped tracks is hidden");
+    assert!(
+        !tags.contains("no-track-tag"),
+        "tag without scoped tracks is hidden"
+    );
     get(&app, "/albums", &cookie).await;
 }

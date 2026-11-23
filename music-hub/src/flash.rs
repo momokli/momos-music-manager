@@ -10,7 +10,7 @@
 //! URL-encoded, so umlauts and punctuation survive the header round-trip.
 
 use axum::extract::Request;
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
 

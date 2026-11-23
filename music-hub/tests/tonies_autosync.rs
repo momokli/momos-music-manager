@@ -68,16 +68,11 @@ struct TmMock {
     uploads: Arc<Mutex<Vec<Value>>>,
 }
 
-async fn token_handler(
-    Form(_f): Form<std::collections::HashMap<String, String>>,
-) -> Json<Value> {
+async fn token_handler(Form(_f): Form<std::collections::HashMap<String, String>>) -> Json<Value> {
     Json(json!({"access_token": "acc", "refresh_token": "rt", "expires_in": 300}))
 }
 
-async fn get_tonie(
-    State(m): State<TmMock>,
-    Path((_h, _c)): Path<(String, String)>,
-) -> Json<Value> {
+async fn get_tonie(State(m): State<TmMock>, Path((_h, _c)): Path<(String, String)>) -> Json<Value> {
     let chapters = m.chapters.lock().unwrap().clone();
     Json(json!({ "id": "ct1", "chapters": chapters }))
 }
@@ -112,7 +107,10 @@ async fn isrc_status(State(m): State<TmMock>, Path(isrc): Path<String>) -> Json<
     Json(json!({ "isrc": isrc, "state": if ready { "ready" } else { "absent" } }))
 }
 
-async fn isrc_bytes(State(_m): State<TmMock>, Path((_isrc, _fmt)): Path<(String, String)>) -> Response {
+async fn isrc_bytes(
+    State(_m): State<TmMock>,
+    Path((_isrc, _fmt)): Path<(String, String)>,
+) -> Response {
     (
         [(axum::http::header::CONTENT_TYPE, "audio/mpeg")],
         b"MP3BYTES".to_vec(),
@@ -132,10 +130,16 @@ async fn mock_tonies_music() -> (String, TmMock) {
         uploads: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
-        .route("/realms/tonies/protocol/openid-connect/token", post(token_handler))
+        .route(
+            "/realms/tonies/protocol/openid-connect/token",
+            post(token_handler),
+        )
         .route("/v2/file", post(file_handler))
         .route("/s3/upload", post(put_handler))
-        .route("/v2/households/{hid}/creativetonies/{ctid}/chapters", post(chapter_handler))
+        .route(
+            "/v2/households/{hid}/creativetonies/{ctid}/chapters",
+            post(chapter_handler),
+        )
         .route("/v2/households/{hid}/creativetonies/{ctid}", get(get_tonie))
         .route("/isrc/{isrc}", get(isrc_status))
         .route("/isrc/{isrc}/{fmt}", get(isrc_bytes))
@@ -314,7 +318,11 @@ async fn playlist_refresh_sets_dirty_since_for_auto_bindings() {
         dirty_of(&pool, auto_b).await.is_none(),
         "auto binding of an unchanged playlist is untouched"
     );
-    assert_eq!(sp.hits.lock().unwrap().len(), 1, "only playlist A refreshed");
+    assert_eq!(
+        sp.hits.lock().unwrap().len(),
+        1,
+        "only playlist A refreshed"
+    );
 }
 
 // ── T2: an unchanged refresh makes no request and no sync ───────────────────
@@ -409,9 +417,16 @@ async fn autosync_makes_no_spotify_requests() {
 
     let pool = pool().await;
     let uid = seed_user(&pool, "t4-nospotify").await;
-    music_hub::tonies::save_account(&pool, uid, Some("hh1"), Some("a@example.com"), "refresh", KEY)
-        .await
-        .unwrap();
+    music_hub::tonies::save_account(
+        &pool,
+        uid,
+        Some("hh1"),
+        Some("a@example.com"),
+        "refresh",
+        KEY,
+    )
+    .await
+    .unwrap();
 
     let pl = insert_playlist(&pool, uid, "t4", Some("s"), Some("s"), 1).await;
     let tid = insert_track(&pool, "sp-1", Some("x"), "Song One", 60_000).await;

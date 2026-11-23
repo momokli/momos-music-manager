@@ -53,15 +53,15 @@ async fn import(State(st): State<AppState>, headers: HeaderMap, body: Bytes) -> 
         return err(StatusCode::UNAUTHORIZED, "missing device token");
     };
 
-    let device = match devices::find_bound_by_token_hash(&st.pool, &devices::hash_token(&token)).await
-    {
-        Ok(Some(d)) => d,
-        Ok(None) => return err(StatusCode::UNAUTHORIZED, "unknown or unbound device token"),
-        Err(e) => {
-            tracing::warn!(error = %e, "traktor import: device lookup failed");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "device lookup failed");
-        }
-    };
+    let device =
+        match devices::find_bound_by_token_hash(&st.pool, &devices::hash_token(&token)).await {
+            Ok(Some(d)) => d,
+            Ok(None) => return err(StatusCode::UNAUTHORIZED, "unknown or unbound device token"),
+            Err(e) => {
+                tracing::warn!(error = %e, "traktor import: device lookup failed");
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "device lookup failed");
+            }
+        };
     let Some(user_id) = device.user_id else {
         return err(StatusCode::UNAUTHORIZED, "device not bound");
     };

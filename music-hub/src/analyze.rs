@@ -37,15 +37,14 @@ pub async fn analyze_track(pool: &SqlitePool, cfg: &Config, track_id: i64) -> Re
         return Ok(Outcome::default());
     }
 
-    let has_emb = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM hub_track_embeddings WHERE track_id = ?1",
-    )
-    .bind(track_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .is_some();
+    let has_emb =
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_track_embeddings WHERE track_id = ?1")
+            .bind(track_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
     let has_an =
         sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_track_analysis WHERE track_id = ?1")
             .bind(track_id)

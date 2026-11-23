@@ -184,9 +184,7 @@ async fn main() -> Result<()> {
         Command::Features { limit } => cmd_features(cfg, limit).await,
         Command::Freqblog { limit } => cmd_freqblog(cfg, limit).await,
         Command::ImportMmmTags { db, user } => cmd_import_mmm_tags(cfg, &db, &user).await,
-        Command::ImportMmmPlaylists { db, user } => {
-            cmd_import_mmm_playlists(cfg, &db, &user).await
-        }
+        Command::ImportMmmPlaylists { db, user } => cmd_import_mmm_playlists(cfg, &db, &user).await,
         Command::ImportMmmSettings { db, dry_run } => {
             cmd_import_mmm_settings(cfg, &db, dry_run).await
         }

@@ -105,10 +105,7 @@ fn tag_scope_is_a_registered_user_setting() {
         }
         other => panic!("tag_scope must be an enum, got {other:?}"),
     }
-    assert_eq!(
-        settings::validate(s, "collective").unwrap(),
-        "collective"
-    );
+    assert_eq!(settings::validate(s, "collective").unwrap(), "collective");
     assert!(settings::validate(s, "bogus").is_err());
 
     // Must not leak into the global settings registry (that drives `/admin`).

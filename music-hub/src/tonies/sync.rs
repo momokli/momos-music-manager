@@ -259,18 +259,16 @@ pub async fn desired_from_playlist(
           {order_sql}"
     );
     let rows = sqlx::query(&sql)
-    .bind(playlist_id)
-    .fetch_all(pool)
-    .await
-    .context("Playlist-Tracks konnten nicht gelesen werden")?;
+        .bind(playlist_id)
+        .fetch_all(pool)
+        .await
+        .context("Playlist-Tracks konnten nicht gelesen werden")?;
 
     Ok(rows
         .into_iter()
         .map(|row| DesiredTrack {
             isrc: row.get::<Option<String>, _>("isrc"),
-            title: row
-                .get::<Option<String>, _>("title")
-                .unwrap_or_default(),
+            title: row.get::<Option<String>, _>("title").unwrap_or_default(),
             duration_ms: row.get::<Option<i64>, _>("duration_ms").unwrap_or(0),
         })
         .collect())
@@ -324,12 +322,7 @@ pub async fn desired_for_source(
 /// Each table names its user column differently: `hub_playlists.user_id`,
 /// `hub_backpacks.user_id`, `hub_tags.owner_user_id`. A missing row is simply
 /// not owned (returns `false`).
-async fn source_owned_by(
-    pool: &SqlitePool,
-    uid: i64,
-    kind: &str,
-    id: i64,
-) -> Result<bool> {
+async fn source_owned_by(pool: &SqlitePool, uid: i64, kind: &str, id: i64) -> Result<bool> {
     let found: Option<i64> = match kind {
         SOURCE_PLAYLIST => {
             sqlx::query_scalar("SELECT 1 FROM hub_playlists WHERE id = ?1 AND user_id = ?2")
@@ -537,10 +530,7 @@ mod tests {
     #[test]
     fn order_plan_keeps_only_missing_fitting_isrcs_in_order() {
         // 5400 cap, 5300 present → 100 s remaining: only the 60 s track fits.
-        let desired = vec![
-            track(Some("a"), "A", 60),
-            track(Some("b"), "B", 200),
-        ];
+        let desired = vec![track(Some("a"), "A", 60), track(Some("b"), "B", 200)];
         let plan = order_plan_for_tonie(&desired, 5400, 5300, |_| false);
         assert_eq!(plan, vec!["a"]);
     }

@@ -10,11 +10,11 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use axum::routing::post;
 use axum::Json;
 use axum::Router;
+use axum::routing::post;
 use music_hub::config::Config;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const TS: &str = "2026-01-01T00:00:00+00:00";
 /// Mirrors `pages::BACKPACK_PRIORITY` (private); the issue mandates `>= 5`.

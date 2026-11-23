@@ -10,6 +10,13 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat(hub): **hub_tag_types table + seed** (#712, Slice T1) — neue Tabelle
+  `hub_tag_types` (pro User 11 Default-Typen: MOOD, GENRE, VIBE, PHASE_1..5,
+  MERKMAL, SETLIST, RUMPELKISTE mit label/abbrev/icon/sort_order/describes/weight),
+  CHECK-Constraint aus `hub_tags.type` entfernt (via Tabellenkopie, Indizes/Views
+  neu angelegt), einmaliger Backfill für bestehende User gesteuert durch
+  `hub_settings.tag_types_backfill_done`, Seed bei Signup. **Noch kein Verhaltenswechsel**
+  (Code liest weiter `tagtypes.rs`); T2 schaltet auf die Tabelle um.
 - feat: **Tag hygiene — rename, merge similar tags, suggestions** (#456) — a tag
   detail page (`/tag/{id}`) now surfaces owner-only **suggestions** for similar
   own tags (`tags::similar_tags`; ranked by normalised-equal > small edit

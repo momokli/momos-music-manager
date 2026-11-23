@@ -154,7 +154,10 @@ async fn retry_requeues_failed_jobs() {
     .unwrap();
     assert_eq!(status, "queued");
     assert_eq!(error, None);
-    assert_eq!(enabled, 1, "enabled_for_fetch reset so the worker picks it up");
+    assert_eq!(
+        enabled, 1,
+        "enabled_for_fetch reset so the worker picks it up"
+    );
 
     // Likes job requeued with the error cleared.
     let (likes_status, likes_error): (String, Option<String>) = sqlx::query_as(

@@ -84,7 +84,10 @@ async fn steering_routes_require_login() {
     insert_member(&app.pool, cid, tag).await;
 
     let routes: [(&str, &[(&str, &str)]); 5] = [
-        (&format!("/tag-clusters/{cid}/rename"), &[("label", "Hacked")]),
+        (
+            &format!("/tag-clusters/{cid}/rename"),
+            &[("label", "Hacked")],
+        ),
         (
             &format!("/tag-clusters/{cid}/member/add"),
             &[("tag_id", "1")],
@@ -192,7 +195,10 @@ async fn clusters_page_scope_mine_vs_all() {
     assert_eq!(mine_resp.status(), reqwest::StatusCode::OK);
     let mine_html = mine_resp.text().await.unwrap();
     assert!(mine_html.contains("alpha-mine"), "own tag must show");
-    assert!(!mine_html.contains("beta-other"), "foreign tag hidden (mine)");
+    assert!(
+        !mine_html.contains("beta-other"),
+        "foreign tag hidden (mine)"
+    );
 
     let all_resp = get("?scope=all").await;
     assert_eq!(all_resp.status(), reqwest::StatusCode::OK);
@@ -275,11 +281,12 @@ async fn rename_persists_only_nonempty_label() {
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
     assert_eq!(resp.headers()["location"], "/tag-clusters");
     assert_eq!(cluster_label(&app.pool, cid).await, "Neu");
-    let updated: String = sqlx::query_scalar("SELECT updated_at FROM hub_tag_clusters WHERE id = ?1")
-        .bind(cid)
-        .fetch_one(&app.pool)
-        .await
-        .unwrap();
+    let updated: String =
+        sqlx::query_scalar("SELECT updated_at FROM hub_tag_clusters WHERE id = ?1")
+            .bind(cid)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
     assert_ne!(updated, OLD, "updated_at must be refreshed");
 
     // Whitespace-only label is refused: label stays put.
@@ -433,7 +440,11 @@ async fn delete_cluster_cascades_members() {
         .await
         .unwrap();
     assert_eq!(clusters, 0, "cluster row removed");
-    assert_eq!(member_count(&app.pool, cid).await, 0, "members cascade away");
+    assert_eq!(
+        member_count(&app.pool, cid).await,
+        0,
+        "members cascade away"
+    );
 }
 
 // ── 8. rebuild replaces manual member edits, deterministically ───────────────

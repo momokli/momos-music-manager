@@ -49,6 +49,44 @@ pub enum TagType {
     Rumpelkiste,
 }
 
+/// Seed the 11 default tag types for a user (idempotent via INSERT OR IGNORE).
+/// Called during signup and during the one-time backfill for existing users.
+pub async fn seed_types(pool: &SqlitePool, user_id: i64) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let types = [
+        ("MOOD", "Mood", "M", "💜", 0, 1, 1.0),
+        ("GENRE", "Genre", "G", "🎼", 1, 1, 0.9),
+        ("VIBE", "Vibe", "V", "🌈", 2, 1, 1.0),
+        ("PHASE_1", "Phase 1", "P", "⚡1", 3, 1, 0.7),
+        ("PHASE_2", "Phase 2", "P", "⚡2", 4, 1, 0.7),
+        ("PHASE_3", "Phase 3", "P", "⚡3", 5, 1, 0.7),
+        ("PHASE_4", "Phase 4", "P", "⚡4", 6, 1, 0.7),
+        ("PHASE_5", "Phase 5", "P", "⚡5", 7, 1, 0.7),
+        ("MERKMAL", "Merkmal", "E", "#️⃣", 8, 1, 0.8),
+        ("SETLIST", "Setlist", "S", "📋", 9, 0, 0.2),
+        ("RUMPELKISTE", "Rumpelkiste", "R", "🧺", 10, 0, 0.1),
+    ];
+    for (key, label, abbrev, icon, sort_order, describes, weight) in types {
+        sqlx::query(
+            "INSERT OR IGNORE INTO hub_tag_types
+             (owner_user_id, key, label, abbrev, icon, sort_order, describes, weight, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(user_id)
+        .bind(key)
+        .bind(label)
+        .bind(abbrev)
+        .bind(icon)
+        .bind(sort_order)
+        .bind(describes)
+        .bind(weight)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
 impl TagType {
     /// Canonical DB/string form.
     pub fn as_str(self) -> &'static str {
@@ -332,7 +370,10 @@ mod tests {
         assert!(parse_bool(Some("yes"), false));
         assert!(!parse_bool(Some("0"), true));
         assert!(!parse_bool(Some("false"), true));
-        assert!(!parse_bool(Some("nope"), true), "unknown -> false when parsed");
+        assert!(
+            !parse_bool(Some("nope"), true),
+            "unknown -> false when parsed"
+        );
         assert!(parse_bool(None, true), "unset -> default");
         assert!(!parse_bool(None, false), "unset -> default");
     }

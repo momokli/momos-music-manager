@@ -311,7 +311,10 @@ async fn unlisten_drops_exactly_one_ledger_row() {
         .to_str()
         .unwrap()
         .to_string();
-    assert_eq!(location, "/tonies/history", "PRG back to the page: {location}");
+    assert_eq!(
+        location, "/tonies/history",
+        "PRG back to the page: {location}"
+    );
     assert!(
         flash_cookie(&headers).starts_with("hub_flash=ok:"),
         "flash cookie: {}",

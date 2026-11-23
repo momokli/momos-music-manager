@@ -6,8 +6,8 @@
 
 mod common;
 
-use music_hub::tags;
 use music_hub::recommend::RecScope;
+use music_hub::tags;
 use music_hub::tagtypes::{TagType, set as set_type};
 
 async fn insert_track(
@@ -82,7 +82,8 @@ async fn recommendations_carry_type_and_exclude_sort_types() {
     link(&app.pool, other, dark).await;
     link(&app.pool, other, peak).await; // must be filtered out
 
-    let recs = music_hub::recommend::recommend_tags(&app.pool, seed_t, 20, alice, RecScope::All).await;
+    let recs =
+        music_hub::recommend::recommend_tags(&app.pool, seed_t, 20, alice, RecScope::All).await;
 
     let names: Vec<&str> = recs.iter().map(|r| r.name.as_str()).collect();
     assert!(
@@ -141,7 +142,9 @@ async fn cluster_siblings_are_recommended() {
 
     let dark = tags::ensure_tag(&app.pool, alice, "Dark").await.unwrap();
     let duester = tags::ensure_tag(&app.pool, alice, "Düster").await.unwrap();
-    set_type(&app.pool, alice, dark, Some(TagType::Mood)).await.unwrap();
+    set_type(&app.pool, alice, dark, Some(TagType::Mood))
+        .await
+        .unwrap();
     set_type(&app.pool, alice, duester, Some(TagType::Mood))
         .await
         .unwrap();
@@ -153,7 +156,8 @@ async fn cluster_siblings_are_recommended() {
     link(&app.pool, seed_t, dark).await;
     link(&app.pool, other, duester).await;
 
-    let recs = music_hub::recommend::recommend_tags(&app.pool, seed_t, 20, alice, RecScope::All).await;
+    let recs =
+        music_hub::recommend::recommend_tags(&app.pool, seed_t, 20, alice, RecScope::All).await;
     let names: Vec<&str> = recs.iter().map(|r| r.name.as_str()).collect();
     assert!(
         names.contains(&"Düster"),
@@ -185,14 +189,16 @@ async fn scope_mine_filters_to_owner() {
     let seed_t = insert_track(&app.pool, "sc_seed", "Seed", "ScArti", "ScAlbum").await;
     link(&app.pool, seed_t, dark).await;
 
-    let mine = music_hub::recommend::recommend_tags(&app.pool, seed_t, 20, alice, RecScope::Mine).await;
+    let mine =
+        music_hub::recommend::recommend_tags(&app.pool, seed_t, 20, alice, RecScope::Mine).await;
     let mine_names: Vec<&str> = mine.iter().map(|r| r.name.as_str()).collect();
     assert!(
         !mine_names.contains(&"Düster"),
         "Mine must exclude another owner's tag: {mine_names:?}"
     );
 
-    let all = music_hub::recommend::recommend_tags(&app.pool, seed_t, 20, alice, RecScope::All).await;
+    let all =
+        music_hub::recommend::recommend_tags(&app.pool, seed_t, 20, alice, RecScope::All).await;
     let all_names: Vec<&str> = all.iter().map(|r| r.name.as_str()).collect();
     assert!(
         all_names.contains(&"Düster"),

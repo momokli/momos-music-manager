@@ -195,10 +195,18 @@ async fn union_across_all_four_kinds() {
     insert_playlist_track(&pool, pl, t3, 1).await;
 
     // tag(1) + playlist(2) + lens newest(3) + literal track(4).
-    backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Lens("newest".into())).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Track(t6)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Lens("newest".into()))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Track(t6))
+        .await
+        .unwrap();
 
     let got = backpacks::resolve(&pool, bp, 100).await.unwrap();
     assert_eq!(got.len(), 6, "union of all four kinds is 6 tracks");
@@ -222,15 +230,27 @@ async fn track_in_two_sources_is_deduped_and_scored_two() {
     insert_resolved_tag(&pool, tag, t1).await;
     insert_playlist_track(&pool, pl, t1, 1).await;
 
-    backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl))
+        .await
+        .unwrap();
 
     let got = backpacks::resolve(&pool, bp, 100).await.unwrap();
     assert_eq!(got.len(), 1, "track deduped across sources");
     assert_eq!(got[0].track_id, t1);
     assert_eq!(got[0].score, 2, "two distinct source targets contribute");
-    assert!(got[0].sources.contains(&ResolvedSource::Tag { tag_id: tag }));
-    assert!(got[0].sources.contains(&ResolvedSource::Playlist { playlist_id: pl }));
+    assert!(
+        got[0]
+            .sources
+            .contains(&ResolvedSource::Tag { tag_id: tag })
+    );
+    assert!(
+        got[0]
+            .sources
+            .contains(&ResolvedSource::Playlist { playlist_id: pl })
+    );
 }
 
 #[tokio::test]
@@ -248,8 +268,12 @@ async fn score_ordering_desc() {
     insert_resolved_tag(&pool, tag, t2).await;
     insert_playlist_track(&pool, pl, t1, 1).await;
 
-    backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl))
+        .await
+        .unwrap();
 
     let got = backpacks::resolve(&pool, bp, 100).await.unwrap();
     assert_eq!(ids(&got), vec![t1, t2], "higher score first");
@@ -284,12 +308,18 @@ async fn limit_truncates_after_sort() {
         for tr in tracks {
             insert_resolved_tag(&pool, tag, tr).await;
         }
-        backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
+        backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+            .await
+            .unwrap();
     }
 
     let got = backpacks::resolve(&pool, bp, 2).await.unwrap();
     assert_eq!(got.len(), 2, "limit truncates after sort");
-    assert_eq!(ids(&got), vec![t1, t2], "highest scores survive, not insertion order");
+    assert_eq!(
+        ids(&got),
+        vec![t1, t2],
+        "highest scores survive, not insertion order"
+    );
 }
 
 #[tokio::test]
@@ -301,15 +331,25 @@ async fn limit_is_clamped() {
     let t2 = insert_track(&pool, "t2").await;
     let t3 = insert_track(&pool, "t3").await;
 
-    backpacks::add_source(&pool, bp, SourceRef::Track(t1)).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Track(t2)).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Track(t3)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Track(t1))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Track(t2))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Track(t3))
+        .await
+        .unwrap();
 
     let low = backpacks::resolve(&pool, bp, 0).await.unwrap();
     assert!(low.len() <= 1, "limit 0 clamps up to 1, got {}", low.len());
 
     let high = backpacks::resolve(&pool, bp, 9999).await.unwrap();
-    assert_eq!(high.len(), 3, "high limit clamps to 500, all 3 tracks present");
+    assert_eq!(
+        high.len(),
+        3,
+        "high limit clamps to 500, all 3 tracks present"
+    );
 }
 
 #[tokio::test]
@@ -330,8 +370,12 @@ async fn deterministic_tie_break_by_position_then_id() {
     // Earlier position than the playlist: position decides before id.
     insert_playlist_track(&pool, pl, t_late, 1).await;
 
-    backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap(); // position 1
-    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap(); // position 2
+    backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap(); // position 1
+    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl))
+        .await
+        .unwrap(); // position 2
 
     let first = backpacks::resolve(&pool, bp, 100).await.unwrap();
     let second = backpacks::resolve(&pool, bp, 100).await.unwrap();
@@ -358,10 +402,16 @@ async fn lens_liked_is_user_scoped() {
     insert_liked(&pool, u1, t1, TS).await;
     insert_liked(&pool, u2, t2, TS).await;
 
-    backpacks::add_source(&pool, bp, SourceRef::Lens("liked".into())).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Lens("liked".into()))
+        .await
+        .unwrap();
 
     let got = backpacks::resolve(&pool, bp, 100).await.unwrap();
-    assert_eq!(ids(&got), vec![t1], "only the backpack owner's likes resolve");
+    assert_eq!(
+        ids(&got),
+        vec![t1],
+        "only the backpack owner's likes resolve"
+    );
     assert!(!ids(&got).contains(&t2), "other user's like must be absent");
 }
 
@@ -376,7 +426,9 @@ async fn lens_unheard_orders_by_play_count() {
     insert_traktor_play(&pool, user, t_low, 0).await;
     insert_traktor_play(&pool, user, t_high, 9).await;
 
-    backpacks::add_source(&pool, bp, SourceRef::Lens("unheard".into())).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Lens("unheard".into()))
+        .await
+        .unwrap();
 
     let got = backpacks::resolve(&pool, bp, 100).await.unwrap();
     assert_eq!(ids(&got), vec![t_low, t_high], "least-played first");
@@ -411,7 +463,10 @@ async fn unknown_lens_key_falls_back_to_newest() {
     have.sort();
     let mut want = vec![t1, t2];
     want.sort();
-    assert_eq!(have, want, "unknown lens key falls back to newest (all hub tracks)");
+    assert_eq!(
+        have, want,
+        "unknown lens key falls back to newest (all hub tracks)"
+    );
     assert!(!got.is_empty(), "fallback never errors");
 }
 
@@ -427,8 +482,12 @@ async fn sources_listed_once_each_in_position_order() {
     insert_resolved_tag(&pool, tag, t1).await;
     insert_playlist_track(&pool, pl, t1, 1).await;
 
-    backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap(); // position 1
-    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap(); // position 2
+    backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap(); // position 1
+    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl))
+        .await
+        .unwrap(); // position 2
 
     let got = backpacks::resolve(&pool, bp, 100).await.unwrap();
     assert_eq!(got.len(), 1);
@@ -529,5 +588,8 @@ async fn tag_source_limit_is_per_source() {
     let mut have = ids(&got);
     have.sort();
     first_five.sort();
-    assert_eq!(have, first_five, "kept the 5 lowest-id (first) tagged tracks");
+    assert_eq!(
+        have, first_five,
+        "kept the 5 lowest-id (first) tagged tracks"
+    );
 }

@@ -25,12 +25,12 @@
 //! or unknown `device_id` is indistinguishable and yields a `404` (no existence
 //! leak). The JSON/HTML shapes never contain `token_hash` or any token material.
 
+use askama::Template;
 use axum::extract::{Form, Path, RawForm, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use askama::Template;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -205,17 +205,18 @@ pub async fn resolve_effective_comment_named(
         }
     }
 
-    (pick_comment(body.as_deref(), &settings.comment_template), name)
+    (
+        pick_comment(body.as_deref(), &settings.comment_template),
+        name,
+    )
 }
 
 /// Convenience wrapper around [`resolve_effective_comment_named`] returning only
 /// the resolved body.
-pub async fn resolve_effective_comment(
-    pool: &SqlitePool,
-    device_id: i64,
-    user_id: i64,
-) -> String {
-    resolve_effective_comment_named(pool, device_id, user_id).await.0
+pub async fn resolve_effective_comment(pool: &SqlitePool, device_id: i64, user_id: i64) -> String {
+    resolve_effective_comment_named(pool, device_id, user_id)
+        .await
+        .0
 }
 
 // ── queries ─────────────────────────────────────────────────────────────────
@@ -298,8 +299,8 @@ pub async fn upsert(
     .bind(device_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let (cur_fmt, cur_tpl, cur_ref) = existing
-        .unwrap_or_else(|| ("flac".to_string(), String::new(), None));
+    let (cur_fmt, cur_tpl, cur_ref) =
+        existing.unwrap_or_else(|| ("flac".to_string(), String::new(), None));
 
     let fmt = patch.preferred_format.unwrap_or(cur_fmt);
     let tpl = patch.comment_template.unwrap_or(cur_tpl);
@@ -703,7 +704,7 @@ async fn form_submit(
         match raw_tid.parse::<i64>() {
             Ok(n) => Some(n),
             Err(_) => {
-                return flash_redirect("/kellner", "Fehler: ungültige Vorlagen-ID.".to_string())
+                return flash_redirect("/kellner", "Fehler: ungültige Vorlagen-ID.".to_string());
             }
         }
     };
@@ -714,7 +715,7 @@ async fn form_submit(
                 return flash_redirect(
                     "/kellner",
                     "Fehler: unbekannte oder fremde Vorlage.".to_string(),
-                )
+                );
             }
             Err(e) => {
                 tracing::warn!(error = %e, "kellner form: template visibility check failed");
@@ -750,7 +751,10 @@ async fn form_submit(
             }
             Err(e) => {
                 tracing::warn!(error = %e, "kellner form: backpack ownership check failed");
-                return flash_redirect("/kellner", "Fehler: Backpack-Prüfung fehlgeschlagen.".to_string());
+                return flash_redirect(
+                    "/kellner",
+                    "Fehler: Backpack-Prüfung fehlgeschlagen.".to_string(),
+                );
             }
         }
     }
@@ -839,9 +843,7 @@ async fn template_preview(
         };
         match crate::comment_templates::get_visible(&st.pool, user_id, tid).await {
             Ok(Some(t)) => t.body,
-            Ok(None) => {
-                return (StatusCode::NOT_FOUND, "Vorlage nicht gefunden.").into_response()
-            }
+            Ok(None) => return (StatusCode::NOT_FOUND, "Vorlage nicht gefunden.").into_response(),
             Err(e) => {
                 tracing::warn!(error = %e, "template preview: template lookup failed");
                 return (StatusCode::INTERNAL_SERVER_ERROR, "Vorschau fehlgeschlagen")
@@ -918,7 +920,15 @@ mod tests {
     #[test]
     fn clean_template_accepts_double_brace_edge_cases() {
         // `{{` is an escaped literal, never an unknown placeholder.
-        for t in ["{{", "{{tags}}", "a {{ b", "{{{tags}}}", "}", "{tags", "no braces"] {
+        for t in [
+            "{{",
+            "{{tags}}",
+            "a {{ b",
+            "{{{tags}}}",
+            "}",
+            "{tags",
+            "no braces",
+        ] {
             assert!(clean_template(t).is_ok(), "{t:?} should be accepted");
         }
         // A `{name}` after an escaped pair is still validated.
@@ -936,7 +946,10 @@ mod tests {
     #[test]
     fn pick_comment_matrix() {
         // A non-blank visible template body wins.
-        assert_eq!(pick_comment(Some("{key} / {bpm}"), "legacy"), "{key} / {bpm}");
+        assert_eq!(
+            pick_comment(Some("{key} / {bpm}"), "legacy"),
+            "{key} / {bpm}"
+        );
         assert_eq!(pick_comment(Some("{tags}"), ""), "{tags}");
         assert_eq!(pick_comment(Some("  {tags}  "), "legacy"), "{tags}");
         // Absent / blank template -> legacy free text.
@@ -992,7 +1005,9 @@ mod tests {
 
     #[test]
     fn parse_form_keeps_repeats_and_decodes() {
-        let f = parse_form("preferred_format=mp3&active_backpack_ids=3&active_backpack_ids=5&comment_template=a+b%26c");
+        let f = parse_form(
+            "preferred_format=mp3&active_backpack_ids=3&active_backpack_ids=5&comment_template=a+b%26c",
+        );
         assert_eq!(first(&f, "preferred_format"), Some("mp3"));
         let ids: Vec<&str> = f
             .iter()

@@ -17,7 +17,7 @@
 use anyhow::Result;
 use sqlx::SqlitePool;
 
-use crate::tagtypes::{TagType, TYPE_NAMES};
+use crate::tagtypes::{TYPE_NAMES, TagType};
 
 /// The `hub_tags.type` value of a tag, canonicalised through
 /// [`TagType::parse`]; `None` for an untyped or unknown type string.
@@ -34,8 +34,14 @@ fn sort_typed(mut rows: Vec<(String, Option<String>)>) -> Vec<(String, Option<St
         let b = canonical_type(type_b.as_deref());
         match (a, b) {
             (Some(a), Some(b)) => {
-                let ia = TYPE_NAMES.iter().position(|n| *n == a).unwrap_or(usize::MAX);
-                let ib = TYPE_NAMES.iter().position(|n| *n == b).unwrap_or(usize::MAX);
+                let ia = TYPE_NAMES
+                    .iter()
+                    .position(|n| *n == a)
+                    .unwrap_or(usize::MAX);
+                let ib = TYPE_NAMES
+                    .iter()
+                    .position(|n| *n == b)
+                    .unwrap_or(usize::MAX);
                 ia.cmp(&ib)
                     .then_with(|| name_a.to_lowercase().cmp(&name_b.to_lowercase()))
                     .then_with(|| name_a.cmp(name_b))
@@ -125,7 +131,11 @@ pub fn display_key(camelot: Option<&str>, musical_key: Option<&str>) -> Option<S
 }
 
 /// The services that get a source-id prefix, in export order.
-const SOURCE_SERVICES: &[(&str, &str)] = &[("spotify", "sp:"), ("soundcloud", "sc:"), ("youtube", "yt:")];
+const SOURCE_SERVICES: &[(&str, &str)] = &[
+    ("spotify", "sp:"),
+    ("soundcloud", "sc:"),
+    ("youtube", "yt:"),
+];
 
 /// The track's external ids as `sp:`/`sc:`/`yt:`-prefixed strings, service
 /// order `spotify` → `soundcloud` → `youtube`, ids per service by
@@ -180,11 +190,11 @@ mod tests {
         assert_eq!(
             sorted,
             vec![
-                "bass", "Deep", // MOOD, name-sorted
-                "Acid",    // GENRE
-                "Drive",   // PHASE_2 (fixed phase order)
-                "Peak",    // PHASE_4
-                "Hypno",   // MERKMAL
+                "bass", "Deep",  // MOOD, name-sorted
+                "Acid",  // GENRE
+                "Drive", // PHASE_2 (fixed phase order)
+                "Peak",  // PHASE_4
+                "Hypno", // MERKMAL
                 "Alpha", "zebra", // untyped, name-sorted
             ]
         );
@@ -211,10 +221,22 @@ mod tests {
 
     #[test]
     fn display_key_prefers_camelot_then_normalises_musical_key() {
-        assert_eq!(display_key(Some("8A"), Some("G-Minor")).as_deref(), Some("8A"));
-        assert_eq!(display_key(Some("  "), Some("G-Minor")).as_deref(), Some("G-Minor"));
-        assert_eq!(display_key(None, Some("G-Minor")).as_deref(), Some("G-Minor"));
-        assert_eq!(display_key(None, Some("G -- Minor")).as_deref(), Some("G-Minor"));
+        assert_eq!(
+            display_key(Some("8A"), Some("G-Minor")).as_deref(),
+            Some("8A")
+        );
+        assert_eq!(
+            display_key(Some("  "), Some("G-Minor")).as_deref(),
+            Some("G-Minor")
+        );
+        assert_eq!(
+            display_key(None, Some("G-Minor")).as_deref(),
+            Some("G-Minor")
+        );
+        assert_eq!(
+            display_key(None, Some("G -- Minor")).as_deref(),
+            Some("G-Minor")
+        );
         assert_eq!(display_key(None, Some("11 m")).as_deref(), Some("11-m"));
         assert_eq!(display_key(None, Some("   ")), None);
         assert_eq!(display_key(None, None), None);
