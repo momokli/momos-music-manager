@@ -7,12 +7,12 @@
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use music_hub::config::Config;
-use music_hub::worker::{playlist_listing_pass, PlaylistPollOutcome};
+use music_hub::worker::{PlaylistPollOutcome, playlist_listing_pass};
 use serde_json::{Value, json};
 
 const NOW: &str = "2026-01-01T00:00:00+00:00";
@@ -83,7 +83,9 @@ async fn mock_spotify(rate_limited_listing: bool) -> (String, Hits) {
 async fn setup(spotify_base: &str) -> (tempfile::TempDir, Config, sqlx::SqlitePool) {
     let dir = tempfile::tempdir().expect("tempdir");
     let url = format!("sqlite:{}/hub.db", dir.path().display());
-    let pool = music_hub::db::connect(&url).await.expect("connect + migrate");
+    let pool = music_hub::db::connect(&url)
+        .await
+        .expect("connect + migrate");
     let mut cfg = Config::for_test(url);
     cfg.spotify_api_base = spotify_base.to_string();
     (dir, cfg, pool)

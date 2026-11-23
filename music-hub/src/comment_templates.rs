@@ -221,7 +221,9 @@ pub async fn rename(
     if name.is_empty() {
         bail!("name required");
     }
-    let row = get(pool, id).await?.ok_or_else(|| anyhow::anyhow!("Vorlage nicht gefunden"))?;
+    let row = get(pool, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Vorlage nicht gefunden"))?;
     if !can_mutate(&row, uid, is_admin) {
         bail!("keine Berechtigung");
     }
@@ -258,7 +260,9 @@ pub async fn update_body(
     id: i64,
     body: &str,
 ) -> Result<()> {
-    let row = get(pool, id).await?.ok_or_else(|| anyhow::anyhow!("Vorlage nicht gefunden"))?;
+    let row = get(pool, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Vorlage nicht gefunden"))?;
     if !can_mutate(&row, uid, is_admin) {
         bail!("keine Berechtigung");
     }
@@ -282,7 +286,9 @@ pub async fn set_shared(
     id: i64,
     is_shared: bool,
 ) -> Result<()> {
-    let row = get(pool, id).await?.ok_or_else(|| anyhow::anyhow!("Vorlage nicht gefunden"))?;
+    let row = get(pool, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Vorlage nicht gefunden"))?;
     if !can_mutate(&row, uid, is_admin) {
         bail!("keine Berechtigung");
     }
@@ -302,7 +308,9 @@ pub async fn set_shared(
 /// within the caller's own templates (`name`, then `name (Kopie)`,
 /// `name (Kopie 2)`, …). Returns the new id.
 pub async fn duplicate(pool: &SqlitePool, uid: i64, id: i64) -> Result<i64> {
-    let row = get(pool, id).await?.ok_or_else(|| anyhow::anyhow!("Vorlage nicht gefunden"))?;
+    let row = get(pool, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Vorlage nicht gefunden"))?;
 
     let base = row.name.trim();
     let mut candidate = base.to_string();
@@ -333,7 +341,9 @@ pub async fn duplicate(pool: &SqlitePool, uid: i64, id: i64) -> Result<i64> {
 /// Delete a template. Requires mutability (`uid` owns it, or `is_admin` on a
 /// system row). Returns `true` when a row was removed.
 pub async fn delete(pool: &SqlitePool, uid: i64, is_admin: bool, id: i64) -> Result<bool> {
-    let row = get(pool, id).await?.ok_or_else(|| anyhow::anyhow!("Vorlage nicht gefunden"))?;
+    let row = get(pool, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Vorlage nicht gefunden"))?;
     if !can_mutate(&row, uid, is_admin) {
         bail!("keine Berechtigung");
     }

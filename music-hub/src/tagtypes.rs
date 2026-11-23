@@ -332,7 +332,10 @@ mod tests {
         assert!(parse_bool(Some("yes"), false));
         assert!(!parse_bool(Some("0"), true));
         assert!(!parse_bool(Some("false"), true));
-        assert!(!parse_bool(Some("nope"), true), "unknown -> false when parsed");
+        assert!(
+            !parse_bool(Some("nope"), true),
+            "unknown -> false when parsed"
+        );
         assert!(parse_bool(None, true), "unset -> default");
         assert!(!parse_bool(None, false), "unset -> default");
     }

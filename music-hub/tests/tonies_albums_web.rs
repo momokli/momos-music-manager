@@ -222,10 +222,7 @@ async fn spawn_music_api_counted(
         .route("/deezer/search/artist", get(search))
         .route("/deezer/album/{id}", get(album))
         .with_state(())
-        .layer(axum::middleware::from_fn_with_state(
-            counter,
-            bump,
-        ));
+        .layer(axum::middleware::from_fn_with_state(counter, bump));
     (serve(app).await, hits)
 }
 

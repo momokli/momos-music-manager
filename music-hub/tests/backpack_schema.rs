@@ -95,12 +95,25 @@ async fn insert_backpack(pool: &SqlitePool, user_id: i64, name: &str, active: i6
 }
 
 /// Insert an item of the given kind, binding the relevant source column.
-async fn insert_item(pool: &SqlitePool, backpack_id: i64, kind: &str, source: i64) -> Result<(), sqlx::Error> {
+async fn insert_item(
+    pool: &SqlitePool,
+    backpack_id: i64,
+    kind: &str,
+    source: i64,
+) -> Result<(), sqlx::Error> {
     let sql = match kind {
-        "tag" => "INSERT INTO hub_backpack_items (backpack_id, source_kind, source_tag_id, added_at) VALUES (?1, 'tag', ?2, ?3)",
-        "playlist" => "INSERT INTO hub_backpack_items (backpack_id, source_kind, source_playlist_id, added_at) VALUES (?1, 'playlist', ?2, ?3)",
-        "track" => "INSERT INTO hub_backpack_items (backpack_id, source_kind, source_track_id, added_at) VALUES (?1, 'track', ?2, ?3)",
-        "lens" => "INSERT INTO hub_backpack_items (backpack_id, source_kind, source_lens, added_at) VALUES (?1, 'lens', ?2, ?3)",
+        "tag" => {
+            "INSERT INTO hub_backpack_items (backpack_id, source_kind, source_tag_id, added_at) VALUES (?1, 'tag', ?2, ?3)"
+        }
+        "playlist" => {
+            "INSERT INTO hub_backpack_items (backpack_id, source_kind, source_playlist_id, added_at) VALUES (?1, 'playlist', ?2, ?3)"
+        }
+        "track" => {
+            "INSERT INTO hub_backpack_items (backpack_id, source_kind, source_track_id, added_at) VALUES (?1, 'track', ?2, ?3)"
+        }
+        "lens" => {
+            "INSERT INTO hub_backpack_items (backpack_id, source_kind, source_lens, added_at) VALUES (?1, 'lens', ?2, ?3)"
+        }
         other => panic!("unknown kind {other}"),
     };
     if kind == "lens" {
@@ -123,7 +136,10 @@ async fn insert_item(pool: &SqlitePool, backpack_id: i64, kind: &str, source: i6
 }
 
 async fn count(pool: &SqlitePool, sql: &str) -> i64 {
-    sqlx::query_scalar(sql).fetch_one(pool).await.expect("count")
+    sqlx::query_scalar(sql)
+        .fetch_one(pool)
+        .await
+        .expect("count")
 }
 
 #[tokio::test]
@@ -191,10 +207,18 @@ async fn source_kind_requires_matching_source_column() {
     assert!(res.is_err(), "tag with two source columns must fail");
 
     // Valid combination per kind → OK.
-    insert_item(&pool, bp, "tag", tag).await.expect("valid tag item");
-    insert_item(&pool, bp, "playlist", pl).await.expect("valid playlist item");
-    insert_item(&pool, bp, "lens", 0).await.expect("valid lens item");
-    insert_item(&pool, bp, "track", tr).await.expect("valid track item");
+    insert_item(&pool, bp, "tag", tag)
+        .await
+        .expect("valid tag item");
+    insert_item(&pool, bp, "playlist", pl)
+        .await
+        .expect("valid playlist item");
+    insert_item(&pool, bp, "lens", 0)
+        .await
+        .expect("valid lens item");
+    insert_item(&pool, bp, "track", tr)
+        .await
+        .expect("valid track item");
 
     assert_eq!(
         count(&pool, "SELECT COUNT(*) FROM hub_backpack_items").await,
@@ -219,7 +243,10 @@ async fn at_most_one_active_backpack_per_user() {
     .bind(TS)
     .execute(&pool)
     .await;
-    assert!(res.is_err(), "second active backpack for same user must fail");
+    assert!(
+        res.is_err(),
+        "second active backpack for same user must fail"
+    );
 
     // Inactive second backpack for the same user → OK.
     insert_backpack(&pool, alice, "A3", 0).await;

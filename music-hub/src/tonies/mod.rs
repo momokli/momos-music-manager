@@ -13,14 +13,14 @@ pub mod client;
 pub mod run;
 pub mod sync;
 
-pub use autosync::{Debounce, due_bindings, is_due, run_due};
 pub use albums::{AlbumFit, AlbumPlan, fit_albums, mark_seen, resolve, seen_ids};
+pub use autosync::{Debounce, due_bindings, is_due, run_due};
 pub use bindings::{
     AlbumItem, Binding, SOURCE_ALBUMS, SOURCE_BACKPACK, SOURCE_PLAYLIST, SOURCE_TAG,
-    delete_binding, get_binding, list_album_items, list_bindings, list_seen_albums,
-    order_by_label, reset_seen, set_album_items, set_binding_album_mode, set_binding_order,
-    source_kind_label, unlisten_album, upsert_binding, valid_album_mode, valid_format,
-    valid_mode, valid_order_by, valid_source_kind,
+    delete_binding, get_binding, list_album_items, list_bindings, list_seen_albums, order_by_label,
+    reset_seen, set_album_items, set_binding_album_mode, set_binding_order, source_kind_label,
+    unlisten_album, upsert_binding, valid_album_mode, valid_format, valid_mode, valid_order_by,
+    valid_source_kind,
 };
 pub use run::{
     Claim, RunOutcome, SyncOptions, SyncRow, Transcoding, claim_run, execute_binding, finish_run,
@@ -516,8 +516,7 @@ mod tests {
             "secondsPresent": 4435, "secondsRemaining": 964,
             "chapters": [{"id": "ch1", "title": "Intro", "seconds": 92.820646}]
         });
-        let t: CreativeTonie =
-            serde_json::from_value(v).expect("fractional seconds must parse");
+        let t: CreativeTonie = serde_json::from_value(v).expect("fractional seconds must parse");
         assert_eq!(t.chapters.len(), 1);
         assert_eq!(t.chapters[0].seconds, Some(92.820646));
     }

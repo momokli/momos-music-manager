@@ -31,7 +31,10 @@ async fn setup() -> (tempfile::TempDir, SqlitePool) {
         .connect_with(opts)
         .await
         .expect("connect");
-    sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migrate");
     (dir, pool)
 }
 
@@ -142,7 +145,9 @@ async fn schema_has_table_pk_index_and_item_cascade() {
     tag_track(&pool, tag, t1).await;
     tag_track(&pool, tag, t2).await;
 
-    let item = backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
+    let item = backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
     assert_eq!(materialised(&pool, item).await.len(), 2, "add materialises");
 
     // Index exists.
@@ -187,7 +192,9 @@ async fn track_delete_cascades_materialised_rows() {
     let tag = insert_tag(&pool, user, "t").await;
     tag_track(&pool, tag, t1).await;
     tag_track(&pool, tag, t2).await;
-    let item = backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
+    let item = backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
     assert_eq!(materialised(&pool, item).await.len(), 2);
 
     sqlx::query("DELETE FROM hub_tracks WHERE id = ?1")
@@ -216,12 +223,18 @@ async fn backend_literals_per_kind() {
     let pl = insert_playlist(&pool, user, "pl").await;
     playlist_track(&pool, pl, t2, 0).await;
 
-    let i_tag = backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
-    let i_pl = backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap();
+    let i_tag = backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
+    let i_pl = backpacks::add_source(&pool, bp, SourceRef::Playlist(pl))
+        .await
+        .unwrap();
     let i_lens = backpacks::add_source(&pool, bp, SourceRef::Lens("newest".to_string()))
         .await
         .unwrap();
-    let i_track = backpacks::add_source(&pool, bp, SourceRef::Track(t3)).await.unwrap();
+    let i_track = backpacks::add_source(&pool, bp, SourceRef::Track(t3))
+        .await
+        .unwrap();
 
     assert_eq!(materialised(&pool, i_tag).await[0].1, "tag");
     assert_eq!(materialised(&pool, i_pl).await[0].1, "playlist");
@@ -272,8 +285,12 @@ async fn materialised_union_matches_resolver() {
         .await
         .unwrap();
 
-    backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl))
+        .await
+        .unwrap();
     backpacks::add_source(&pool, bp, SourceRef::Lens("liked".to_string()))
         .await
         .unwrap();
@@ -316,7 +333,12 @@ async fn availability_counts_ready_over_with_isrc() {
         playlist_track(&pool, pl, *t, pos as i64).await;
     }
 
-    for (isrc, state) in [("ISRC1", "ready"), ("ISRC2", "ready"), ("ISRC3", "missing"), ("", "ready")] {
+    for (isrc, state) in [
+        ("ISRC1", "ready"),
+        ("ISRC2", "ready"),
+        ("ISRC3", "missing"),
+        ("", "ready"),
+    ] {
         sqlx::query("INSERT INTO hub_music_state (isrc, state, checked_at) VALUES (?1, ?2, ?3)")
             .bind(isrc)
             .bind(state)
@@ -326,7 +348,9 @@ async fn availability_counts_ready_over_with_isrc() {
             .unwrap();
     }
 
-    let item = backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap();
+    let item = backpacks::add_source(&pool, bp, SourceRef::Playlist(pl))
+        .await
+        .unwrap();
 
     let st = backpacks::source_stats(&pool, bp).await.unwrap();
     assert_eq!(st.len(), 1);
@@ -354,15 +378,21 @@ async fn availability_is_distinct_across_items() {
     let pl = insert_playlist(&pool, user, "d-pl").await;
     playlist_track(&pool, pl, t1, 0).await;
     for isrc in ["D1", "D2"] {
-        sqlx::query("INSERT INTO hub_music_state (isrc, state, checked_at) VALUES (?1, 'ready', ?2)")
-            .bind(isrc)
-            .bind(TS)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO hub_music_state (isrc, state, checked_at) VALUES (?1, 'ready', ?2)",
+        )
+        .bind(isrc)
+        .bind(TS)
+        .execute(&pool)
+        .await
+        .unwrap();
     }
-    backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl))
+        .await
+        .unwrap();
 
     let bs = backpacks::backpack_stats(&pool, bp).await.unwrap();
     assert_eq!(bs.track_count, 2, "distinct, not summed");
@@ -383,7 +413,9 @@ async fn refresh_is_idempotent_and_preserves_computed_at() {
     tag_track(&pool, tag, t1).await;
     tag_track(&pool, tag, t2).await;
 
-    let item = backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
+    let item = backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
     let before = materialised(&pool, item).await;
     assert_eq!(before.len(), 2);
 
@@ -411,7 +443,10 @@ async fn refresh_is_idempotent_and_preserves_computed_at() {
     );
     assert_eq!(materialised(&pool, item).await.len(), 3);
     // And a following run is a no-op again.
-    assert_eq!(backpacks::refresh_item_tracks(&pool, item).await.unwrap(), 0);
+    assert_eq!(
+        backpacks::refresh_item_tracks(&pool, item).await.unwrap(),
+        0
+    );
 }
 
 // ── 6. Sources without resolvable tracks ────────────────────────────────────
@@ -423,7 +458,9 @@ async fn empty_sources_materialise_zero_rows() {
     let bp = insert_backpack(&pool, user, "P").await;
     // Tag with no members and an empty "liked" lens.
     let tag = insert_tag(&pool, user, "nobody").await;
-    let i_tag = backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
+    let i_tag = backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
     let i_lens = backpacks::add_source(&pool, bp, SourceRef::Lens("liked".to_string()))
         .await
         .unwrap();
@@ -444,10 +481,18 @@ async fn empty_sources_materialise_zero_rows() {
 #[tokio::test]
 async fn refresh_of_missing_item_is_ok() {
     let (_dir, pool) = setup().await;
-    assert_eq!(backpacks::refresh_item_tracks(&pool, 9999).await.unwrap(), 0);
+    assert_eq!(
+        backpacks::refresh_item_tracks(&pool, 9999).await.unwrap(),
+        0
+    );
     // Unknown backpack stats are all-zero, not an error.
     let stats = backpacks::backpack_stats(&pool, 9999).await.unwrap();
     assert_eq!(stats, backpacks::BackpackStats::default());
-    assert!(backpacks::source_stats(&pool, 9999).await.unwrap().is_empty());
+    assert!(
+        backpacks::source_stats(&pool, 9999)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(backpacks::refresh_all(&pool).await.unwrap(), 0);
 }

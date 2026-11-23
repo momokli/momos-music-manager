@@ -52,11 +52,7 @@ async fn tag_types(pool: &SqlitePool, track_id: i64, owners: &[i64]) -> HashMap<
     qb.push_bind(track_id);
     qb.push(" AND t.type IS NOT NULL");
     owner_clause(&mut qb, owners);
-    let rows = qb
-        .build()
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+    let rows = qb.build().fetch_all(pool).await.unwrap_or_default();
     rows.into_iter().map(|r| (r.get(0), r.get(1))).collect()
 }
 
@@ -79,13 +75,7 @@ async fn tag_types_filtered(
 /// pairs that have different types. Rumpelkiste tags are ignored.
 ///
 /// `owners` restricts the tags that count to the given owners (`&[]` = all).
-pub async fn tag_similarity(
-    pool: &SqlitePool,
-    a: i64,
-    b: i64,
-    e: &Engine,
-    owners: &[i64],
-) -> f64 {
+pub async fn tag_similarity(pool: &SqlitePool, a: i64, b: i64, e: &Engine, owners: &[i64]) -> f64 {
     let rumpel = rumpelkiste_tag_ids(pool).await;
     let ta = tag_types_filtered(pool, a, &rumpel, owners).await;
     let tb = tag_types_filtered(pool, b, &rumpel, owners).await;

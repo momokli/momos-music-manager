@@ -131,7 +131,12 @@ pub async fn similar_tracks(
     title: &str,
     limit: usize,
 ) -> Result<Vec<Similar>> {
-    let Some(key) = cfg.cosine_api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) else {
+    let Some(key) = cfg
+        .cosine_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    else {
         return Ok(Vec::new());
     };
     let artist = artist.trim();
@@ -174,14 +179,21 @@ pub async fn similar_tracks(
     let search_req = http
         .get(&search_url)
         .bearer_auth(key)
-        .query(&[("q", format!("{artist} {title}")), ("limit", "5".to_string())])
+        .query(&[
+            ("q", format!("{artist} {title}")),
+            ("limit", "5".to_string()),
+        ])
         .send()
         .await;
     let mut hit: Option<String> = None;
     if let Ok(resp) = search_req {
         if resp.status().is_success() {
             let body: SearchResp = resp.json().await.unwrap_or(SearchResp { data: vec![] });
-            hit = body.data.into_iter().map(|t| t.id).find(|id| !id.is_empty());
+            hit = body
+                .data
+                .into_iter()
+                .map(|t| t.id)
+                .find(|id| !id.is_empty());
         }
     }
     let Some(id) = hit else {

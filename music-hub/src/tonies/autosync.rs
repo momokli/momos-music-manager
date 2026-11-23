@@ -131,7 +131,8 @@ pub async fn due_bindings(
     d: &Debounce,
 ) -> Result<Vec<Binding>> {
     let quiet_cutoff = (now - chrono::Duration::seconds(d.quiet_secs.max(0))).to_rfc3339();
-    let interval_cutoff = (now - chrono::Duration::seconds(d.min_interval_secs.max(0))).to_rfc3339();
+    let interval_cutoff =
+        (now - chrono::Duration::seconds(d.min_interval_secs.max(0))).to_rfc3339();
     let rows = sqlx::query(
         "SELECT id, tonie_id, tonie_name, source_kind, source_id, source_name, format,
                 cap_seconds, mode, order_by, album_mode, dirty_since, last_sync_at, last_sync_status

@@ -64,7 +64,10 @@ async fn mock_spotify() -> String {
     }
     async fn playlist_items(Path(id): Path<String>) -> Json<Value> {
         let items = match id.as_str() {
-            "pl-owned" => vec![item("trk-p1", "Playlist One", "ISRC-P1"), item("trk-l1", "Liked One", "ISRC-L1")],
+            "pl-owned" => vec![
+                item("trk-p1", "Playlist One", "ISRC-P1"),
+                item("trk-l1", "Liked One", "ISRC-L1"),
+            ],
             _ => vec![],
         };
         Json(json!({ "items": items, "next": null }))
@@ -129,7 +132,9 @@ async fn ingest_classifies_playlists_and_dedups_tracks() {
     let fx = setup().await;
     link_account(&fx.pool, "dave").await;
 
-    let summary = ingest::ingest_user(&fx.pool, &fx.cfg, "dave").await.unwrap();
+    let summary = ingest::ingest_user(&fx.pool, &fx.cfg, "dave")
+        .await
+        .unwrap();
 
     assert_eq!(summary.playlists, 2);
     assert_eq!(summary.followed, 1);
@@ -156,8 +161,14 @@ async fn ingest_classifies_playlists_and_dedups_tracks() {
     assert_eq!(owned_items, 1);
     assert_eq!(followed_items, 0);
 
-    assert_eq!(count(&fx.pool, "SELECT COUNT(*) FROM hub_liked_tracks").await, 2);
-    assert_eq!(count(&fx.pool, "SELECT COUNT(*) FROM hub_playlist_tracks").await, 2);
+    assert_eq!(
+        count(&fx.pool, "SELECT COUNT(*) FROM hub_liked_tracks").await,
+        2
+    );
+    assert_eq!(
+        count(&fx.pool, "SELECT COUNT(*) FROM hub_playlist_tracks").await,
+        2
+    );
 }
 
 #[tokio::test]
@@ -166,8 +177,12 @@ async fn second_user_shares_tracks_without_duplicating_rows() {
     link_account(&fx.pool, "dave").await;
     link_account(&fx.pool, "erin").await;
 
-    ingest::ingest_user(&fx.pool, &fx.cfg, "dave").await.unwrap();
-    ingest::ingest_user(&fx.pool, &fx.cfg, "erin").await.unwrap();
+    ingest::ingest_user(&fx.pool, &fx.cfg, "dave")
+        .await
+        .unwrap();
+    ingest::ingest_user(&fx.pool, &fx.cfg, "erin")
+        .await
+        .unwrap();
 
     // Same global track rows for both users — no duplication.
     assert_eq!(count(&fx.pool, "SELECT COUNT(*) FROM hub_tracks").await, 3);
@@ -192,10 +207,17 @@ async fn re_ingest_replaces_likes_idempotently() {
     let fx = setup().await;
     link_account(&fx.pool, "dave").await;
 
-    ingest::ingest_user(&fx.pool, &fx.cfg, "dave").await.unwrap();
-    ingest::ingest_user(&fx.pool, &fx.cfg, "dave").await.unwrap();
+    ingest::ingest_user(&fx.pool, &fx.cfg, "dave")
+        .await
+        .unwrap();
+    ingest::ingest_user(&fx.pool, &fx.cfg, "dave")
+        .await
+        .unwrap();
 
-    assert_eq!(count(&fx.pool, "SELECT COUNT(*) FROM hub_liked_tracks").await, 2);
+    assert_eq!(
+        count(&fx.pool, "SELECT COUNT(*) FROM hub_liked_tracks").await,
+        2
+    );
     assert_eq!(count(&fx.pool, "SELECT COUNT(*) FROM hub_tracks").await, 3);
     assert_eq!(
         count(&fx.pool, "SELECT COUNT(*) FROM hub_playlist_tracks").await,

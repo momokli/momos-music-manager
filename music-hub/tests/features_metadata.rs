@@ -163,12 +163,10 @@ async fn metadata_range_none_on_malformed_body() {
 async fn metadata_range_empty_reply_is_some_empty() {
     let base = mock_metadata_empty().await;
     let cfg = cfg_with(base, Some("tok"));
-    let (items, missing) = music_hub::music_api::metadata_range(
-        &cfg,
-        &["USAAA0000009".to_string()],
-    )
-    .await
-    .expect("empty payload is Some");
+    let (items, missing) =
+        music_hub::music_api::metadata_range(&cfg, &["USAAA0000009".to_string()])
+            .await
+            .expect("empty payload is Some");
     assert!(items.is_empty());
     assert!(missing.is_empty());
 }
@@ -191,13 +189,12 @@ async fn backfill_transient_failure_does_not_poison() {
         .await
         .unwrap();
     assert_eq!(n, 0, "transient failure writes nothing");
-    let rows: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM hub_track_features WHERE track_id = ?1",
-    )
-    .bind(app.seed.t_all)
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM hub_track_features WHERE track_id = ?1")
+            .bind(app.seed.t_all)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
     assert_eq!(rows, 0, "no check marker written on a transient failure");
 }
 
@@ -245,11 +242,20 @@ async fn backfill_writes_hit_and_marks_miss() {
     .unwrap();
     use sqlx::Row;
     assert_eq!(row.get::<Option<f64>, _>("bpm"), Some(126.0));
-    assert_eq!(row.get::<Option<String>, _>("camelot").as_deref(), Some("8A"));
+    assert_eq!(
+        row.get::<Option<String>, _>("camelot").as_deref(),
+        Some("8A")
+    );
     assert_eq!(row.get::<Option<i64>, _>("key_pitch"), Some(9));
     assert_eq!(row.get::<Option<i64>, _>("key_mode"), Some(0));
-    assert_eq!(row.get::<Option<String>, _>("source").as_deref(), Some("music-api"));
-    assert!(row.get::<Option<String>, _>("metadata_checked_at").is_some());
+    assert_eq!(
+        row.get::<Option<String>, _>("source").as_deref(),
+        Some("music-api")
+    );
+    assert!(
+        row.get::<Option<String>, _>("metadata_checked_at")
+            .is_some()
+    );
 
     // Miss: only the check marker, no data.
     let miss = sqlx::query(
@@ -263,7 +269,10 @@ async fn backfill_writes_hit_and_marks_miss() {
     assert_eq!(miss.get::<i64, _>("found"), 0);
     assert_eq!(miss.get::<Option<f64>, _>("bpm"), None);
     assert!(miss.get::<Option<String>, _>("camelot").is_none());
-    assert!(miss.get::<Option<String>, _>("metadata_checked_at").is_some());
+    assert!(
+        miss.get::<Option<String>, _>("metadata_checked_at")
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -293,17 +302,24 @@ async fn backfill_preserves_unrelated_columns_on_hit() {
         .unwrap();
     assert_eq!(n, 1);
 
-    let row = sqlx::query(
-        "SELECT bpm, camelot, energy FROM hub_track_features WHERE track_id = ?1",
-    )
-    .bind(app.seed.t_all)
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
+    let row =
+        sqlx::query("SELECT bpm, camelot, energy FROM hub_track_features WHERE track_id = ?1")
+            .bind(app.seed.t_all)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
     use sqlx::Row;
     assert_eq!(row.get::<Option<f64>, _>("bpm"), Some(126.0), "bpm filled");
-    assert_eq!(row.get::<Option<String>, _>("camelot").as_deref(), Some("8A"), "key filled");
-    assert_eq!(row.get::<Option<f64>, _>("energy"), Some(0.5), "energy untouched");
+    assert_eq!(
+        row.get::<Option<String>, _>("camelot").as_deref(),
+        Some("8A"),
+        "key filled"
+    );
+    assert_eq!(
+        row.get::<Option<f64>, _>("energy"),
+        Some(0.5),
+        "energy untouched"
+    );
 }
 
 #[tokio::test]
@@ -332,12 +348,11 @@ async fn backfill_recheck_ttl_skips_fresh_misses() {
             .unwrap(),
         0
     );
-    let seen: i64 = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM hub_track_features WHERE track_id = ?1",
-    )
-    .bind(app.seed.t_two)
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
+    let seen: i64 =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM hub_track_features WHERE track_id = ?1")
+            .bind(app.seed.t_two)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
     assert_eq!(seen, 1, "marker row exists exactly once");
 }

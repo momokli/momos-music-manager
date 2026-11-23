@@ -76,7 +76,9 @@ async fn desired_from_playlist_follows_position_and_filters_playlist() {
     // Must not leak in from another playlist.
     link(&pool, other, first, 0).await;
 
-    let desired = desired_from_playlist(&pool, target, "playlist").await.unwrap();
+    let desired = desired_from_playlist(&pool, target, "playlist")
+        .await
+        .unwrap();
 
     assert_eq!(desired.len(), 3);
     assert_eq!(desired[0].title, "First");

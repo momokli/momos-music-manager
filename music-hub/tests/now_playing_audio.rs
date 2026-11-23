@@ -110,7 +110,11 @@ async fn now_playing_shows_vault_bpm_even_when_read_model_is_empty() {
     .unwrap();
 
     // The regression case: the read-model has no row at all.
-    assert_eq!(read_model_rows(&app).await, 0, "read-model must start empty");
+    assert_eq!(
+        read_model_rows(&app).await,
+        0,
+        "read-model must start empty"
+    );
 
     let html = app
         .client()
@@ -123,7 +127,10 @@ async fn now_playing_shows_vault_bpm_even_when_read_model_is_empty() {
         .await
         .unwrap();
 
-    assert!(html.contains("126 BPM"), "vault BPM missing in widget: {html}");
+    assert!(
+        html.contains("126 BPM"),
+        "vault BPM missing in widget: {html}"
+    );
     assert!(html.contains("11m"), "vault key missing in widget: {html}");
     // The widget must not silently fill the read-model as a side effect.
     assert_eq!(

@@ -18,8 +18,7 @@
 //! entweder die Hub-400-Prüfung oder das kellner-Render-Ergebnis ändern.
 
 /// The placeholders a template may reference (mirrors the hub whitelist).
-pub const ALLOWED_PLACEHOLDERS: [&str; 6] =
-    ["types", "tags", "source_ids", "bpm", "key", "energy"];
+pub const ALLOWED_PLACEHOLDERS: [&str; 6] = ["types", "tags", "source_ids", "bpm", "key", "energy"];
 
 /// Applied when the template is missing/empty (issue #689).
 pub const DEFAULT_TEMPLATE: &str = "{types} {tags}";
@@ -400,7 +399,10 @@ mod tests {
 
     #[test]
     fn tags_keep_input_order_and_join_with_one_space() {
-        assert_eq!(render_default(&["zebra", "Alpha"], None, None, None), "zebra Alpha");
+        assert_eq!(
+            render_default(&["zebra", "Alpha"], None, None, None),
+            "zebra Alpha"
+        );
         assert_eq!(
             render_default(&["Hard Techno", "Euphoric"], None, None, None),
             "Hard-Techno Euphoric"
@@ -422,19 +424,31 @@ mod tests {
             render_default(&["Zu späßen", "Füße"], None, None, None),
             "Zu-spaessen Fuesse"
         );
-        assert_eq!(render_default(&["Röck & Roll"], None, None, None), "Roeck-Roll");
-        assert_eq!(render_default(&["Ä Ö Ü ß"], None, None, None), "Ae-Oe-Ue-ss");
+        assert_eq!(
+            render_default(&["Röck & Roll"], None, None, None),
+            "Roeck-Roll"
+        );
+        assert_eq!(
+            render_default(&["Ä Ö Ü ß"], None, None, None),
+            "Ae-Oe-Ue-ss"
+        );
     }
 
     #[test]
     fn tag_with_space_is_slugged() {
-        assert_eq!(render_default(&["Hard Techno"], None, None, None), "Hard-Techno");
+        assert_eq!(
+            render_default(&["Hard Techno"], None, None, None),
+            "Hard-Techno"
+        );
     }
 
     #[test]
     fn empty_or_all_separator_tags_are_dropped() {
         assert_eq!(
-            render("{tags} {bpm}", &facts(&["  ", "!!!"], Some(120.0), None, None)),
+            render(
+                "{tags} {bpm}",
+                &facts(&["  ", "!!!"], Some(120.0), None, None)
+            ),
             "BPM-120"
         );
     }
@@ -464,9 +478,18 @@ mod tests {
 
     #[test]
     fn bpm_rounds_to_integer() {
-        assert_eq!(render("{bpm}", &facts(&[], Some(147.963), None, None)), "BPM-148");
-        assert_eq!(render("{bpm}", &facts(&[], Some(128.5), None, None)), "BPM-129");
-        assert_eq!(render("{bpm}", &facts(&[], Some(128.0), None, None)), "BPM-128");
+        assert_eq!(
+            render("{bpm}", &facts(&[], Some(147.963), None, None)),
+            "BPM-148"
+        );
+        assert_eq!(
+            render("{bpm}", &facts(&[], Some(128.5), None, None)),
+            "BPM-129"
+        );
+        assert_eq!(
+            render("{bpm}", &facts(&[], Some(128.0), None, None)),
+            "BPM-128"
+        );
     }
 
     // ---- {key} / {energy} (opt-in, unchanged) ----------------------------
@@ -481,7 +504,10 @@ mod tests {
             "Techno BPM-128 KEY-8A ENERGY-7"
         );
         assert_eq!(
-            render("{key} / {bpm}", &facts(&[], Some(127.5), Some("A-Minor"), None)),
+            render(
+                "{key} / {bpm}",
+                &facts(&[], Some(127.5), Some("A-Minor"), None)
+            ),
             "KEY-A-Minor / BPM-128"
         );
     }
@@ -560,13 +586,19 @@ mod tests {
 
     #[test]
     fn unknown_placeholder_falls_back_to_default() {
-        let out = render("{title} {tags}", &facts(&["Techno"], Some(128.0), None, None));
+        let out = render(
+            "{title} {tags}",
+            &facts(&["Techno"], Some(128.0), None, None),
+        );
         assert_eq!(out, "Techno", "default template applied");
     }
 
     #[test]
     fn empty_template_falls_back_to_default() {
-        assert_eq!(render("   ", &facts(&["Techno"], None, None, None)), "Techno");
+        assert_eq!(
+            render("   ", &facts(&["Techno"], None, None, None)),
+            "Techno"
+        );
     }
 
     #[test]
@@ -642,6 +674,9 @@ mod tests {
     #[test]
     fn render_and_validate_diverge_on_double_brace() {
         assert!(validate("{{tags}}").is_ok());
-        assert_eq!(render("{{tags}}", &facts(&["Techno"], None, None, None)), "Techno");
+        assert_eq!(
+            render("{{tags}}", &facts(&["Techno"], None, None, None)),
+            "Techno"
+        );
     }
 }

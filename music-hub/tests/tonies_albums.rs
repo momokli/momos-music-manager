@@ -261,9 +261,9 @@ async fn basket_order_wins_over_the_ledger() {
         uid,
         "ct1",
         &[
-        album_item("457", "Folge 457", 200),
-        album_item("459", "Folge 459", 200),
-    ],
+            album_item("457", "Folge 457", 200),
+            album_item("459", "Folge 459", 200),
+        ],
     )
     .await
     .unwrap();

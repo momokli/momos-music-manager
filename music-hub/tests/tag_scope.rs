@@ -134,8 +134,7 @@ async fn collective_yields_viewer_and_shared_members() {
     assert!(!owners.contains(&carol), "carol shares no collective");
 
     // carol is outside the collective: collective == own for her.
-    let carol_owners =
-        scope::visible_owner_ids(&w.app.pool, carol, TagScope::Collective).await;
+    let carol_owners = scope::visible_owner_ids(&w.app.pool, carol, TagScope::Collective).await;
     assert_eq!(carol_owners, vec![carol]);
 }
 
@@ -195,7 +194,10 @@ async fn user_settings_get_set_all_roundtrip() {
         Some("collective")
     );
     let all = user_settings::all(&w.app.pool, alice).await;
-    assert_eq!(all.get(user_settings::TAG_SCOPE).map(String::as_str), Some("collective"));
+    assert_eq!(
+        all.get(user_settings::TAG_SCOPE).map(String::as_str),
+        Some("collective")
+    );
 
     // set_validated rejects an out-of-enum value and writes nothing.
     assert!(
@@ -260,8 +262,7 @@ async fn ripeness_differs_own_vs_collective() {
     assert_eq!(coll.tag_score, 150.0, "alice + bob tag -> second tier");
     assert!(coll.total > own.total);
 
-    let own_many =
-        music_hub::scoring::ripeness_many(&w.app.pool, &[w.t_y], &e, &[alice]).await;
+    let own_many = music_hub::scoring::ripeness_many(&w.app.pool, &[w.t_y], &e, &[alice]).await;
     let coll_many =
         music_hub::scoring::ripeness_many(&w.app.pool, &[w.t_y], &e, &[alice, bob]).await;
     assert!(coll_many.get(&w.t_y).unwrap() > own_many.get(&w.t_y).unwrap());
@@ -297,7 +298,10 @@ async fn overlap_tag_filter_honours_scope() {
         &cookie,
     )
     .await;
-    assert!(!own.contains("Track X"), "own must exclude bob's tag: {own}");
+    assert!(
+        !own.contains("Track X"),
+        "own must exclude bob's tag: {own}"
+    );
 
     let coll = get(
         &w.app,
@@ -321,7 +325,10 @@ async fn digging_exposes_scope_toggle() {
         html.contains("tag_scope=collective"),
         "digging must offer the collective toggle"
     );
-    assert!(html.contains("tag_scope=own"), "digging must offer the own toggle");
+    assert!(
+        html.contains("tag_scope=own"),
+        "digging must offer the own toggle"
+    );
 }
 
 // ── US5: recommend / tag-queue / track detail ───────────────────────────────
@@ -356,12 +363,7 @@ async fn track_detail_recommend_honours_tag_scope_param() {
     let alice = w.app.seed.alice;
     let cookie = w.app.session_cookie(alice).await;
 
-    let own = get(
-        &w.app,
-        &format!("/track/{}?tag_scope=own", w.t_x),
-        &cookie,
-    )
-    .await;
+    let own = get(&w.app, &format!("/track/{}?tag_scope=own", w.t_x), &cookie).await;
     assert!(
         !own.contains("T_bob2"),
         "own track detail must hide bob's recommendation"
@@ -406,7 +408,10 @@ async fn settings_get_defaults_to_own_and_post_persists() {
 
     // No setting yet -> `own` preselected.
     let before = get(&w.app, "/settings", &cookie).await;
-    assert!(before.contains("<strong>own</strong>"), "default must be own");
+    assert!(
+        before.contains("<strong>own</strong>"),
+        "default must be own"
+    );
 
     let resp = w
         .app
@@ -418,7 +423,12 @@ async fn settings_get_defaults_to_own_and_post_persists() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-    assert!(resp.headers()["location"].to_str().unwrap().starts_with("/settings"));
+    assert!(
+        resp.headers()["location"]
+            .to_str()
+            .unwrap()
+            .starts_with("/settings")
+    );
 
     let after = get(&w.app, "/settings", &cookie).await;
     assert!(
@@ -597,7 +607,12 @@ async fn tag_queue_detail_honours_tag_scope_param() {
     let alice = w.app.seed.alice;
     let cookie = w.app.session_cookie(alice).await;
 
-    let own = get(&w.app, &format!("/tag-queue/{}?tag_scope=own", w.t_x), &cookie).await;
+    let own = get(
+        &w.app,
+        &format!("/tag-queue/{}?tag_scope=own", w.t_x),
+        &cookie,
+    )
+    .await;
     assert!(
         !own.contains("T_bob2"),
         "own tag-queue must not recommend bob's tag"
@@ -641,12 +656,7 @@ async fn tag_scope_param_beats_stored_setting_on_track_page() {
     );
 
     // Explicit param overrides the stored setting.
-    let param = get(
-        &w.app,
-        &format!("/track/{}?tag_scope=own", w.t_x),
-        &cookie,
-    )
-    .await;
+    let param = get(&w.app, &format!("/track/{}?tag_scope=own", w.t_x), &cookie).await;
     assert!(
         !param.contains("T_bob2"),
         "?tag_scope=own must beat the stored collective setting"
@@ -667,12 +677,18 @@ async fn tag_visibility_unaffected_by_scope() {
 
     // /tags (default own) lists bob's tag — visibility is global.
     let list_own = get(&w.app, "/tags", &cookie).await;
-    assert!(list_own.contains("T_bob"), "/tags must list every owner's tags");
+    assert!(
+        list_own.contains("T_bob"),
+        "/tags must list every owner's tags"
+    );
 
     // Store collective; visibility must not change.
     post_form(&w.app, "/settings", &cookie, &[("tag_scope", "collective")]).await;
     let list_coll = get(&w.app, "/tags", &cookie).await;
-    assert!(list_coll.contains("T_bob"), "/tags visibility must be scope-independent");
+    assert!(
+        list_coll.contains("T_bob"),
+        "/tags visibility must be scope-independent"
+    );
 
     // /tag/{bob} detail shows the tagged track under both scopes.
     let detail = get(&w.app, &format!("/tag/{}", w.tag_bob), &cookie).await;
@@ -705,7 +721,10 @@ async fn overlap_param_beats_stored_setting() {
         &cookie,
     )
     .await;
-    assert!(!plain.contains("Track X"), "stored own must exclude bob's tag");
+    assert!(
+        !plain.contains("Track X"),
+        "stored own must exclude bob's tag"
+    );
 
     // Param overrides the stored setting.
     let coll = get(

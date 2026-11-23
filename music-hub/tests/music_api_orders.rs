@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use music_hub::config::Config;
 use music_hub::music_api;

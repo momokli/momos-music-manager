@@ -85,13 +85,12 @@ pub async fn neighbors(pool: &SqlitePool, seed_track_id: i64, limit: i64) -> Res
         return Ok(Vec::new());
     }
 
-    let rows = sqlx::query(
-        "SELECT track_id, embedding FROM hub_track_embeddings WHERE track_id <> ?1",
-    )
-    .bind(seed_track_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    let rows =
+        sqlx::query("SELECT track_id, embedding FROM hub_track_embeddings WHERE track_id <> ?1")
+            .bind(seed_track_id)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
 
     let mut out: Vec<Neighbor> = rows
         .iter()
@@ -110,7 +109,11 @@ pub async fn neighbors(pool: &SqlitePool, seed_track_id: i64, limit: i64) -> Res
             })
         })
         .collect();
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out.truncate(limit.max(0) as usize);
     Ok(out)
 }

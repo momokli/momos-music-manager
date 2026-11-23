@@ -337,11 +337,7 @@ async fn foreign_source_resolves_to_empty_for_all_kinds() {
     .await
     .unwrap();
 
-    for (kind, id) in [
-        ("playlist", bob_pl),
-        ("tag", bob_tag),
-        ("backpack", bob_bp),
-    ] {
+    for (kind, id) in [("playlist", bob_pl), ("tag", bob_tag), ("backpack", bob_bp)] {
         let d = tonies::desired_for_source(&w.pool, 1, kind, Some(id), "playlist")
             .await
             .unwrap();

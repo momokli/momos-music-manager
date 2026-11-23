@@ -61,12 +61,18 @@ struct AuthState {
     refresh_fails: Arc<Mutex<bool>>,
 }
 
-async fn token_handler(State(st): State<AuthState>, Form(form): Form<HashMap<String, String>>) -> axum::response::Response {
+async fn token_handler(
+    State(st): State<AuthState>,
+    Form(form): Form<HashMap<String, String>>,
+) -> axum::response::Response {
     let grant = form.get("grant_type").map(String::as_str).unwrap_or("");
     if grant == "refresh_token" {
         *st.refresh_count.lock().unwrap() += 1;
         if *st.refresh_fails.lock().unwrap() {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant"})))
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "invalid_grant"})),
+            )
                 .into_response();
         }
         return Json(json!({"access_token": "acc-refreshed", "expires_in": 300})).into_response();
@@ -109,7 +115,9 @@ async fn mock_read(st: AuthState) -> String {
         async move {
             match g() {
                 Some(code) => (code, Json(json!({}))).into_response(),
-                None => Json(json!({"email": "me@example.com", "householdId": "hh1"})).into_response(),
+                None => {
+                    Json(json!({"email": "me@example.com", "householdId": "hh1"})).into_response()
+                }
             }
         }
     };
@@ -118,7 +126,9 @@ async fn mock_read(st: AuthState) -> String {
         async move {
             match g() {
                 Some(code) => (code, Json(json!({}))).into_response(),
-                None => Json(json!({"households": [{"id": "hh1", "name": "Home"}]})).into_response(),
+                None => {
+                    Json(json!({"households": [{"id": "hh1", "name": "Home"}]})).into_response()
+                }
             }
         }
     };
@@ -139,7 +149,10 @@ async fn mock_read(st: AuthState) -> String {
     };
 
     let app = Router::new()
-        .route("/realms/tonies/protocol/openid-connect/token", post(token_handler))
+        .route(
+            "/realms/tonies/protocol/openid-connect/token",
+            post(token_handler),
+        )
         .route("/v2/me", get(me))
         .route("/v2/households", get(households))
         .route("/v2/households/{hid}/creativetonies", get(tonies))
@@ -271,8 +284,14 @@ async fn mock_upload() -> (String, UpState) {
     let app = Router::new()
         .route("/v2/file", post(file))
         .route("/s3/upload", post(put_handler))
-        .route("/v2/households/{hid}/creativetonies/{ctid}/chapters", post(chapter_handler))
-        .route("/v2/households/{hid}/creativetonies/{ctid}", patch(patch_handler))
+        .route(
+            "/v2/households/{hid}/creativetonies/{ctid}/chapters",
+            post(chapter_handler),
+        )
+        .route(
+            "/v2/households/{hid}/creativetonies/{ctid}",
+            patch(patch_handler),
+        )
         .with_state(st.clone());
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -304,7 +323,10 @@ async fn upload_primitives_send_expected_bodies() {
     assert!(body.contains("MP3DATA"));
     drop(puts);
 
-    client.add_chapter("hh1", "ct1", "Title", "file-1").await.unwrap();
+    client
+        .add_chapter("hh1", "ct1", "Title", "file-1")
+        .await
+        .unwrap();
     let ch = st.chapters.lock().unwrap();
     assert_eq!(ch[0]["title"], "Title");
     assert_eq!(ch[0]["file"], "file-1");
@@ -316,7 +338,10 @@ async fn upload_primitives_send_expected_bodies() {
         file: Some("file-1".into()),
         ..Default::default()
     }];
-    client.patch_chapters("hh1", "ct1", &chapters).await.unwrap();
+    client
+        .patch_chapters("hh1", "ct1", &chapters)
+        .await
+        .unwrap();
     let p = st.patches.lock().unwrap();
     assert_eq!(p[0]["chapters"][0]["id"], "ch1");
     assert_eq!(p[0]["chapters"][0]["file"], "file-1");
@@ -356,7 +381,10 @@ async fn connect_stores_encrypted_token_and_hides_credentials() {
     assert!(html.contains("63 / 90 min"), "capacity missing in HTML");
 
     // Stored secret is ciphertext; decryption round-trips.
-    let enc = tonies::load_secret_enc(&app.pool, uid).await.unwrap().unwrap();
+    let enc = tonies::load_secret_enc(&app.pool, uid)
+        .await
+        .unwrap()
+        .unwrap();
     assert_ne!(enc, REFRESH, "secret stored in plaintext");
     assert_eq!(tonies::decrypt_secret(KEY, &enc).unwrap(), REFRESH);
 
@@ -370,9 +398,16 @@ async fn expired_session_renders_reconnect_form() {
     let auth = mock_read(st.clone()).await;
     let app = spawn_web(&auth, &auth).await;
     let (uid, cookie) = app.user_with_password("t-bob", "pw").await;
-    tonies::save_account(&app.pool, uid, Some("hh1"), Some("bob@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        uid,
+        Some("hh1"),
+        Some("bob@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
 
     // Data endpoints 401 and the refresh fails → AuthExpired → reconnect form.
     *st.unauthorized_calls.lock().unwrap() = 100;
@@ -388,7 +423,10 @@ async fn expired_session_renders_reconnect_form() {
         .text()
         .await
         .unwrap();
-    assert!(html.contains("/tonies/reconnect"), "reconnect form expected");
+    assert!(
+        html.contains("/tonies/reconnect"),
+        "reconnect form expected"
+    );
     assert!(html.contains("neu verbinden") || html.contains("Neu verbinden"));
     assert!(!html.contains(PASSWORD));
     assert!(!html.contains(REFRESH));
@@ -402,7 +440,10 @@ async fn error_message_stays_categorised_without_token() {
     }
     let auth = serve(
         Router::new()
-            .route("/realms/tonies/protocol/openid-connect/token", post(token_handler))
+            .route(
+                "/realms/tonies/protocol/openid-connect/token",
+                post(token_handler),
+            )
             .route("/v2/households", get(boom))
             .route("/v2/households/{hid}/creativetonies", get(boom))
             .route("/v2/me", get(boom))
@@ -411,9 +452,16 @@ async fn error_message_stays_categorised_without_token() {
     .await;
     let app = spawn_web(&auth, &auth).await;
     let (uid, cookie) = app.user_with_password("t-carol", "pw").await;
-    tonies::save_account(&app.pool, uid, Some("hh1"), Some("c@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        uid,
+        Some("hh1"),
+        Some("c@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
 
     let html = app
         .client()
@@ -440,9 +488,16 @@ async fn accounts_are_isolated_per_user() {
     let app = spawn_web(&auth, &auth).await;
     let (uid_a, cookie_a) = app.user_with_password("dave", "pw").await;
     let (_uid_b, cookie_b) = app.user_with_password("erin", "pw").await;
-    tonies::save_account(&app.pool, uid_a, Some("hh1"), Some("dave@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        uid_a,
+        Some("hh1"),
+        Some("dave@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
 
     let html_b = app
         .client()
@@ -477,12 +532,7 @@ async fn accounts_are_isolated_per_user() {
 async fn tonies_requires_session() {
     let auth = mock_read(data_base_state()).await;
     let app = spawn_web(&auth, &auth).await;
-    let resp = app
-        .client()
-        .get(app.url("/tonies"))
-        .send()
-        .await
-        .unwrap();
+    let resp = app.client().get(app.url("/tonies")).send().await.unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         resp.headers().get("location").and_then(|v| v.to_str().ok()),
@@ -506,12 +556,7 @@ async fn no_external_network_when_bases_pinned() {
 // ── tests: binding store (#500) ─────────────────────────────────────────────
 
 /// Insert an owned Spotify playlist for `user_id`.
-async fn insert_playlist(
-    pool: &sqlx::SqlitePool,
-    user_id: i64,
-    ext: &str,
-    name: &str,
-) -> i64 {
+async fn insert_playlist(pool: &sqlx::SqlitePool, user_id: i64, ext: &str, name: &str) -> i64 {
     sqlx::query_scalar(
         "INSERT INTO hub_playlists (user_id, service, playlist_id, name)
          VALUES (?1, 'spotify', ?2, ?3) RETURNING id",
@@ -591,20 +636,43 @@ async fn binding_store_is_user_scoped() {
     assert_eq!(la[0].source_id, Some(pl_a));
     assert_eq!(la[0].format, "mp3-320");
     assert_eq!(la[0].mode, "auto");
-    assert!(la[0].dirty_since.is_some(), "dirty_since must be set on create");
+    assert!(
+        la[0].dirty_since.is_some(),
+        "dirty_since must be set on create"
+    );
 
     let lb = tonies::list_bindings(&app.pool, b).await.unwrap();
     assert_eq!(lb.len(), 1, "each user sees only their own binding");
     assert_eq!(lb[0].source_id, Some(pl_b));
 
     // get is scoped to the owner.
-    assert!(tonies::get_binding(&app.pool, b, "ct1").await.unwrap().is_some());
-    assert!(tonies::get_binding(&app.pool, a, "missing").await.unwrap().is_none());
+    assert!(
+        tonies::get_binding(&app.pool, b, "ct1")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        tonies::get_binding(&app.pool, a, "missing")
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // delete removes only the caller's row.
     tonies::delete_binding(&app.pool, b, "ct1").await.unwrap();
-    assert!(tonies::get_binding(&app.pool, b, "ct1").await.unwrap().is_none());
-    assert!(tonies::get_binding(&app.pool, a, "ct1").await.unwrap().is_some());
+    assert!(
+        tonies::get_binding(&app.pool, b, "ct1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        tonies::get_binding(&app.pool, a, "ct1")
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -613,12 +681,32 @@ async fn binding_upsert_updates_in_place() {
     let (u, _) = app.user_with_password("bind-u", "pw").await;
     let p1 = insert_playlist(&app.pool, u, "p1", "One").await;
     let p2 = insert_playlist(&app.pool, u, "p2", "Two").await;
-    tonies::upsert_binding(&app.pool, u, "ct1", None, "playlist", Some(p1), None, "mp3-128", "manual")
-        .await
-        .unwrap();
-    tonies::upsert_binding(&app.pool, u, "ct1", None, "playlist", Some(p2), None, "mp3-320", "auto")
-        .await
-        .unwrap();
+    tonies::upsert_binding(
+        &app.pool,
+        u,
+        "ct1",
+        None,
+        "playlist",
+        Some(p1),
+        None,
+        "mp3-128",
+        "manual",
+    )
+    .await
+    .unwrap();
+    tonies::upsert_binding(
+        &app.pool,
+        u,
+        "ct1",
+        None,
+        "playlist",
+        Some(p2),
+        None,
+        "mp3-320",
+        "auto",
+    )
+    .await
+    .unwrap();
     let l = tonies::list_bindings(&app.pool, u).await.unwrap();
     assert_eq!(l.len(), 1, "upsert must not duplicate");
     assert_eq!(l[0].source_id, Some(p2));
@@ -633,9 +721,16 @@ async fn binding_save_renders_fragment_with_toast() {
     let auth = mock_read(data_base_state()).await;
     let app = spawn_web(&auth, &auth).await;
     let (uid, cookie) = app.user_with_password("t-nya", "pw").await;
-    tonies::save_account(&app.pool, uid, Some("hh1"), Some("nya@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        uid,
+        Some("hh1"),
+        Some("nya@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
     let pl = insert_playlist(&app.pool, uid, "sp-1", "Chill Mix").await;
 
     let sid = pl.to_string();
@@ -660,14 +755,29 @@ async fn binding_save_renders_fragment_with_toast() {
         .unwrap_or("")
         .to_string();
     assert!(trig.contains("toast"), "toast header missing: {trig}");
-    assert!(trig.contains("\"kind\":\"ok\""), "expected ok toast: {trig}");
+    assert!(
+        trig.contains("\"kind\":\"ok\""),
+        "expected ok toast: {trig}"
+    );
     let body = resp.text().await.unwrap();
-    assert!(body.contains("Chill Mix"), "fragment should show the source name");
-    assert!(body.contains("id=\"binding-ct1\""), "fragment should target the binding area");
-    assert!(!body.contains("hub-card"), "no message-card in fragment response");
+    assert!(
+        body.contains("Chill Mix"),
+        "fragment should show the source name"
+    );
+    assert!(
+        body.contains("id=\"binding-ct1\""),
+        "fragment should target the binding area"
+    );
+    assert!(
+        !body.contains("hub-card"),
+        "no message-card in fragment response"
+    );
 
     // Row persisted with the submitted values.
-    let b = tonies::get_binding(&app.pool, uid, "ct1").await.unwrap().unwrap();
+    let b = tonies::get_binding(&app.pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(b.source_id, Some(pl));
     assert_eq!(b.format, "mp3-320");
     assert_eq!(b.mode, "auto");
@@ -683,7 +793,10 @@ async fn binding_save_renders_fragment_with_toast() {
         .text()
         .await
         .unwrap();
-    assert!(html.contains("Chill Mix"), "page should show the source name");
+    assert!(
+        html.contains("Chill Mix"),
+        "page should show the source name"
+    );
     assert!(html.contains("mp3-320"));
     assert!(html.contains("auto"));
 }
@@ -694,9 +807,16 @@ async fn binding_save_rejects_foreign_playlist() {
     let app = spawn_web(&auth, &auth).await;
     let (a, _ca) = app.user_with_password("t-own-a", "pw").await;
     let (b, cb) = app.user_with_password("t-own-b", "pw").await;
-    tonies::save_account(&app.pool, b, Some("hh1"), Some("b@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        b,
+        Some("hh1"),
+        Some("b@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
     let pl_a = insert_playlist(&app.pool, a, "a-1", "A Only").await;
 
     let sid = pl_a.to_string();
@@ -720,10 +840,23 @@ async fn binding_save_rejects_foreign_playlist() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    assert!(trig.contains("\"kind\":\"err\""), "expected err toast: {trig}");
+    assert!(
+        trig.contains("\"kind\":\"err\""),
+        "expected err toast: {trig}"
+    );
     // Nothing written for B, and A is untouched.
-    assert!(tonies::get_binding(&app.pool, b, "ct1").await.unwrap().is_none());
-    assert!(tonies::get_binding(&app.pool, a, "ct1").await.unwrap().is_none());
+    assert!(
+        tonies::get_binding(&app.pool, b, "ct1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        tonies::get_binding(&app.pool, a, "ct1")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -732,13 +865,30 @@ async fn binding_delete_is_user_scoped() {
     let app = spawn_web(&auth, &auth).await;
     let (a, _ca) = app.user_with_password("t-del-a", "pw").await;
     let (_b, cb) = app.user_with_password("t-del-b", "pw").await;
-    tonies::save_account(&app.pool, _b, Some("hh1"), Some("b@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        _b,
+        Some("hh1"),
+        Some("b@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
     let pl = insert_playlist(&app.pool, a, "a-2", "A List").await;
-    tonies::upsert_binding(&app.pool, a, "ct1", None, "playlist", Some(pl), None, "mp3-128", "manual")
-        .await
-        .unwrap();
+    tonies::upsert_binding(
+        &app.pool,
+        a,
+        "ct1",
+        None,
+        "playlist",
+        Some(pl),
+        None,
+        "mp3-128",
+        "manual",
+    )
+    .await
+    .unwrap();
 
     let resp = app
         .client()
@@ -750,7 +900,12 @@ async fn binding_delete_is_user_scoped() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     // A's binding survives B's delete attempt.
-    assert!(tonies::get_binding(&app.pool, a, "ct1").await.unwrap().is_some());
+    assert!(
+        tonies::get_binding(&app.pool, a, "ct1")
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -772,9 +927,16 @@ async fn tonies_page_without_playlists_shows_hint() {
     let auth = mock_read(data_base_state()).await;
     let app = spawn_web(&auth, &auth).await;
     let (uid, cookie) = app.user_with_password("t-empty", "pw").await;
-    tonies::save_account(&app.pool, uid, Some("hh1"), Some("e@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        uid,
+        Some("hh1"),
+        Some("e@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
     let html = app
         .client()
         .get(app.url("/tonies"))
@@ -789,14 +951,20 @@ async fn tonies_page_without_playlists_shows_hint() {
         html.contains("Noch keine Quelle"),
         "empty-state hint expected when the user has no sources"
     );
-    assert!(html.contains("binding-ct1"), "binding area expected per card");
+    assert!(
+        html.contains("binding-ct1"),
+        "binding area expected per card"
+    );
 }
 
 /// Mock serving Keycloak + read endpoints with an empty creativetonies list
 /// (household still resolves), to exercise the "no Tonies" empty state.
 async fn mock_read_empty_tonies() -> String {
     let app = Router::new()
-        .route("/realms/tonies/protocol/openid-connect/token", post(token_handler))
+        .route(
+            "/realms/tonies/protocol/openid-connect/token",
+            post(token_handler),
+        )
         .route(
             "/v2/me",
             get(|| async { Json(json!({"email": "me@example.com", "householdId": "hh1"})) }),
@@ -823,9 +991,16 @@ async fn tonies_page_lists_playlists_as_options_with_capacity() {
     let auth = mock_read(data_base_state()).await;
     let app = spawn_web(&auth, &auth).await;
     let (uid, cookie) = app.user_with_password("t-e2e", "pw").await;
-    tonies::save_account(&app.pool, uid, Some("hh1"), Some("e2e@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        uid,
+        Some("hh1"),
+        Some("e2e@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
     let pl = insert_playlist(&app.pool, uid, "sp-e2e", "Chill Mix").await;
 
     let html = app
@@ -863,9 +1038,16 @@ async fn binding_edit_updates_in_place_via_web() {
     let auth = mock_read(data_base_state()).await;
     let app = spawn_web(&auth, &auth).await;
     let (uid, cookie) = app.user_with_password("t-edit", "pw").await;
-    tonies::save_account(&app.pool, uid, Some("hh1"), Some("edit@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        uid,
+        Some("hh1"),
+        Some("edit@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
     let p1 = insert_playlist(&app.pool, uid, "e-1", "First").await;
     let p2 = insert_playlist(&app.pool, uid, "e-2", "Second").await;
 
@@ -906,7 +1088,10 @@ async fn binding_edit_updates_in_place_via_web() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    assert!(trig.contains("\"kind\":\"ok\""), "expected ok toast: {trig}");
+    assert!(
+        trig.contains("\"kind\":\"ok\""),
+        "expected ok toast: {trig}"
+    );
 
     let list = tonies::list_bindings(&app.pool, uid).await.unwrap();
     assert_eq!(list.len(), 1, "edit must not create a second row");
@@ -924,7 +1109,10 @@ async fn binding_edit_updates_in_place_via_web() {
         .text()
         .await
         .unwrap();
-    assert!(html.contains("Second"), "page should show the edited source");
+    assert!(
+        html.contains("Second"),
+        "page should show the edited source"
+    );
     // A bound Tonie gets the one-press sync button (refresh + run).
     assert!(
         html.contains("class=\"tonie-sync\""),
@@ -943,12 +1131,26 @@ async fn binding_is_not_visible_across_users() {
     let app = spawn_web(&auth, &auth).await;
     let (a, ca) = app.user_with_password("t-vis-a", "pw").await;
     let (b, cb) = app.user_with_password("t-vis-b", "pw").await;
-    tonies::save_account(&app.pool, a, Some("hh1"), Some("a@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
-    tonies::save_account(&app.pool, b, Some("hh1"), Some("b@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        a,
+        Some("hh1"),
+        Some("a@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
+    tonies::save_account(
+        &app.pool,
+        b,
+        Some("hh1"),
+        Some("b@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
     let pl_a = insert_playlist(&app.pool, a, "vis-a", "A Secret List").await;
     tonies::upsert_binding(
         &app.pool,
@@ -989,7 +1191,10 @@ async fn binding_is_not_visible_across_users() {
         .text()
         .await
         .unwrap();
-    assert!(html_a.contains("A Secret List"), "A still sees their own binding");
+    assert!(
+        html_a.contains("A Secret List"),
+        "A still sees their own binding"
+    );
 }
 
 /// The owner deleting their own binding removes the row, returns an ok toast and
@@ -999,13 +1204,30 @@ async fn binding_delete_removes_own_row_with_toast() {
     let auth = mock_read(data_base_state()).await;
     let app = spawn_web(&auth, &auth).await;
     let (uid, cookie) = app.user_with_password("t-del-own", "pw").await;
-    tonies::save_account(&app.pool, uid, Some("hh1"), Some("own@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        uid,
+        Some("hh1"),
+        Some("own@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
     let pl = insert_playlist(&app.pool, uid, "d-1", "To Delete").await;
-    tonies::upsert_binding(&app.pool, uid, "ct1", None, "playlist", Some(pl), None, "mp3-128", "manual")
-        .await
-        .unwrap();
+    tonies::upsert_binding(
+        &app.pool,
+        uid,
+        "ct1",
+        None,
+        "playlist",
+        Some(pl),
+        None,
+        "mp3-128",
+        "manual",
+    )
+    .await
+    .unwrap();
 
     let resp = app
         .client()
@@ -1022,11 +1244,25 @@ async fn binding_delete_removes_own_row_with_toast() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    assert!(trig.contains("\"kind\":\"ok\""), "expected ok toast: {trig}");
+    assert!(
+        trig.contains("\"kind\":\"ok\""),
+        "expected ok toast: {trig}"
+    );
     let body = resp.text().await.unwrap();
-    assert!(!body.contains("hub-card"), "no message-card in delete response");
-    assert!(tonies::get_binding(&app.pool, uid, "ct1").await.unwrap().is_none());
-    assert!(body.contains("Quelle wählen"), "picker should return after delete");
+    assert!(
+        !body.contains("hub-card"),
+        "no message-card in delete response"
+    );
+    assert!(
+        tonies::get_binding(&app.pool, uid, "ct1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        body.contains("Quelle wählen"),
+        "picker should return after delete"
+    );
 }
 
 #[tokio::test]
@@ -1048,9 +1284,16 @@ async fn tonies_page_without_creativetonies_shows_empty_state() {
     let auth = mock_read_empty_tonies().await;
     let app = spawn_web(&auth, &auth).await;
     let (uid, cookie) = app.user_with_password("t-notonies", "pw").await;
-    tonies::save_account(&app.pool, uid, Some("hh1"), Some("n@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        uid,
+        Some("hh1"),
+        Some("n@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
     let html = app
         .client()
         .get(app.url("/tonies"))
@@ -1077,9 +1320,16 @@ async fn binding_save_accepts_backpack_source() {
     let auth = mock_read(data_base_state()).await;
     let app = spawn_web(&auth, &auth).await;
     let (uid, cookie) = app.user_with_password("t-bp", "pw").await;
-    tonies::save_account(&app.pool, uid, Some("hh1"), Some("bp@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        uid,
+        Some("hh1"),
+        Some("bp@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
     let bp = insert_backpack(&app.pool, uid, "My Backpack").await;
 
     let src = format!("backpack:{bp}");
@@ -1103,13 +1353,25 @@ async fn binding_save_accepts_backpack_source() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    assert!(trig.contains("\"kind\":\"ok\""), "expected ok toast: {trig}");
+    assert!(
+        trig.contains("\"kind\":\"ok\""),
+        "expected ok toast: {trig}"
+    );
     let body = resp.text().await.unwrap();
-    assert!(body.contains("My Backpack"), "fragment should show the backpack name");
-    assert!(body.contains("Backpack"), "fragment should show the kind badge");
+    assert!(
+        body.contains("My Backpack"),
+        "fragment should show the backpack name"
+    );
+    assert!(
+        body.contains("Backpack"),
+        "fragment should show the kind badge"
+    );
 
     // Persisted with the backpack kind, not the playlist default.
-    let b = tonies::get_binding(&app.pool, uid, "ct1").await.unwrap().unwrap();
+    let b = tonies::get_binding(&app.pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(b.source_kind, "backpack");
     assert_eq!(b.source_id, Some(bp));
 }
@@ -1121,9 +1383,16 @@ async fn binding_save_accepts_tag_source() {
     let auth = mock_read(data_base_state()).await;
     let app = spawn_web(&auth, &auth).await;
     let (uid, cookie) = app.user_with_password("t-tg", "pw").await;
-    tonies::save_account(&app.pool, uid, Some("hh1"), Some("tg@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        uid,
+        Some("hh1"),
+        Some("tg@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
     let tag = insert_tag(&app.pool, uid, "bedtime", "Bedtime").await;
 
     let src = format!("tag:{tag}");
@@ -1147,11 +1416,20 @@ async fn binding_save_accepts_tag_source() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    assert!(trig.contains("\"kind\":\"ok\""), "expected ok toast: {trig}");
+    assert!(
+        trig.contains("\"kind\":\"ok\""),
+        "expected ok toast: {trig}"
+    );
     let body = resp.text().await.unwrap();
-    assert!(body.contains("Bedtime"), "fragment should show the tag name");
+    assert!(
+        body.contains("Bedtime"),
+        "fragment should show the tag name"
+    );
 
-    let b = tonies::get_binding(&app.pool, uid, "ct1").await.unwrap().unwrap();
+    let b = tonies::get_binding(&app.pool, uid, "ct1")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(b.source_kind, "tag");
     assert_eq!(b.source_id, Some(tag));
 }
@@ -1164,9 +1442,16 @@ async fn binding_save_rejects_unowned_backpack() {
     let app = spawn_web(&auth, &auth).await;
     let (a, _ca) = app.user_with_password("t-bp-own-a", "pw").await;
     let (b, cb) = app.user_with_password("t-bp-own-b", "pw").await;
-    tonies::save_account(&app.pool, b, Some("hh1"), Some("b@example.com"), REFRESH, KEY)
-        .await
-        .unwrap();
+    tonies::save_account(
+        &app.pool,
+        b,
+        Some("hh1"),
+        Some("b@example.com"),
+        REFRESH,
+        KEY,
+    )
+    .await
+    .unwrap();
     let bp_a = insert_backpack(&app.pool, a, "A Only Backpack").await;
 
     let src = format!("backpack:{bp_a}");
@@ -1190,7 +1475,20 @@ async fn binding_save_rejects_unowned_backpack() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    assert!(trig.contains("\"kind\":\"err\""), "expected err toast: {trig}");
-    assert!(tonies::get_binding(&app.pool, b, "ct1").await.unwrap().is_none());
-    assert!(tonies::get_binding(&app.pool, a, "ct1").await.unwrap().is_none());
+    assert!(
+        trig.contains("\"kind\":\"err\""),
+        "expected err toast: {trig}"
+    );
+    assert!(
+        tonies::get_binding(&app.pool, b, "ct1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        tonies::get_binding(&app.pool, a, "ct1")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

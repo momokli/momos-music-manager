@@ -261,7 +261,9 @@ pub async fn claim_run(pool: &SqlitePool, binding_id: i64) -> Result<Claim> {
     .fetch_optional(pool)
     .await
     .context("Tonies-Sync-Status konnte nicht gelesen werden")?;
-    if let Some(last) = last && last > rate_cutoff {
+    if let Some(last) = last
+        && last > rate_cutoff
+    {
         return Ok(Claim::RateLimited);
     }
 
@@ -387,7 +389,9 @@ pub async fn readiness(cfg: &Config, isrcs: impl IntoIterator<Item = String>) ->
         if isrc.is_empty() || set.contains(&isrc) {
             continue;
         }
-        if let Ok(st) = music_api::status(cfg, &isrc).await && st.ready() {
+        if let Ok(st) = music_api::status(cfg, &isrc).await
+            && st.ready()
+        {
             set.insert(isrc);
         }
     }
@@ -718,9 +722,8 @@ pub async fn execute_binding(
                 Err(e) => tracing::warn!("tonies album order failed for user {uid}: {e:#}"),
             }
         }
-        let fit = super::albums::fit_albums(albums, binding.cap_seconds, |isrc| {
-            ready.contains(isrc)
-        });
+        let fit =
+            super::albums::fit_albums(albums, binding.cap_seconds, |isrc| ready.contains(isrc));
         if fit.albums.is_empty() {
             return fail(
                 "Kein ganzes Album ist komplett im Vault — fehlende Tracks wurden geordert,                  bitte in einigen Minuten erneut syncen"
@@ -757,8 +760,7 @@ pub async fn execute_binding(
             ));
         }
         // Readiness: one music-api status call per distinct ISRC.
-        let isrcs: Vec<String> =
-            desired.iter().filter_map(|t| t.isrc.clone()).collect();
+        let isrcs: Vec<String> = desired.iter().filter_map(|t| t.isrc.clone()).collect();
         let ready = readiness(cfg, isrcs).await;
 
         // #624: a playlist-bound Tonie orders its *missing* tracks here,
@@ -767,12 +769,15 @@ pub async fn execute_binding(
         // have their own ordering path above, backpack/tag stay untouched. The
         // extra state GET is read-only; no Spotify request is involved.
         if binding.source_kind == super::bindings::SOURCE_PLAYLIST
-            && let Ok(t) = client.get_creativetonie(&household, &binding.tonie_id).await
+            && let Ok(t) = client
+                .get_creativetonie(&household, &binding.tonie_id)
+                .await
         {
             let present = super::Capacity::from_tonie(&t).present;
-            let plan = super::sync::order_plan_for_tonie(&desired, binding.cap_seconds, present, |isrc| {
-                ready.contains(isrc)
-            });
+            let plan =
+                super::sync::order_plan_for_tonie(&desired, binding.cap_seconds, present, |isrc| {
+                    ready.contains(isrc)
+                });
             if !plan.is_empty() {
                 match crate::music_api::order_with_priority_intent(
                     cfg,
@@ -836,10 +841,7 @@ pub async fn execute_binding(
 /// One-line, credential-free summary for the htmx toast.
 /// Prepend album-level skips (from [`super::albums::fit_albums`]) to the track
 /// skips already recorded on `outcome`, so both appear in the same run log.
-fn merge_album_skips(
-    skipped_albums: Vec<super::sync::SkippedTrack>,
-    outcome: &mut RunOutcome,
-) {
+fn merge_album_skips(skipped_albums: Vec<super::sync::SkippedTrack>, outcome: &mut RunOutcome) {
     let mut all = skipped_albums;
     all.extend(std::mem::take(&mut outcome.skipped));
     outcome.skipped = all;

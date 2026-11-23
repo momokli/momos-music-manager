@@ -75,13 +75,15 @@ async fn insert_playlist(pool: &sqlx::SqlitePool, owner: i64, pid: &str, name: &
 }
 
 async fn insert_membership(pool: &sqlx::SqlitePool, playlist_id: i64, track_id: i64, pos: i64) {
-    sqlx::query("INSERT INTO hub_playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)")
-        .bind(playlist_id)
-        .bind(track_id)
-        .bind(pos)
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
+    )
+    .bind(playlist_id)
+    .bind(track_id)
+    .bind(pos)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 async fn link_source(pool: &sqlx::SqlitePool, tag_id: i64, playlist_id: i64, owner: i64) {
@@ -249,7 +251,11 @@ async fn bpm_filter_narrows_result() {
         "orphan joined the base tag"
     );
     let ids = tags::resolve_smart_tag(&w.app.pool, id).await.unwrap();
-    assert_eq!(ids, vec![w.t_mid], "track without audio dropped by bpm bound");
+    assert_eq!(
+        ids,
+        vec![w.t_mid],
+        "track without audio dropped by bpm bound"
+    );
 }
 
 // ── 4. energy filter ───────────────────────────────────────────────────────
@@ -271,7 +277,13 @@ async fn energy_filter_narrows_result() {
 async fn edit_updates_resolution() {
     let w = seed_world().await;
     let id = make_smart(&w, "Editable", &base_filter(&w)).await;
-    assert_eq!(tags::resolve_smart_tag(&w.app.pool, id).await.unwrap().len(), 3);
+    assert_eq!(
+        tags::resolve_smart_tag(&w.app.pool, id)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
 
     let resp = w
         .app
@@ -303,7 +315,10 @@ async fn edit_updates_resolution() {
         .await
         .unwrap();
     assert!(body.contains("Mid Beat"));
-    assert!(!body.contains("Low Beat"), "narrowed edition hides Low Beat");
+    assert!(
+        !body.contains("Low Beat"),
+        "narrowed edition hides Low Beat"
+    );
 }
 
 // ── 6. never materialized ──────────────────────────────────────────────────
@@ -371,7 +386,10 @@ async fn update_denied_for_non_owner() {
     assert_eq!(resp.status(), 303);
 
     let after = tags::smart_filter(&w.app.pool, id).await.unwrap();
-    assert_eq!(before.bpm_min, after.bpm_min, "bob may not change the filter");
+    assert_eq!(
+        before.bpm_min, after.bpm_min,
+        "bob may not change the filter"
+    );
     assert_eq!(after.bpm_min, None);
     let _ = w.bob;
 }
@@ -406,7 +424,9 @@ async fn empty_filter_rejected() {
 async fn create_does_not_convert_existing_normal_tag() {
     let w = seed_world().await;
     // A normal tag created the way the UI does (slug = normalize_name(name)).
-    let normal = tags::ensure_tag(&w.app.pool, w.alice, "Plain Normal").await.unwrap();
+    let normal = tags::ensure_tag(&w.app.pool, w.alice, "Plain Normal")
+        .await
+        .unwrap();
     let res =
         tags::create_smart_tag(&w.app.pool, w.alice, "Plain Normal", None, &base_filter(&w)).await;
     assert!(res.is_err(), "same-named normal tag must not be converted");

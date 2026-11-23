@@ -63,7 +63,11 @@ async fn post_nml(app: &common::TestApp, token: Option<&str>, body: &str) -> (St
     if let Some(t) = token {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
-    let resp = req.body(body.to_string()).send().await.expect("import request");
+    let resp = req
+        .body(body.to_string())
+        .send()
+        .await
+        .expect("import request");
     let status = resp.status();
     let txt = resp.text().await.unwrap_or_default();
     (status, serde_json::from_str(&txt).unwrap_or(Value::Null))
@@ -84,7 +88,10 @@ async fn device_token_import_stores_meta_and_playlists() {
     assert_eq!(v["ok"], true);
     assert_eq!(v["stats"]["entries"], 3);
     assert_eq!(v["stats"]["matched"], 2, "Alpha + Beta matched, Gamma not");
-    assert_eq!(v["stats"]["playlists"], 3, "Collection + Peak Time + History");
+    assert_eq!(
+        v["stats"]["playlists"], 3,
+        "Collection + Peak Time + History"
+    );
     assert_eq!(v["stats"]["with_bpm"], 1);
     assert_eq!(v["stats"]["with_key"], 1);
 
@@ -98,7 +105,10 @@ async fn device_token_import_stores_meta_and_playlists() {
     .await
     .unwrap();
     assert_eq!(r.get::<i64, _>("play_count"), 7);
-    assert_eq!(r.get::<Option<String>, _>("last_played").as_deref(), Some("2024/3/1"));
+    assert_eq!(
+        r.get::<Option<String>, _>("last_played").as_deref(),
+        Some("2024/3/1")
+    );
     assert_eq!(r.get::<Option<i64>, _>("rating"), Some(5), "255 -> 5 stars");
     assert_eq!(r.get::<Option<f64>, _>("bpm"), Some(124.0));
     assert_eq!(r.get::<Option<String>, _>("camelot").as_deref(), Some("8A"));
@@ -133,7 +143,10 @@ async fn device_token_import_stores_meta_and_playlists() {
             .fetch_one(&app.pool)
             .await
             .unwrap();
-    assert!(seen.is_some(), "last_seen_at touched by the device-gated route");
+    assert!(
+        seen.is_some(),
+        "last_seen_at touched by the device-gated route"
+    );
 }
 
 // (b) idempotent re-import: same NML twice → stable row counts ───────────────

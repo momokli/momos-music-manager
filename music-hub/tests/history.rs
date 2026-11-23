@@ -200,9 +200,11 @@ async fn diff_scalar_records_change_only_when_different() {
 
     // record_event rejects an invalid change kind (DB CHECK).
     assert!(
-        record_event(&app.pool, run, alice, "traktor", "track", "x", "bogus", None, None)
-            .await
-            .is_err()
+        record_event(
+            &app.pool, run, alice, "traktor", "track", "x", "bogus", None, None
+        )
+        .await
+        .is_err()
     );
 }
 

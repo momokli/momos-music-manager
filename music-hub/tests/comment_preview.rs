@@ -81,7 +81,13 @@ async fn resolve_tag(app: &common::TestApp, track_id: i64, tag_id: i64) {
 /// Tag `track_id` with `count` fresh, distinct tags owned by `user_id`.
 async fn tag_with(app: &common::TestApp, user_id: i64, track_id: i64, prefix: &str, count: usize) {
     for i in 0..count {
-        let tg = tag(app, user_id, &format!("{prefix}-{i}"), &format!("Tag {prefix} {i}")).await;
+        let tg = tag(
+            app,
+            user_id,
+            &format!("{prefix}-{i}"),
+            &format!("Tag {prefix} {i}"),
+        )
+        .await;
         resolve_tag(app, track_id, tg).await;
     }
 }
@@ -224,7 +230,10 @@ async fn foreign_private_template_is_404_shared_is_200() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "system → 200");
-    assert!(html.contains("Keine getaggten Tracks"), "no tagged tracks hint");
+    assert!(
+        html.contains("Keine getaggten Tracks"),
+        "no tagged tracks hint"
+    );
 }
 
 // ── source: top tagged tracks, rank, limit, counter ──────────────────────────
@@ -332,7 +341,10 @@ async fn scope_ignores_foreign_tag() {
     assert!(html.contains("OwnTrack"), "own tag visible: {html}");
     assert!(html.contains("AliceTag"), "own tag rendered");
     assert!(!html.contains("ForeignOnly"), "foreign tag hidden: {html}");
-    assert!(html.contains("1 von 1"), "foreign track not counted: {html}");
+    assert!(
+        html.contains("1 von 1"),
+        "foreign track not counted: {html}"
+    );
 }
 
 #[tokio::test]
@@ -353,7 +365,10 @@ async fn tagged_tracks_shown_without_backpack() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(html.contains("NoBackpack"), "tagged track without bp: {html}");
+    assert!(
+        html.contains("NoBackpack"),
+        "tagged track without bp: {html}"
+    );
     assert!(html.contains("1 von 1"), "counter: {html}");
 }
 
@@ -402,7 +417,10 @@ async fn preview_renders_tags_and_audio_from_hub() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(html.contains("Techno BPM-128 KEY-8A"), "rendered facts: {html}");
+    assert!(
+        html.contains("Techno BPM-128 KEY-8A"),
+        "rendered facts: {html}"
+    );
 }
 
 #[tokio::test]
@@ -427,7 +445,10 @@ async fn over_512_chars_is_cut_with_marker() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(html.contains("512/512"), "char counter at the ceiling: {html}");
+    assert!(
+        html.contains("512/512"),
+        "char counter at the ceiling: {html}"
+    );
     assert!(html.contains("..."), "cut marker visible");
     assert!(!html.contains(&"x".repeat(600)), "the filler was cut");
 }
@@ -509,7 +530,10 @@ async fn library_page_renders_initial_preview_and_noscript_form() {
     assert_eq!(resp.status(), StatusCode::OK);
     let html = resp.text().await.expect("page body");
 
-    assert!(html.contains("PageTrack"), "preview rendered on load: {html}");
+    assert!(
+        html.contains("PageTrack"),
+        "preview rendered on load: {html}"
+    );
     assert!(html.contains("1 von 1"), "counter on load: {html}");
     assert!(
         html.contains(&format!("action=\"/comment-templates/{tid}/preview\"")),
@@ -616,7 +640,11 @@ async fn preview_facts_match_export_api_track_facts() {
         resolve_tag(&app, t, tg).await;
     }
     audio_with_camelot(&app, t, 128.0, "G-Minor", "8A").await;
-    for (service, id) in [("youtube", "yt-1"), ("spotify", "sp-1"), ("soundcloud", "sc-1")] {
+    for (service, id) in [
+        ("youtube", "yt-1"),
+        ("spotify", "sp-1"),
+        ("soundcloud", "sc-1"),
+    ] {
         sqlx::query(
             "INSERT INTO hub_track_external_ids (track_id, service, external_id)
              VALUES (?1, ?2, ?3)",
@@ -657,8 +685,8 @@ async fn preview_facts_match_export_api_track_facts() {
         .await
         .expect("export");
     assert_eq!(resp.status(), StatusCode::OK);
-    let body: serde_json::Value = serde_json::from_str(&resp.text().await.expect("body"))
-        .expect("export JSON");
+    let body: serde_json::Value =
+        serde_json::from_str(&resp.text().await.expect("body")).expect("export JSON");
     let tr = &body["tracks"][0];
 
     assert_eq!(tr["tags"], serde_json::json!(facts.tags));

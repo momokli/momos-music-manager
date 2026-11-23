@@ -149,7 +149,9 @@ async fn recommendations_use_relationship_signals() {
     .await
     .unwrap();
     let house = tags::ensure_tag(&app.pool, me, "House").await.unwrap();
-    tags::tag_track(&app.pool, &app.cfg, me, 80002, house).await.unwrap();
+    tags::tag_track(&app.pool, &app.cfg, me, 80002, house)
+        .await
+        .unwrap();
 
     // 80001 shares artist + album with the tagged 80002 -> House is recommended.
     let recs = music_hub::recommend::recommend_tags(
@@ -199,8 +201,12 @@ async fn recommendations_exclude_setlist_and_rumpelkiste() {
         .unwrap();
 
     // Related track (same artist) carries both tags.
-    tags::tag_track(&app.pool, &app.cfg, me, 81002, s_tag).await.unwrap();
-    tags::tag_track(&app.pool, &app.cfg, me, 81002, h_tag).await.unwrap();
+    tags::tag_track(&app.pool, &app.cfg, me, 81002, s_tag)
+        .await
+        .unwrap();
+    tags::tag_track(&app.pool, &app.cfg, me, 81002, h_tag)
+        .await
+        .unwrap();
 
     let recs = music_hub::recommend::recommend_tags(
         &app.pool,
@@ -283,7 +289,10 @@ async fn track_view_shows_cluster_rec_and_scope_toggle() {
         "default scope must be `own` and hide another owner's cluster sibling"
     );
     assert!(default_html.contains("Meine Tags"), "scope toggle missing");
-    assert!(default_html.contains("scope=mine"), "mine toggle link missing");
+    assert!(
+        default_html.contains("scope=mine"),
+        "mine toggle link missing"
+    );
 
     // Explicit legacy `?scope=all` widens to Bob's cluster sibling + reason.
     let html = app

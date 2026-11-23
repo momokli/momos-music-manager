@@ -52,11 +52,7 @@ pub async fn ripeness(pool: &SqlitePool, track_id: i64, e: &Engine, owners: &[i6
     qb.push(" AND t.type IS NOT NULL");
     owner_clause(&mut qb, owners);
     qb.push(" GROUP BY t.type");
-    let rows = qb
-        .build()
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+    let rows = qb.build().fetch_all(pool).await.unwrap_or_default();
     for (type_name, cnt) in rows.into_iter().map(|r| {
         let ty: String = r.get(0);
         let cnt: i64 = r.get(1);

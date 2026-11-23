@@ -236,10 +236,7 @@ impl ToniesClient {
     /// Refresh once using the stored refresh token; map any failure to
     /// `AuthExpired` so the UI can offer "reconnect".
     async fn refresh_now(&mut self) -> TResult<()> {
-        let rt = self
-            .refresh_token
-            .clone()
-            .ok_or(ToniesError::AuthExpired)?;
+        let rt = self.refresh_token.clone().ok_or(ToniesError::AuthExpired)?;
         match refresh(&self.auth_base, &self.client_id, &rt).await {
             Ok(tokens) => {
                 self.set_tokens(tokens);
@@ -340,7 +337,11 @@ impl ToniesClient {
     /// `POST /v2/file` → presigned S3 ticket.
     pub async fn request_upload(&mut self) -> TResult<UploadTicket> {
         let v = self
-            .authed(reqwest::Method::POST, "/v2/file", Some(serde_json::json!({})))
+            .authed(
+                reqwest::Method::POST,
+                "/v2/file",
+                Some(serde_json::json!({})),
+            )
             .await?;
         Ok(parse_ticket(&v))
     }
@@ -364,7 +365,10 @@ impl ToniesClient {
                 ticket.file_id
             )));
         }
-        let boundary = format!("----hubtonies{}", Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let boundary = format!(
+            "----hubtonies{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
         let body = build_multipart(&boundary, &ticket.fields, filename, content_type, bytes);
         let resp = self
             .http
@@ -379,7 +383,10 @@ impl ToniesClient {
             .map_err(|e| {
                 // `without_url()`: the presigned URL carries a signature and
                 // must never reach a log line or the run log.
-                ToniesError::Other(anyhow::anyhow!("S3-Upload fehlgeschlagen: {}", e.without_url()))
+                ToniesError::Other(anyhow::anyhow!(
+                    "S3-Upload fehlgeschlagen: {}",
+                    e.without_url()
+                ))
             })?;
         if !resp.status().is_success() {
             return Err(ToniesError::Other(anyhow::anyhow!(

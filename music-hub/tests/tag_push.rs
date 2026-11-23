@@ -390,7 +390,11 @@ async fn rate_limit_is_retried_once() {
         2,
         "429 then one retry"
     );
-    assert_eq!(fx.cap.added.lock().unwrap().len(), 1, "succeeded after retry");
+    assert_eq!(
+        fx.cap.added.lock().unwrap().len(),
+        1,
+        "succeeded after retry"
+    );
     let (status, _, _) = push_status(&fx.pool, pl).await;
     assert_eq!(status, "ok");
 }
@@ -406,7 +410,11 @@ async fn quota_wall_is_marked_quota() {
         .await
         .unwrap();
 
-    assert_eq!(fx.cap.attempts.load(Ordering::SeqCst), 2, "429 then one retry");
+    assert_eq!(
+        fx.cap.attempts.load(Ordering::SeqCst),
+        2,
+        "429 then one retry"
+    );
     let (status, action, _) = push_status(&fx.pool, pl).await;
     assert_eq!(status, "quota", "terminal 429 -> quota, not generic error");
     assert_eq!(action, "add");

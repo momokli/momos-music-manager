@@ -62,7 +62,10 @@ async fn mmm_db(dir: &Path) -> (String, SqlitePool) {
         "CREATE TABLE tag_energy_levels (tag_id INTEGER, energy_level INTEGER)",
     ];
     for stmt in schema {
-        sqlx::query(stmt).execute(&pool).await.expect("create table");
+        sqlx::query(stmt)
+            .execute(&pool)
+            .await
+            .expect("create table");
     }
     (url, pool)
 }
@@ -225,10 +228,11 @@ async fn import_playlists_idempotent() {
         .await
         .unwrap();
 
-    let n_pl: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_playlists WHERE playlist_id = 'ple3'")
-        .fetch_one(&app.pool)
-        .await
-        .unwrap();
+    let n_pl: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM hub_playlists WHERE playlist_id = 'ple3'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
     let n_link: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM hub_playlist_tracks
           WHERE playlist_id = (SELECT id FROM hub_playlists WHERE playlist_id = 'ple3')",
@@ -294,10 +298,11 @@ async fn import_playlists_skips_generated() {
         .unwrap();
     assert_eq!(s.skipped_playlists, 1);
     assert_eq!(s.playlists, 0);
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_playlists WHERE playlist_id = 'gen1'")
-        .fetch_one(&app.pool)
-        .await
-        .unwrap();
+    let n: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM hub_playlists WHERE playlist_id = 'gen1'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
     assert_eq!(n, 0, "generated playlist not imported");
 }
 
@@ -389,11 +394,12 @@ async fn import_settings_maps_whitelist() {
     let s = mmm_import::import_settings(&app.pool, &url).await.unwrap();
     assert_eq!(s.imported, 3);
 
-    let v: String =
-        sqlx::query_scalar("SELECT value FROM hub_settings WHERE key = 'mmm.backpack_sync_enabled'")
-            .fetch_one(&app.pool)
-            .await
-            .unwrap();
+    let v: String = sqlx::query_scalar(
+        "SELECT value FROM hub_settings WHERE key = 'mmm.backpack_sync_enabled'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
     assert_eq!(v, "1");
     let p: String =
         sqlx::query_scalar("SELECT value FROM hub_settings WHERE key = 'mmm.bpmkey.name_prefix'")
@@ -481,10 +487,12 @@ async fn import_settings_idempotent() {
     assert_eq!(s1.imported, 2);
 
     // Age the rows so a second import must refresh updated_at.
-    sqlx::query("UPDATE hub_settings SET updated_at = '1970-01-01T00:00:00+00:00' WHERE key LIKE 'mmm.%'")
-        .execute(&app.pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE hub_settings SET updated_at = '1970-01-01T00:00:00+00:00' WHERE key LIKE 'mmm.%'",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
 
     let s2 = mmm_import::import_settings(&app.pool, &url).await.unwrap();
     assert_eq!(s2.imported, 2);
@@ -512,10 +520,12 @@ async fn import_tags_still_works() {
     let app = common::spawn().await;
     let dir = tempfile::tempdir().unwrap();
     let (url, mmm) = mmm_db(dir.path()).await;
-    sqlx::query("INSERT INTO tag_categories (id, name, icon, sort_order) VALUES (1, 'Mood', '', 0)")
-        .execute(&mmm)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO tag_categories (id, name, icon, sort_order) VALUES (1, 'Mood', '', 0)",
+    )
+    .execute(&mmm)
+    .await
+    .unwrap();
     sqlx::query("INSERT INTO tags (id, name, category_id) VALUES (1, 'Chill', 1)")
         .execute(&mmm)
         .await

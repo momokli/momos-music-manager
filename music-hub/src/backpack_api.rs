@@ -56,15 +56,23 @@ async fn bound_user(st: &AppState, headers: &HeaderMap) -> Result<(i64, i64), Re
         return Err(err(StatusCode::UNAUTHORIZED, "missing device token"));
     };
 
-    let device = match devices::find_bound_by_token_hash(&st.pool, &devices::hash_token(&token)).await
-    {
-        Ok(Some(d)) => d,
-        Ok(None) => return Err(err(StatusCode::UNAUTHORIZED, "unknown or unbound device token")),
-        Err(e) => {
-            tracing::warn!(error = %e, "backpack api: device lookup failed");
-            return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "device lookup failed"));
-        }
-    };
+    let device =
+        match devices::find_bound_by_token_hash(&st.pool, &devices::hash_token(&token)).await {
+            Ok(Some(d)) => d,
+            Ok(None) => {
+                return Err(err(
+                    StatusCode::UNAUTHORIZED,
+                    "unknown or unbound device token",
+                ));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "backpack api: device lookup failed");
+                return Err(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "device lookup failed",
+                ));
+            }
+        };
     let Some(user_id) = device.user_id else {
         return Err(err(StatusCode::UNAUTHORIZED, "device not bound"));
     };

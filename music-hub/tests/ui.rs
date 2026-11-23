@@ -1149,7 +1149,10 @@ async fn playlist_prioritize_flashes_when_unconfigured() {
         .filter_map(|v| v.to_str().ok())
         .find(|v| v.starts_with("hub_flash="))
         .unwrap_or_default();
-    assert!(flash.starts_with("hub_flash="), "should carry a flash cookie: {loc}");
+    assert!(
+        flash.starts_with("hub_flash="),
+        "should carry a flash cookie: {loc}"
+    );
 }
 
 #[tokio::test]
@@ -1389,9 +1392,10 @@ async fn tags_are_explicit_and_per_user() {
     assert_eq!(before.tags, 0, "tags must not be auto-derived");
 
     // Promote alice's playlist to a tag (1:1).
-    let tag_id = music_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
-        .await
-        .expect("create tag");
+    let tag_id =
+        music_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
+            .await
+            .expect("create tag");
     assert!(tag_id > 0);
 
     let after = music_hub::tags::rebuild(&app.pool).await.unwrap();

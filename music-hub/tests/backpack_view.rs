@@ -34,7 +34,10 @@ async fn setup() -> (tempfile::TempDir, SqlitePool) {
         .connect_with(opts)
         .await
         .expect("connect");
-    sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migrate");
     (dir, pool)
 }
 
@@ -115,9 +118,15 @@ async fn list_source_views_resolves_labels_and_fallbacks() {
     .await
     .unwrap();
 
-    backpacks::add_source(&pool, bp, SourceRef::Tag(tag)).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Lens("liked".to_string())).await.unwrap();
-    backpacks::add_source(&pool, bp, SourceRef::Track(track)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Lens("liked".to_string()))
+        .await
+        .unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Track(track))
+        .await
+        .unwrap();
 
     let views = backpacks::list_source_views(&pool, bp).await.unwrap();
     assert_eq!(views.len(), 3);
@@ -131,7 +140,12 @@ async fn list_source_views_resolves_labels_and_fallbacks() {
     assert!(views[0].position < views[1].position && views[1].position < views[2].position);
 
     // Unknown backpack -> empty, never an error.
-    assert!(backpacks::list_source_views(&pool, 999_999).await.unwrap().is_empty());
+    assert!(
+        backpacks::list_source_views(&pool, 999_999)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 // ── Story 3 + 4 + 5: HTTP view ───────────────────────────────────────────────
@@ -169,12 +183,18 @@ async fn backpacks_page_renders_cards_with_counts_and_labels() {
         .unwrap();
 
     let bp = insert_backpack(&app.pool, owner, "Reisekoffer", TS).await;
-    backpacks::add_source(&app.pool, bp, SourceRef::Tag(tag)).await.unwrap();
+    backpacks::add_source(&app.pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
     // pl_alice (seeded, owned by fixture alice) contains t_all + t_pl.
-    backpacks::add_source(&app.pool, bp, SourceRef::Playlist(app.seed.pl_alice)).await.unwrap();
+    backpacks::add_source(&app.pool, bp, SourceRef::Playlist(app.seed.pl_alice))
+        .await
+        .unwrap();
     // owner likes nothing; use the fixture-free "newest" lens instead: every hub track.
     let bp2 = insert_backpack(&app.pool, owner, "Alles", TS).await;
-    backpacks::add_source(&app.pool, bp2, SourceRef::Lens("newest".to_string())).await.unwrap();
+    backpacks::add_source(&app.pool, bp2, SourceRef::Lens("newest".to_string()))
+        .await
+        .unwrap();
 
     let body = get(&app, "/backpacks", &cookie).await;
 
@@ -191,7 +211,10 @@ async fn backpacks_page_renders_cards_with_counts_and_labels() {
     assert!(!body.contains("Tracks (live)"), "no live count anymore");
     // Per-source counts are materialised too.
     assert!(body.contains("Moody · 2 Tracks"), "tag source count");
-    assert!(body.contains("Deep House · 2 Tracks"), "playlist source count");
+    assert!(
+        body.contains("Deep House · 2 Tracks"),
+        "playlist source count"
+    );
     assert!(body.contains("Alles"), "second card renders");
     // Nav marks the page current.
     assert!(body.contains("aria-current=\"page\""));
@@ -202,7 +225,10 @@ async fn backpacks_page_empty_state() {
     let app = common::spawn().await;
     let (_owner, cookie) = app.user_with_password("nothing", "pw").await;
     let body = get(&app, "/backpacks", &cookie).await;
-    assert!(body.contains("Noch keine Backpacks"), "empty state is shown");
+    assert!(
+        body.contains("Noch keine Backpacks"),
+        "empty state is shown"
+    );
 }
 
 #[tokio::test]
@@ -248,12 +274,17 @@ async fn track_count_exceeds_old_500_clamp() {
         .unwrap();
     }
     let bp = insert_backpack(&app.pool, owner, "Big", TS).await;
-    backpacks::add_source(&app.pool, bp, SourceRef::Lens("newest".to_string())).await.unwrap();
+    backpacks::add_source(&app.pool, bp, SourceRef::Lens("newest".to_string()))
+        .await
+        .unwrap();
 
     let count = backpacks::resolve_count(&app.pool, bp).await.unwrap();
     assert!(count > 500, "resolver count exceeds the old clamp: {count}");
     let stats = backpacks::backpack_stats(&app.pool, bp).await.unwrap();
-    assert_eq!(stats.track_count as usize, count, "materialised count matches resolver");
+    assert_eq!(
+        stats.track_count as usize, count,
+        "materialised count matches resolver"
+    );
 
     let body = get(&app, "/backpacks", &cookie).await;
     assert!(
@@ -325,12 +356,14 @@ async fn backpacks_page_never_calls_music_api() {
         tracks.push(id);
     }
     for isrc in ["ISRC-0", "ISRC-1"] {
-        sqlx::query("INSERT INTO hub_music_state (isrc, state, checked_at) VALUES (?1, 'ready', ?2)")
-            .bind(isrc)
-            .bind(TS)
-            .execute(&app.pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO hub_music_state (isrc, state, checked_at) VALUES (?1, 'ready', ?2)",
+        )
+        .bind(isrc)
+        .bind(TS)
+        .execute(&app.pool)
+        .await
+        .unwrap();
     }
     let tag = insert_tag(&app.pool, owner, "offline-tag", "Offline").await;
     for t in &tracks {
@@ -342,11 +375,19 @@ async fn backpacks_page_never_calls_music_api() {
             .unwrap();
     }
     let bp = insert_backpack(&app.pool, owner, "Ohne Netz", TS).await;
-    backpacks::add_source(&app.pool, bp, SourceRef::Tag(tag)).await.unwrap();
+    backpacks::add_source(&app.pool, bp, SourceRef::Tag(tag))
+        .await
+        .unwrap();
 
     let body = get(&app, "/backpacks", &cookie).await;
 
-    assert!(body.contains("1 Quellen · 5 Tracks · 2/5 verfügbar"), "card header");
-    assert!(body.contains("Offline · 5 Tracks · 2/5 verfügbar"), "source row");
+    assert!(
+        body.contains("1 Quellen · 5 Tracks · 2/5 verfügbar"),
+        "card header"
+    );
+    assert!(
+        body.contains("Offline · 5 Tracks · 2/5 verfügbar"),
+        "source row"
+    );
     assert_eq!(hits.count(), 0, "rendering must not call music-api");
 }

@@ -77,25 +77,42 @@ async fn create_trims_rejects_empty_duplicate_and_validates_body() {
     let (_dir, pool) = setup().await;
     let alice = insert_user(&pool, "alice").await;
 
-    let id = ct::create(&pool, alice, "  Intro  ", "{tags}", false).await.unwrap();
+    let id = ct::create(&pool, alice, "  Intro  ", "{tags}", false)
+        .await
+        .unwrap();
     let row = ct::get(&pool, id).await.unwrap().unwrap();
     assert_eq!(row.name, "Intro", "name trimmed");
     assert_eq!(row.owner_user_id, Some(alice));
     assert_eq!(row.is_shared, 0, "new template starts unshared");
 
     // Case-insensitive duplicate of the same owner rejected, no insert.
-    assert!(ct::create(&pool, alice, "intro", "{tags}", false).await.is_err());
+    assert!(
+        ct::create(&pool, alice, "intro", "{tags}", false)
+            .await
+            .is_err()
+    );
     // Empty / whitespace-only name rejected.
-    assert!(ct::create(&pool, alice, "  ", "{tags}", false).await.is_err());
+    assert!(
+        ct::create(&pool, alice, "  ", "{tags}", false)
+            .await
+            .is_err()
+    );
     // Invalid body rejected (unknown placeholder) and nothing written.
     let before = count(&pool).await;
-    let err = ct::create(&pool, alice, "Bad", "{title}", false).await.unwrap_err();
-    assert!(err.to_string().contains("{title}"), "names the token: {err}");
+    let err = ct::create(&pool, alice, "Bad", "{title}", false)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("{title}"),
+        "names the token: {err}"
+    );
     assert!(err.to_string().contains("{tags}"), "lists allowed: {err}");
     assert_eq!(count(&pool).await, before, "no row on invalid body");
 
     // Escaped double brace is accepted.
-    ct::create(&pool, alice, "Escaped", "{{tags}}", false).await.unwrap();
+    ct::create(&pool, alice, "Escaped", "{{tags}}", false)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -103,16 +120,24 @@ async fn rename_enforces_rights_and_duplicates() {
     let (_dir, pool) = setup().await;
     let alice = insert_user(&pool, "alice").await;
     let bob = insert_user(&pool, "bob").await;
-    let a = ct::create(&pool, alice, "One", "{tags}", false).await.unwrap();
-    let b = ct::create(&pool, alice, "Two", "{tags}", false).await.unwrap();
-    let bob_t = ct::create(&pool, bob, "Bob's", "{tags}", false).await.unwrap();
+    let a = ct::create(&pool, alice, "One", "{tags}", false)
+        .await
+        .unwrap();
+    let b = ct::create(&pool, alice, "Two", "{tags}", false)
+        .await
+        .unwrap();
+    let bob_t = ct::create(&pool, bob, "Bob's", "{tags}", false)
+        .await
+        .unwrap();
 
     // Rename to another of my names -> duplicate error.
     assert!(ct::rename(&pool, alice, false, a, "Two").await.is_err());
     // Empty rejected.
     assert!(ct::rename(&pool, alice, false, a, "  ").await.is_err());
     // Trim + rename ok.
-    ct::rename(&pool, alice, false, a, "  Alpha  ").await.unwrap();
+    ct::rename(&pool, alice, false, a, "  Alpha  ")
+        .await
+        .unwrap();
     let row = ct::get(&pool, a).await.unwrap().unwrap();
     assert_eq!(row.name, "Alpha");
     // Case-insensitive clash rejected.
@@ -124,8 +149,14 @@ async fn rename_enforces_rights_and_duplicates() {
 
     // System template: non-admin rejected, admin allowed.
     let sys = system_id(&pool, "Standard").await;
-    assert!(ct::rename(&pool, alice, false, sys, "Hacked").await.is_err());
-    ct::rename(&pool, alice, true, sys, "Standard (Admin)").await.unwrap();
+    assert!(
+        ct::rename(&pool, alice, false, sys, "Hacked")
+            .await
+            .is_err()
+    );
+    ct::rename(&pool, alice, true, sys, "Standard (Admin)")
+        .await
+        .unwrap();
     assert_eq!(
         ct::get(&pool, sys).await.unwrap().unwrap().name,
         "Standard (Admin)"
@@ -139,17 +170,35 @@ async fn update_body_validates_and_enforces_rights() {
     let (_dir, pool) = setup().await;
     let alice = insert_user(&pool, "alice").await;
     let bob = insert_user(&pool, "bob").await;
-    let a = ct::create(&pool, alice, "One", "{tags}", false).await.unwrap();
+    let a = ct::create(&pool, alice, "One", "{tags}", false)
+        .await
+        .unwrap();
 
-    ct::update_body(&pool, alice, false, a, "{bpm} {key}").await.unwrap();
-    assert_eq!(ct::get(&pool, a).await.unwrap().unwrap().body, "{bpm} {key}");
+    ct::update_body(&pool, alice, false, a, "{bpm} {key}")
+        .await
+        .unwrap();
+    assert_eq!(
+        ct::get(&pool, a).await.unwrap().unwrap().body,
+        "{bpm} {key}"
+    );
 
     // Invalid body -> error, body unchanged.
-    assert!(ct::update_body(&pool, alice, false, a, "{artist}").await.is_err());
-    assert_eq!(ct::get(&pool, a).await.unwrap().unwrap().body, "{bpm} {key}");
+    assert!(
+        ct::update_body(&pool, alice, false, a, "{artist}")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        ct::get(&pool, a).await.unwrap().unwrap().body,
+        "{bpm} {key}"
+    );
 
     // Foreign -> rejected.
-    assert!(ct::update_body(&pool, bob, false, a, "{tags}").await.is_err());
+    assert!(
+        ct::update_body(&pool, bob, false, a, "{tags}")
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -157,7 +206,9 @@ async fn share_toggle_and_delete() {
     let (_dir, pool) = setup().await;
     let alice = insert_user(&pool, "alice").await;
     let bob = insert_user(&pool, "bob").await;
-    let a = ct::create(&pool, alice, "One", "{tags}", false).await.unwrap();
+    let a = ct::create(&pool, alice, "One", "{tags}", false)
+        .await
+        .unwrap();
 
     ct::set_shared(&pool, alice, false, a, true).await.unwrap();
     assert_eq!(ct::get(&pool, a).await.unwrap().unwrap().is_shared, 1);
@@ -185,8 +236,12 @@ async fn duplicate_creates_owned_editable_copy() {
     let bob = insert_user(&pool, "bob").await;
 
     // Bob shares a template.
-    let shared = ct::create(&pool, bob, "Shared", "{tags}!", false).await.unwrap();
-    ct::set_shared(&pool, bob, false, shared, true).await.unwrap();
+    let shared = ct::create(&pool, bob, "Shared", "{tags}!", false)
+        .await
+        .unwrap();
+    ct::set_shared(&pool, bob, false, shared, true)
+        .await
+        .unwrap();
 
     // Alice duplicates Bob's shared template: owned by Alice, unshared, editable.
     let copy = ct::duplicate(&pool, alice, shared).await.unwrap();
@@ -194,7 +249,9 @@ async fn duplicate_creates_owned_editable_copy() {
     assert_eq!(row.owner_user_id, Some(alice));
     assert_eq!(row.is_shared, 0);
     assert_eq!(row.body, "{tags}!");
-    ct::update_body(&pool, alice, false, copy, "{energy}").await.unwrap();
+    ct::update_body(&pool, alice, false, copy, "{energy}")
+        .await
+        .unwrap();
 
     // Duplicating a system template names the copy after the system name.
     let sys = system_id(&pool, "Standard").await;
@@ -215,28 +272,64 @@ async fn visibility_and_mutable_by_rules() {
     let alice = insert_user(&pool, "alice").await;
     let bob = insert_user(&pool, "bob").await;
 
-    let private = ct::create(&pool, bob, "Private", "{tags}", false).await.unwrap();
-    let shared = ct::create(&pool, bob, "Shared", "{tags}", false).await.unwrap();
-    ct::set_shared(&pool, bob, false, shared, true).await.unwrap();
+    let private = ct::create(&pool, bob, "Private", "{tags}", false)
+        .await
+        .unwrap();
+    let shared = ct::create(&pool, bob, "Shared", "{tags}", false)
+        .await
+        .unwrap();
+    ct::set_shared(&pool, bob, false, shared, true)
+        .await
+        .unwrap();
     let sys = system_id(&pool, "Standard").await;
 
     // Foreign private: invisible -> get_visible None, mutable_by false (visible
     // only to its owner).
-    assert!(ct::get_visible(&pool, alice, private).await.unwrap().is_none());
-    assert!(ct::get_visible(&pool, bob, private).await.unwrap().is_some());
+    assert!(
+        ct::get_visible(&pool, alice, private)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        ct::get_visible(&pool, bob, private)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // Shared is visible but not mutable for Alice.
-    assert!(ct::get_visible(&pool, alice, shared).await.unwrap().is_some());
-    assert_eq!(ct::mutable_by(&pool, alice, false, shared).await.unwrap(), Some(false));
+    assert!(
+        ct::get_visible(&pool, alice, shared)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        ct::mutable_by(&pool, alice, false, shared).await.unwrap(),
+        Some(false)
+    );
 
     // System is visible to all; mutable only for admins.
     assert!(ct::get_visible(&pool, alice, sys).await.unwrap().is_some());
-    assert_eq!(ct::mutable_by(&pool, alice, false, sys).await.unwrap(), Some(false));
-    assert_eq!(ct::mutable_by(&pool, alice, true, sys).await.unwrap(), Some(true));
+    assert_eq!(
+        ct::mutable_by(&pool, alice, false, sys).await.unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        ct::mutable_by(&pool, alice, true, sys).await.unwrap(),
+        Some(true)
+    );
 
     // Own is mutable; missing row -> None.
-    assert_eq!(ct::mutable_by(&pool, bob, false, private).await.unwrap(), Some(true));
-    assert_eq!(ct::mutable_by(&pool, alice, false, 999_999).await.unwrap(), None);
+    assert_eq!(
+        ct::mutable_by(&pool, bob, false, private).await.unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        ct::mutable_by(&pool, alice, false, 999_999).await.unwrap(),
+        None
+    );
 
     // list_visible groups system first, then mine, then shared.
     let views = ct::list_visible(&pool, alice, false).await.unwrap();
@@ -254,12 +347,22 @@ async fn two_users_same_name_allowed() {
     let alice = insert_user(&pool, "alice").await;
     let bob = insert_user(&pool, "bob").await;
 
-    let a = ct::create(&pool, alice, "Standard", "{tags}", false).await.unwrap();
+    let a = ct::create(&pool, alice, "Standard", "{tags}", false)
+        .await
+        .unwrap();
     // Same name (even case-insensitively) is fine for a different user.
-    let b = ct::create(&pool, bob, "standard", "{tags}", false).await.unwrap();
+    let b = ct::create(&pool, bob, "standard", "{tags}", false)
+        .await
+        .unwrap();
     assert_ne!(a, b);
-    assert_eq!(ct::get(&pool, a).await.unwrap().unwrap().owner_user_id, Some(alice));
-    assert_eq!(ct::get(&pool, b).await.unwrap().unwrap().owner_user_id, Some(bob));
+    assert_eq!(
+        ct::get(&pool, a).await.unwrap().unwrap().owner_user_id,
+        Some(alice)
+    );
+    assert_eq!(
+        ct::get(&pool, b).await.unwrap().unwrap().owner_user_id,
+        Some(bob)
+    );
 }
 
 // ── migration ────────────────────────────────────────────────────────────────
@@ -269,18 +372,27 @@ async fn migration_seeds_system_and_is_additive() {
     let (_dir, pool) = setup().await;
 
     // Fresh DB: exactly 2 system templates with the fixed bodies.
-    let sys_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM hub_comment_templates WHERE owner_user_id IS NULL")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let sys_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_comment_templates WHERE owner_user_id IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(sys_count, 2, "two system seeds");
     assert_eq!(
-        ct::get(&pool, system_id(&pool, "Standard").await).await.unwrap().unwrap().body,
+        ct::get(&pool, system_id(&pool, "Standard").await)
+            .await
+            .unwrap()
+            .unwrap()
+            .body,
         "{types} {tags}"
     );
     assert_eq!(
-        ct::get(&pool, system_id(&pool, "Nur Tags").await).await.unwrap().unwrap().body,
+        ct::get(&pool, system_id(&pool, "Nur Tags").await)
+            .await
+            .unwrap()
+            .unwrap()
+            .body,
         "{tags}"
     );
 
@@ -346,18 +458,24 @@ async fn migration_runs_on_existing_db() {
         .expect("apply 066 on existing DB");
 
     // Seeds present, old data intact.
-    let sys_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM hub_comment_templates WHERE owner_user_id IS NULL")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let sys_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_comment_templates WHERE owner_user_id IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(sys_count, 2, "system seeds created on the existing DB");
     let after_users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_users")
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(after_users, before_users, "existing rows untouched");
-    assert!(ct::get(&pool, system_id(&pool, "Standard").await).await.unwrap().is_some());
+    assert!(
+        ct::get(&pool, system_id(&pool, "Standard").await)
+            .await
+            .unwrap()
+            .is_some()
+    );
     let _ = alice;
 }
 
@@ -446,10 +564,12 @@ async fn http_create_then_duplicate_and_validate_flash() {
     assert!(flash_cookie(&resp).starts_with("hub_flash=ok:"));
 
     // Invalid body -> flash naming the allowed placeholders, no new row.
-    let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_comment_templates WHERE owner_user_id IS NOT NULL")
-        .fetch_one(&app.pool)
-        .await
-        .unwrap();
+    let before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_comment_templates WHERE owner_user_id IS NOT NULL",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
     let resp = app
         .client()
         .post(app.url("/comment-templates/create"))
@@ -460,10 +580,12 @@ async fn http_create_then_duplicate_and_validate_flash() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
     assert!(flash_cookie(&resp).starts_with("hub_flash=ok:"));
-    let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_comment_templates WHERE owner_user_id IS NOT NULL")
-        .fetch_one(&app.pool)
-        .await
-        .unwrap();
+    let after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_comment_templates WHERE owner_user_id IS NOT NULL",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
     assert_eq!(before, after, "invalid body wrote nothing");
 }
 
@@ -486,7 +608,11 @@ async fn http_foreign_private_is_404_and_foreign_shared_is_403() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{path} foreign private 404");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "{path} foreign private 404"
+        );
     }
     let page = get_page(&app, &alice_cookie).await;
     assert!(!page.contains("Private"), "foreign private not listed");
@@ -503,10 +629,17 @@ async fn http_foreign_private_is_404_and_foreign_shared_is_403() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN, "{path} foreign shared 403");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::FORBIDDEN,
+            "{path} foreign shared 403"
+        );
     }
     // Bob's shared template is untouched.
-    assert_eq!(ct::get(&app.pool, shared).await.unwrap().unwrap().name, "Shared");
+    assert_eq!(
+        ct::get(&app.pool, shared).await.unwrap().unwrap().name,
+        "Shared"
+    );
 
     let _ = alice_id;
 }
@@ -531,9 +664,16 @@ async fn http_system_is_403_for_non_admin() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN, "{path} system 403");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::FORBIDDEN,
+            "{path} system 403"
+        );
     }
-    assert!(ct::get(&app.pool, sys).await.unwrap().is_some(), "system template survives");
+    assert!(
+        ct::get(&app.pool, sys).await.unwrap().is_some(),
+        "system template survives"
+    );
 }
 
 #[tokio::test]
@@ -571,10 +711,7 @@ async fn http_share_duplicate_and_own_edits() {
     assert_eq!(ct::get(&app.pool, id).await.unwrap().unwrap().is_shared, 1);
 
     // Rename + body + delete own work.
-    for (path, field, value) in [
-        ("rename", "name", "Renamed"),
-        ("body", "body", "{bpm}"),
-    ] {
+    for (path, field, value) in [("rename", "name", "Renamed"), ("body", "body", "{bpm}")] {
         let resp = app
             .client()
             .post(app.url(&format!("/comment-templates/{id}/{path}")))
@@ -607,7 +744,15 @@ async fn http_share_duplicate_and_own_edits() {
     .fetch_one(&app.pool)
     .await
     .unwrap();
-    assert_eq!(ct::get(&app.pool, bob_copy).await.unwrap().unwrap().is_shared, 0, "copy is unshared");
+    assert_eq!(
+        ct::get(&app.pool, bob_copy)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_shared,
+        0,
+        "copy is unshared"
+    );
     // Editable by Bob.
     let resp = app
         .client()
@@ -727,13 +872,12 @@ async fn http_duplicate_name_collision_resolves_cleanly() {
     }
 
     // Alice now has "Track", "Track (Kopie)" and "Track (Kopie 2)", all her own.
-    let mut names: Vec<String> = sqlx::query_scalar(
-        "SELECT name FROM hub_comment_templates WHERE owner_user_id = ?1",
-    )
-    .bind(alice_id)
-    .fetch_all(&app.pool)
-    .await
-    .unwrap();
+    let mut names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM hub_comment_templates WHERE owner_user_id = ?1")
+            .bind(alice_id)
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
     names.sort();
     let mut expected = vec!["Track", "Track (Kopie)", "Track (Kopie 2)"];
     expected.sort();
@@ -899,10 +1043,12 @@ async fn migration_069_moves_legacy_standard_body() {
     .await
     .unwrap();
 
-    sqlx::query(include_str!("../migrations/069_comment_template_default.sql"))
-        .execute(&pool)
-        .await
-        .expect("run migration 069");
+    sqlx::query(include_str!(
+        "../migrations/069_comment_template_default.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("run migration 069");
 
     let row = ct::get(&pool, id).await.unwrap().unwrap();
     assert_eq!(row.body, "{types} {tags}");
@@ -926,10 +1072,12 @@ async fn migration_069_keeps_edited_standard_body() {
     .await
     .unwrap();
 
-    sqlx::query(include_str!("../migrations/069_comment_template_default.sql"))
-        .execute(&pool)
-        .await
-        .expect("run migration 069");
+    sqlx::query(include_str!(
+        "../migrations/069_comment_template_default.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("run migration 069");
 
     let row = ct::get(&pool, id).await.unwrap().unwrap();
     assert_eq!(row.body, "{types} {bpm} {key}", "edited body untouched");
@@ -940,9 +1088,11 @@ async fn migration_069_keeps_edited_standard_body() {
     let own = ct::create(&pool, alice, "Standard", "{tags}", false)
         .await
         .unwrap();
-    sqlx::query(include_str!("../migrations/069_comment_template_default.sql"))
-        .execute(&pool)
-        .await
-        .expect("run migration 069 again");
+    sqlx::query(include_str!(
+        "../migrations/069_comment_template_default.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("run migration 069 again");
     assert_eq!(ct::get(&pool, own).await.unwrap().unwrap().body, "{tags}");
 }

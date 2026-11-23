@@ -62,15 +62,14 @@ pub async fn nav(st: &AppState, headers: &HeaderMap, active: &str) -> Option<Nav
         None => (false, String::new()),
     };
 
-    let has_tonies: bool = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM hub_tonies_accounts WHERE user_id = ?1",
-    )
-    .bind(user_id)
-    .fetch_optional(&st.pool)
-    .await
-    .ok()
-    .flatten()
-    .is_some();
+    let has_tonies: bool =
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_tonies_accounts WHERE user_id = ?1")
+            .bind(user_id)
+            .fetch_optional(&st.pool)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
 
     Some(Nav {
         id: user_id,

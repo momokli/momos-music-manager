@@ -259,7 +259,11 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) -> WorkerHealth {
                 let worked = matches!(p, Ok(n) if n > 0)
                     || matches!(f, Ok(n) if n > 0)
                     || matches!(g, Ok(n) if n > 0);
-                let err = p.err().or_else(|| f.err()).or_else(|| g.err()).map(|e| e.to_string());
+                let err = p
+                    .err()
+                    .or_else(|| f.err())
+                    .or_else(|| g.err())
+                    .map(|e| e.to_string());
                 health.record("enrichment", worked, err);
                 tokio::time::sleep(if worked { BUSY_WAIT } else { IDLE_WAIT }).await;
             }
@@ -571,10 +575,7 @@ pub enum PlaylistPollOutcome {
 /// User without a usable token are skipped with a log line and produce no
 /// request. A 429 or dev-mode quota aborts the pass with the matching outcome
 /// so the caller can back off instead of retrying in a storm.
-pub async fn playlist_listing_pass(
-    pool: &SqlitePool,
-    cfg: &Config,
-) -> Result<PlaylistPollOutcome> {
+pub async fn playlist_listing_pass(pool: &SqlitePool, cfg: &Config) -> Result<PlaylistPollOutcome> {
     let accounts = sqlx::query_as::<_, (i64, String, Option<String>)>(
         "SELECT u.id, u.slug, a.access_token
            FROM hub_users u
@@ -588,7 +589,12 @@ pub async fn playlist_listing_pass(
     let mut stats = PlaylistPollStats::default();
     for (user_id, slug, stored_token) in accounts {
         // No token at all: log only, never touch the network (#506).
-        if stored_token.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        if stored_token
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
             tracing::info!("playlists poll: skipping {slug} (no Spotify token)");
             continue;
         }
@@ -604,20 +610,14 @@ pub async fn playlist_listing_pass(
 
         // 1 request: `/me` (also persists remote id + display name).
         stats.requests += 1;
-        let remote_id = match ingest::remote_profile(
-            pool,
-            &cfg.spotify_api_base,
-            &token,
-            user_id,
-        )
-        .await
-        {
-            Ok((id, _)) => id,
-            Err(e) => {
-                tracing::warn!("playlists poll: profile fetch for {slug} failed: {e}");
-                continue;
-            }
-        };
+        let remote_id =
+            match ingest::remote_profile(pool, &cfg.spotify_api_base, &token, user_id).await {
+                Ok((id, _)) => id,
+                Err(e) => {
+                    tracing::warn!("playlists poll: profile fetch for {slug} failed: {e}");
+                    continue;
+                }
+            };
 
         let url = spotify::api_url(&cfg.spotify_api_base, "/me/playlists?limit=50");
         let (outcome, pages) = match paged_counted(&token, &url).await {
@@ -641,10 +641,7 @@ pub async fn playlist_listing_pass(
                 }
             }
             Outcome::RateLimited { retry_after } => {
-                return Ok(PlaylistPollOutcome::RateLimited {
-                    retry_after,
-                    stats,
-                });
+                return Ok(PlaylistPollOutcome::RateLimited { retry_after, stats });
             }
             Outcome::Quota => return Ok(PlaylistPollOutcome::Quota { stats }),
             Outcome::Forbidden => {

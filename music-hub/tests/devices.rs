@@ -34,7 +34,10 @@ async fn register(app: &common::TestApp, name: &str, pairing: &str, device: &str
     assert_eq!(status, StatusCode::OK, "register status: {v}");
     (
         v["device_id"].as_i64().expect("device_id"),
-        v["approval_path"].as_str().expect("approval_path").to_string(),
+        v["approval_path"]
+            .as_str()
+            .expect("approval_path")
+            .to_string(),
     )
 }
 
@@ -60,7 +63,16 @@ async fn insert_device(
     .expect("insert device")
 }
 
-async fn row(app: &common::TestApp, id: i64) -> (Option<i64>, String, Option<String>, Option<String>, Option<String>) {
+async fn row(
+    app: &common::TestApp,
+    id: i64,
+) -> (
+    Option<i64>,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     sqlx::query_as(
         "SELECT user_id, token_hash, pending_token_hash, paired_at, expires_at
            FROM hub_devices WHERE id = ?1",
@@ -87,7 +99,11 @@ async fn register_creates_pending_row_and_leaks_no_secret() {
 
     let (user_id, token_hash, pending, paired_at, expires_at) = row(&app, id).await;
     assert_eq!(user_id, None, "pending row has no owner");
-    assert_eq!(token_hash, hash_token(&pairing), "token_hash holds pairing hash");
+    assert_eq!(
+        token_hash,
+        hash_token(&pairing),
+        "token_hash holds pairing hash"
+    );
     assert_eq!(pending.as_deref(), Some(hash_token(&device).as_str()));
     assert_eq!(paired_at, None);
     assert!(expires_at.is_some(), "pending row has a TTL");
@@ -102,8 +118,14 @@ async fn register_creates_pending_row_and_leaks_no_secret() {
         .expect("register request");
     let txt = resp.text().await.expect("body");
     assert!(!txt.contains(&device), "device token must not be returned");
-    assert!(!txt.contains(&raw('d')), "device token must not be returned");
-    assert!(!txt.contains(&hash_token(&device)), "token hash must not be returned");
+    assert!(
+        !txt.contains(&raw('d')),
+        "device token must not be returned"
+    );
+    assert!(
+        !txt.contains(&hash_token(&device)),
+        "token hash must not be returned"
+    );
 }
 
 #[tokio::test]
@@ -162,7 +184,10 @@ async fn approval_binds_device_to_user() {
         .expect("approval GET");
     assert_eq!(page.status(), StatusCode::OK);
     let html = page.text().await.expect("html");
-    assert!(html.contains("diesen kellner anheuern?"), "asks the question");
+    assert!(
+        html.contains("diesen kellner anheuern?"),
+        "asks the question"
+    );
     assert!(html.contains("kellner-1"), "shows the device name");
 
     let bind = app
@@ -181,7 +206,11 @@ async fn approval_binds_device_to_user() {
     assert!(paired_at.is_some(), "paired_at set");
     assert_eq!(expires_at, None, "TTL cleared after binding");
     assert!(pending.is_none(), "staging slot cleared");
-    assert_eq!(token_hash, hash_token(&device), "token_hash rotated to device token");
+    assert_eq!(
+        token_hash,
+        hash_token(&device),
+        "token_hash rotated to device token"
+    );
 }
 
 // (c) pairing token is single-use ───────────────────────────────────────────
@@ -281,7 +310,11 @@ async fn list_requires_session_and_is_user_isolated() {
         .send()
         .await
         .expect("anon list");
-    assert_eq!(anon.status(), StatusCode::SEE_OTHER, "unauthenticated → /login");
+    assert_eq!(
+        anon.status(),
+        StatusCode::SEE_OTHER,
+        "unauthenticated → /login"
+    );
     assert_eq!(
         anon.headers().get("location").and_then(|v| v.to_str().ok()),
         Some("/login")

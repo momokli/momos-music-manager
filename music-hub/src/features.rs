@@ -60,9 +60,18 @@ fn spotify_id_from_href(href: &str) -> Option<String> {
 pub fn camelot(pitch: i64, mode: i64) -> String {
     let p = pitch.rem_euclid(12) as usize;
     let major = mode == 1;
-    let table_major = ["8B", "3B", "10B", "5B", "12B", "7B", "2B", "9B", "4B", "11B", "6B", "1B"];
-    let table_minor = ["5A", "12A", "7A", "2A", "9A", "4A", "11A", "6A", "1A", "8A", "3A", "10A"];
-    (if major { table_major[p] } else { table_minor[p] }).to_string()
+    let table_major = [
+        "8B", "3B", "10B", "5B", "12B", "7B", "2B", "9B", "4B", "11B", "6B", "1B",
+    ];
+    let table_minor = [
+        "5A", "12A", "7A", "2A", "9A", "4A", "11A", "6A", "1A", "8A", "3A", "10A",
+    ];
+    (if major {
+        table_major[p]
+    } else {
+        table_minor[p]
+    })
+    .to_string()
 }
 
 /// Inverse of [`camelot`]: Camelot notation -> `(pitch_class, mode)`
@@ -336,8 +345,7 @@ pub async fn freqblog_priority_once(pool: &SqlitePool, cfg: &Config, batch: i64)
         return Ok(0);
     }
 
-    let (processed, stopped) =
-        crate::freqblog::enrich_tracks(pool, cfg, &ids, ids.len()).await?;
+    let (processed, stopped) = crate::freqblog::enrich_tracks(pool, cfg, &ids, ids.len()).await?;
     // Only clear requests we actually handled; on a quota wall keep them for later.
     if !stopped {
         for id in &ids {
@@ -443,7 +451,11 @@ pub async fn recommendations(
                 .filter_map(|a| a.name.clone())
                 .collect::<Vec<_>>()
                 .join(", "),
-            spotify_id: i.href.as_deref().and_then(spotify_id_from_href).unwrap_or_default(),
+            spotify_id: i
+                .href
+                .as_deref()
+                .and_then(spotify_id_from_href)
+                .unwrap_or_default(),
         })
         .collect())
 }
@@ -603,10 +615,8 @@ pub async fn backfill_from_music_api(
         let Some((items, _missing)) = crate::music_api::metadata_range(cfg, chunk).await else {
             continue;
         };
-        let hit: std::collections::HashMap<String, &crate::music_api::MetadataRow> = items
-            .iter()
-            .map(|m| (m.isrc.to_uppercase(), m))
-            .collect();
+        let hit: std::collections::HashMap<String, &crate::music_api::MetadataRow> =
+            items.iter().map(|m| (m.isrc.to_uppercase(), m)).collect();
         for isrc in chunk {
             let key = isrc.to_uppercase();
             let Some(&tid) = by_isrc.get(&key) else {
@@ -628,7 +638,9 @@ pub async fn backfill_from_music_api(
 
 #[cfg(test)]
 mod tests {
-    use super::{camelot, camelot_compatible, camelot_to_pitch_mode, key_name, spotify_id_from_href};
+    use super::{
+        camelot, camelot_compatible, camelot_to_pitch_mode, key_name, spotify_id_from_href,
+    };
 
     #[test]
     fn camelot_inverse_matches_reference() {

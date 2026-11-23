@@ -187,7 +187,9 @@ async fn request_json(
     let client = reqwest::Client::new();
     let mut retried = false;
     loop {
-        let mut req = client.request(method.clone(), url).bearer_auth(access_token);
+        let mut req = client
+            .request(method.clone(), url)
+            .bearer_auth(access_token);
         if let Some(q) = query {
             req = req.query(q);
         }

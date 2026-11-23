@@ -41,7 +41,10 @@ async fn status_shape_and_defaults() {
     assert!(data["version"].is_string());
     assert!(data["gitSha"].is_string());
     assert!(data["describe"].is_string());
-    assert!(data["startedAt"].is_string(), "startedAt stamped by registry");
+    assert!(
+        data["startedAt"].is_string(),
+        "startedAt stamped by registry"
+    );
     assert!(data["uptimeSecs"].is_number());
 
     // All eight Hub loops are registered and reported.

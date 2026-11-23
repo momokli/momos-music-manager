@@ -614,7 +614,10 @@ async fn suggestions_rank_shared_tag_higher() {
         a.score,
         b.score
     );
-    assert_eq!(sugs[0].track_id, tag_cand, "top suggestion is the tag match");
+    assert_eq!(
+        sugs[0].track_id, tag_cand,
+        "top suggestion is the tag match"
+    );
 }
 
 #[tokio::test]

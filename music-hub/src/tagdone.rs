@@ -192,7 +192,10 @@ mod tests {
         let fams = configured_families(&pool).await;
         assert_eq!(
             fams,
-            DESCRIBE_FAMILIES.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+            DESCRIBE_FAMILIES
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
         );
     }
 

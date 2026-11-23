@@ -341,8 +341,8 @@ pub async fn suggestions(
     // Tag-overlap similarity to the seeds (batched, max-aggregated).
     let mut sim: HashMap<i64, f64> = HashMap::new();
     for &seed in &seed_sample {
-        for (cid, v) in crate::similarity::similarity_to_seed(pool, seed, &candidate_ids, &e, &[])
-            .await
+        for (cid, v) in
+            crate::similarity::similarity_to_seed(pool, seed, &candidate_ids, &e, &[]).await
         {
             let slot = sim.entry(cid).or_insert(0.0);
             if v > *slot {
@@ -660,8 +660,7 @@ pub(crate) async fn spotify_remove_uris(
 ) -> Result<()> {
     let url = crate::spotify::api_url(base, &format!("/playlists/{remote_id}/items"));
     for chunk in uris.chunks(100) {
-        let tracks: Vec<serde_json::Value> =
-            chunk.iter().map(|u| json!({ "uri": u })).collect();
+        let tracks: Vec<serde_json::Value> = chunk.iter().map(|u| json!({ "uri": u })).collect();
         let (status, resp) =
             crate::spotify::delete_json(token, &url, &json!({ "tracks": tracks })).await?;
         if !(200..300).contains(&status) {
