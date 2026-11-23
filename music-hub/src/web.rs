@@ -3423,6 +3423,11 @@ async fn signup_submit(State(st): State<AppState>, Form(c): Form<Creds>) -> Resp
         Err(e) => return error_page(&format!("DB-Fehler: {e}")),
     };
 
+    // Seed default tag types for the new user
+    if let Err(e) = crate::tagtypes::seed_types(&st.pool, uid).await {
+        return error_page(&format!("Tag-Typen-Seed fehlgeschlagen: {e}"));
+    }
+
     match create_session(&st.pool, uid).await {
         Ok(tok) => with_cookie(Redirect::to("/").into_response(), session_cookie(&tok)),
         Err(e) => error_page(&format!("Session-Fehler: {e}")),
