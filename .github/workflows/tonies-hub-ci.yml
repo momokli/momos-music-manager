@@ -1,0 +1,49 @@
+name: Tonies-Hub CI
+
+# CI for the standalone `tonies-hub` crate (issue #640, slice T2). It is a
+# separate crate, not a workspace member, so it builds from its own directory.
+
+on:
+  pull_request:
+    paths:
+      - 'tonies-hub/**'
+      - '.github/workflows/tonies-hub-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tonies-hub/**'
+      - '.github/workflows/tonies-hub-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tonies-hub-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: tonies-hub
+
+jobs:
+  build-test:
+    name: Build + Test (tonies-hub)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tonies-hub -> target
+          key: tonies-hub-ci
+      - name: no hub access
+        run: grep -rn "hub.db\|HUB_DATABASE_URL\|hub_session" src/ && exit 1 || true
+      - name: no outbound hub client
+        run: grep -n "reqwest" Cargo.toml && exit 1 || true
+      - name: cargo build
+        run: cargo build --locked
+      - name: cargo test
+        run: cargo test --locked
