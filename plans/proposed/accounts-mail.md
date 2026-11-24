@@ -63,6 +63,67 @@ Duplikate und `''`-Werte auflisten (leer → `NULL`), sonst scheitert die Migrat
 
 Rate-Limits: pro IP **und** pro Adresse; Cooldown je User. Alle Token-Routen: `no-store`.
 
+## Umsetzung ohne Mail (Branch `feat/accounts-password`)
+
+Zwei Teile brauchen keine Provider-Entscheidung und laufen voraus:
+
+| Teil | Stand |
+| --- | --- |
+| Passwort-Storage | bcrypt `$2b$`, Cost **12**, Salt pro Hash (`music-hub/src/auth.rs`). Hashes unter Cost 12 werden beim naechsten Login re-gehasht. Prod-Stand vor der Aenderung: alle drei Accounts bereits `$2b$10$` (also gesalzen, nur schwaechere Cost). |
+| `music-hub set-password` (CLI) | liest per `--password-stdin` statt argv (argv landet in `ps`/History), erzwingt `MIN_PASSWORD_LEN` und beendet **alle** Sessions des Users |
+| `POST /account/password` | eingeloggt: altes + neues + Wiederholung, min. 8 Zeichen, beendet **andere** Sessions (die eigene bleibt) — verlinkt aus `#settings` |
+| Migration `068` | `hub_email_tokens` + `email UNIQUE COLLATE NOCASE` (partial index: NULLs kollidieren nicht). Schema steht, Routen folgen |
+
+Damit ist #558/#559/#560 reine Routen-Arbeit auf vorhandenem Unterbau.
+
+**Offene Voraussetzung fuer den Mail-Weg**: kein Account hat eine E-Mail (Prod-Stand
+2026-11-22: `momo`, `Mctoastus`, `ANKD` alle `NULL`). Ohne Adresse laeuft `/forgot` fuer
+niemanden; bis dahin sind Admin-Links (#560) der einzige Reset-Weg ausser der CLI.
+
+## Umgesetzt (Branch `feat/accounts-password`, 2026-11-22)
+
+| Slice | Datei | Was |
+| --- | --- | --- |
+| Passwort-Storage | `music-hub/src/auth.rs` | bcrypt `$2b$`, Cost **12**, Salt pro Hash; Hashes unter Cost 12 werden beim naechsten Login re-gehasht |
+| CLI `set-password` | `music-hub/src/main.rs` | `--password-stdin` statt argv (argv landet in `ps`/History), Min-Laenge, beendet **alle** Sessions |
+| `POST /account/password` | `music-hub/src/account.rs` | eingeloggt aendern (alt + neu + Wiederholung), beendet **andere** Sessions |
+| Migration `068` | `migrations/068_hub_accounts_mail.sql` | `hub_email_tokens` + `email UNIQUE COLLATE NOCASE` (partial index, NULLs kollidieren nicht) |
+| `Mailer` | `music-hub/src/mail.rs` | Trait + `NoopMailer` (Default) + `SmtpMailer` (lettre, Rustls, kein OpenSSL) |
+| Tokens | `music-hub/src/mail_tokens.rs` | 32-Byte-Token, **nur SHA-256** gespeichert, single-use via `UPDATE … RETURNING`, TTL 30 min (reset) / 7 d (register) |
+| `/forgot` + `/reset` | `music-hub/src/account.rs` | neutrale Antwort **und** gleicher Codepfad fuer bekannte/unbekannte Adressen, Throttle pro Adresse, Reset beendet alle Sessions |
+| CLI `set-email`, `link` | `music-hub/src/main.rs` | Adresse setzen; Reset-Link einmalig ausgeben (Admin-Fallback ohne Mail) |
+
+Nicht enthalten: `/register` per Einladung (#559) und die Admin-UI fuer Links
+(#560 — die CLI deckt den Bedarf). Tests: 9 Integrationstests (`tests/mail_reset.rs`),
+7 fuer die Passwortaenderung (`tests/account_password.rs`).
+
+**Offene Voraussetzung**: kein Account hat eine E-Mail (Prod-Stand 2026-11-22:
+`momo`, `Mctoastus`, `ANKD` alle `NULL`). Ohne Adresse laeuft `/forgot` fuer
+niemanden; `music-hub set-email` und `music-hub link` sind bis dahin der Weg.
+
+## Mailtransport: Relay statt Selbstzustellung (#555)
+
+Gemessen am 2026-11-22 auf dem Deploy-Host `192.168.1.4`:
+
+| Messung | Ergebnis |
+| --- | --- |
+| Ausgehend Port 25 | **offen** (`220 mx.google.com ESMTP …`) |
+| Ausgehend Port 587 | offen |
+| PTR der oeffentlichen IP `79.140.117.252` | **keiner** |
+| MX / TXT (SPF) fuer `zukkafabrik.de` | **keine** |
+
+Port 25 offen heisst nicht zustellbar. Gmail/Outlook verlangen fuer Direktversand
+einen forward-confirmed PTR, den eine Vodafone-DSL-Pool-IP nicht hat: die Mail
+wird abgewiesen oder aussortiert — unabhaengig davon, ob den Absender Spam
+stoert. Der Entscheider ist der empfangende Server, nicht wir.
+
+Deshalb spricht `SmtpMailer` Submission (587 STARTTLS bzw. 465 Wrapper) mit einem
+bestehenden Postfach oder Dienst; Konfiguration ueber `HUB_SMTP_HOST`,
+`HUB_SMTP_PORT`, `HUB_SMTP_TLS` (`starttls` \| `wrapper` \| `none`),
+`HUB_SMTP_USERNAME`, `HUB_SMTP_PASSWORD`, `HUB_SMTP_FROM`. Ohne `HUB_SMTP_HOST`
+bleibt `NoopMailer` aktiv: alle Routen laufen, nichts wird verschickt, und
+Admin-Links (`music-hub link --user <slug>`) decken den Bedarf.
+
 ## Meilensteine → Issues
 
 - **#555** [Design] Mail-Provider + Absenderdomain (SPF/DKIM) — Mensch entscheidet

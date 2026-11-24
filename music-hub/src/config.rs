@@ -41,6 +41,20 @@ pub struct Config {
     /// Master key for encrypting the Tonies refresh token at rest
     /// (`HUB_TONIES_SECRET_KEY`). Never logged, never rendered.
     pub tonies_secret_key: Option<String>,
+    /// Public base URL used in mailed links (`HUB_PUBLIC_URL`). Trailing slash
+    /// is irrelevant; links are `{public_url}/reset?token=…`.
+    pub public_url: String,
+    /// SMTP relay host (`HUB_SMTP_HOST`). Unset = mail disabled (`NoopMailer`),
+    /// which is the default: every route keeps working, nothing is delivered.
+    pub smtp_host: Option<String>,
+    /// Relay port (`HUB_SMTP_PORT`). Unset = lettre's default for the TLS mode.
+    pub smtp_port: Option<u16>,
+    /// `starttls` (default, usually 587) | `wrapper` (implicit TLS, 465) | `none`.
+    pub smtp_tls: String,
+    pub smtp_username: Option<String>,
+    pub smtp_password: Option<String>,
+    /// Envelope sender (`HUB_SMTP_FROM`), e.g. `Spelunke <hub@example.com>`.
+    pub smtp_from: String,
 }
 
 impl Config {
@@ -93,6 +107,15 @@ impl Config {
             tonies_client_id: env("TONIES_CLIENT_ID")
                 .unwrap_or_else(|| crate::tonies::client::DEFAULT_CLIENT_ID.to_string()),
             tonies_secret_key: env("HUB_TONIES_SECRET_KEY"),
+            public_url: env("HUB_PUBLIC_URL")
+                .unwrap_or_else(|| "http://127.0.0.1:8080".to_string()),
+            smtp_host: env("HUB_SMTP_HOST"),
+            smtp_port: env("HUB_SMTP_PORT").and_then(|p| p.parse().ok()),
+            smtp_tls: env("HUB_SMTP_TLS").unwrap_or_else(|| "starttls".to_string()),
+            smtp_username: env("HUB_SMTP_USERNAME"),
+            smtp_password: env("HUB_SMTP_PASSWORD"),
+            smtp_from: env("HUB_SMTP_FROM")
+                .unwrap_or_else(|| "Spelunke <hub@localhost>".to_string()),
         }
     }
 
@@ -130,6 +153,14 @@ impl Config {
             // Deterministic key so web integration tests can exercise the
             // encrypted account store without a host env var.
             tonies_secret_key: Some("hub-tonies-test-secret".to_string()),
+            public_url: "http://127.0.0.1:8080".to_string(),
+            // No relay in tests: the harness installs its own recording mailer.
+            smtp_host: None,
+            smtp_port: None,
+            smtp_tls: "starttls".to_string(),
+            smtp_username: None,
+            smtp_password: None,
+            smtp_from: "Spelunke <hub@test>".to_string(),
         }
     }
 

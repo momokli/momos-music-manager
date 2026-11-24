@@ -1,0 +1,29 @@
+{% extends "auth.html" %} {% block title %}Passwort vergessen — Spelunke{% endblock %} {%
+block content %}
+<h1>Spelunke</h1>
+<p class="hub-muted">Passwort vergessen</p>
+{% if error != "" %}
+<p class="hub-flash-err">{{ error }}</p>
+{% endif %} {% if flash != "" %}
+<p class="hub-flash-err">{{ flash }}</p>
+{% endif %} {% if mail_configured %}
+<form method="post" action="/forgot">
+    <input
+        name="email"
+        type="email"
+        placeholder="E-Mail-Adresse"
+        autocomplete="email"
+        autofocus
+        required
+    />
+    <button type="submit">Link anfordern</button>
+</form>
+<p class="hub-muted">Der Link gilt 30 Minuten und funktioniert genau einmal.</p>
+{% else %}
+<p class="hub-muted">
+    Der Mailversand ist auf diesem Hub nicht konfiguriert. Wende dich an einen Admin — er
+    kann dir einen Link erzeugen.
+</p>
+{% endif %}
+<p class="hub-muted"><a href="/login">Zurück zum Login</a></p>
+{% endblock %}

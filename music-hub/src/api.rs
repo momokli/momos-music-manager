@@ -22,6 +22,9 @@ pub struct AppState {
     pub oauth_states: Arc<Mutex<HashMap<String, (i64, String)>>>,
     /// In-memory health of the Hub's own worker loops (issue #353).
     pub worker_health: crate::worker::WorkerHealth,
+    /// Outgoing mail. `NoopMailer` unless `HUB_SMTP_HOST` is set; tests swap in
+    /// a recorder so they can assert on the reset link.
+    pub mailer: Arc<dyn crate::mail::Mailer>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -52,6 +55,7 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::device_settings::router(state.clone()))
         .merge(crate::traktor_api::router(state.clone()))
         .merge(crate::backpack_api::router(state.clone()))
+        .merge(crate::account::router(state.clone()))
         .merge(crate::tagtaskui::router(state))
 }
 

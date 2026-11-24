@@ -20,10 +20,56 @@ pub struct TestApp {
     pub base: String,
     pub pool: SqlitePool,
     pub seed: Seed,
+    /// Everything the hub "sent" during this test.
+    pub mail: Arc<RecordingMailer>,
     /// The resolved config the router was booted with (e.g. a mock Spotify base).
     pub cfg: Arc<Config>,
     client: reqwest::Client,
     _dir: tempfile::TempDir,
+}
+
+/// Captures outgoing mail instead of delivering it.
+#[derive(Default)]
+pub struct RecordingMailer {
+    pub sent: Mutex<Vec<music_hub::mail::OutgoingMail>>,
+}
+
+impl music_hub::mail::Mailer for RecordingMailer {
+    fn send<'a>(
+        &'a self,
+        mail: &'a music_hub::mail::OutgoingMail,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a,
+        >,
+    > {
+        let copy = mail.clone();
+        Box::pin(async move {
+            self.sent
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(copy);
+            Ok(())
+        })
+    }
+}
+
+impl RecordingMailer {
+    /// The most recent message body, if any.
+    pub fn last_body(&self) -> Option<String> {
+        self.sent
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .last()
+            .map(|m| m.body.clone())
+    }
+
+    pub fn count(&self) -> usize {
+        self.sent
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len()
+    }
 }
 
 /// A `reqwest` client that does not follow redirects (so tests can read
@@ -104,12 +150,14 @@ pub async fn spawn_with(dir: tempfile::TempDir, cfg: Config) -> TestApp {
         .expect("seed fixtures");
 
     let cfg = Arc::new(cfg);
+    let mail = Arc::new(RecordingMailer::default());
     let state = AppState {
         pool: pool.clone(),
         ro_pool,
         cfg: cfg.clone(),
         oauth_states: Arc::new(Mutex::new(HashMap::new())),
         worker_health: music_hub::worker::WorkerHealth::default(),
+        mailer: mail.clone(),
     };
 
     let app = music_hub::api::app(state.clone());
@@ -127,6 +175,7 @@ pub async fn spawn_with(dir: tempfile::TempDir, cfg: Config) -> TestApp {
         pool,
         seed,
         cfg,
+        mail,
         client: http(),
         _dir: dir,
     }
