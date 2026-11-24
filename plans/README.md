@@ -45,6 +45,7 @@
 
 ## Done
 
+- [tag-types-editable](done/tag-types-editable.md) — docs(hub): Tag-Typen als Daten
 - [kellner-0.1.0](done/kellner-0.1.0.md) — `feat/kellner-0.1.0` (local cross-platform companion: pairing, Traktor upload, backpack pull + comment tagging, backup, service/tray, packaging + tests — plans [`done/kellner/issues.md`](done/kellner/issues.md))
 - [rolling-channel-update-offer](done/rolling-channel-update-offer.md) — `fix/rolling-channel-update-offer`
 
