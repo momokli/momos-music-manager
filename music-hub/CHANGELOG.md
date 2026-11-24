@@ -17,6 +17,8 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   neu angelegt), einmaliger Backfill für bestehende User gesteuert durch
   `hub_settings.tag_types_backfill_done`, Seed bei Signup. **Noch kein Verhaltenswechsel**
   (Code liest weiter `tagtypes.rs`); T2 schaltet auf die Tabelle um.
+- docs: **Tag-Typen als Daten dokumentiert (ADR-086)** — `{types}` Kürzel kommen aus
+  `hub_tag_types` Tabelle, nicht aus fest codierten Enum-Werten
 - feat: **Tag hygiene — rename, merge similar tags, suggestions** (#456) — a tag
   detail page (`/tag/{id}`) now surfaces owner-only **suggestions** for similar
   own tags (`tags::similar_tags`; ranked by normalised-equal > small edit

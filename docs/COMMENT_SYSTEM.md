@@ -14,11 +14,15 @@ Die Kommentar-Texte werden heute aus einer Vorlage mit Platzhaltern gerendert:
   unbekannten Platzhaltern auf `DEFAULT_TEMPLATE` zurück. `DEFAULT_TEMPLATE` ist
   `"{types} {tags}"`; erlaubt sind `{types}`, `{tags}`, `{source_ids}`, `{bpm}`,
   `{key}` und `{energy}`.
-- **`music-hub/src/tagtypes.rs`**: definiert die feste Tag-Typ-Reihenfolge und die
-  Kürzel — `M` Mood, `G` Genre, `V` Vibe, `P` Phase, `E` Merkmal, `S` Setlist,
-  `R` Rumpelkiste. `{types}` liefert ein Kürzel pro Typ, in dem der Track
-  mindestens einen Tag hat, in dieser Reihenfolge, samt eigener eckiger Klammern
-  (z. B. `[MPE]`).
+- **Tabelle `hub_tag_types`**: definiert die Tag-Typ-Reihenfolge und Kürzel pro
+  User. Die Tabelle hat Spalten `key`, `label`, `abbrev`, `icon`, `sort_order`,
+  `describes`, `weight`. Die Default-Seed bei Signup legt 11 Typen an:
+  `MOOD` (M), `GENRE` (G), `VIBE` (V), `PHASE_1`..`PHASE_5` (je P),
+  `MERKMAL` (E), `SETLIST` (S), `RUMPELKISTE` (R). `{types}` liefert die
+  Kürzel der Typen, in denen der Track mindestens einen Tag hat, sortiert nach
+  `sort_order` ASC (z. B. `[MGPE]`). Die feste Enum-Definition in
+  `music-hub/src/tagtypes.rs` dient nur noch als Kompatibilitäts-Layer für
+  bestehende Logik (describe_family, weight, abbrev).
 
 Alles Folgende ist Legacy-Dokumentation.
 

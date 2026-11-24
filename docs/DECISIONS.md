@@ -862,6 +862,7 @@ For shipping a Release Candidate, the friction of the two-process setup was the 
 | 2026-06-10 | ADR-043                               | Spotify rate-limit retry — parse `Retry-After` header from 429, retry with backoff (max 3 attempts) |
 | 2026-06-10 | ADR-044                               | Tag parent resolution — Setlist tags resolve to parent tags via `tag_parents` table + views         |
 | 2026-06-10 | ADR-045                               | Tag curation workflow page — sequential prev/next + typeahead + "Create & Add" inline flow          |
+| 2026-11-24 | ADR-086                               | Tag-Typen als konfigurierbare Daten (hub_tag_types Tabelle pro User, Seed, kein Code-Enum)                                                  |
 
 ---
 
@@ -2305,3 +2306,34 @@ kellner.
   zurueckfallen statt in einen kaputten Zustand.
 - **tonies-hub** (eigener Dienst, eigene DB) bekommt eine eigene Bibliothek — bewusst nicht
   hier mitgebaut.
+
+## ADR-086: Tag-Typen als konfigurierbare Daten
+
+**Date**: 2026-11-24
+**Status**: Accepted (documented)
+
+**Context**: In ADR-030 (Migration 036) wurden Tag-Typen als fest codierte Enum-Werte
+implementiert (`TagType` Enum in `music-hub/src/tagtypes.rs` mit `TYPE_NAMES` Array
+und CHECK-Constraint auf `hub_tags.type`). Die Dokumentation in `docs/COMMENT_SYSTEM.md`
+behauptete weiter, dass Typen "fest verdrahtet" seien. Mit der Migration 070
+(`070_hub_tag_types.sql`) wurde die Tabelle `hub_tag_types` eingeführt, die pro User
+konfigurierbare Tag-Typen ermöglicht. Die Tabelle hat Spalten für `key`, `label`,
+`abbrev`, `icon`, `sort_order`, `describes`, `weight` und wird bei Signup per
+`seed_types()` mit 11 Default-Typen befüllt (MOOD, GENRE, VIBE, PHASE_1..5,
+MERKMAL, SETLIST, RUMPELKISTE).
+
+**Decision**: Tag-Typen sind jetzt Daten in der Tabelle `hub_tag_types`, nicht
+Code-Enum-Werte. Die Reihenfolge und Kürzel von `{types}` in Kommentaren
+entsprechen der Sortierung in `hub_tag_types` (sort_order ASC). Der Code liest die
+Typen zur Laufzeit aus der Datenbank; das `TagType` Enum bleibt nur als
+Kompabilitäts-Layer für bestehende Logik (describe_family, weight, abbrev).
+
+**Consequences**:
+
+- Keine CHECK-Constraint mehr auf `hub_tags.type` (entfällt mit Migration 070)
+- Lookup statt `parse` für Typ-Validierung: `hub_tag_types.key` ist die Quelle der Wahrheit
+- `{types}` liefert distinct Abbrevs in `hub_tag_types` Sortierreihenfolge
+- Frontend muss die Tabelle lesen, nicht eine feste Enum-Liste
+- Admin-UI kann Typen pro User anpassen (label, icon, sort_order, weight, describes)
+- Seed bei User-Erstellung ist idempotent via `INSERT OR IGNORE`
+- Migration 070 migriert bestehende CHECK-Werte in die neue Tabelle
