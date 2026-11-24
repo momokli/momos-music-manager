@@ -77,14 +77,30 @@ if [ "$NEW_MIG" -gt "$APPLIED" ]; then
   # eine *fehlschlagende* Migration ab — nicht eine, die erfolgreich Daten vernichtet
   # (das DB-Backup hilft dann nur unter Verlust aller seither geschriebenen Daten).
   MAXAPPLIED="$(sqlite3 "$TREE/hub.db" 'SELECT COALESCE(MAX(version),0) FROM _sqlx_migrations' 2>/dev/null || echo 0)"
-  DESTRUCTIVE="$(git -C "$SRC" ls-tree -r --name-only FETCH_HEAD music-hub/migrations | while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      v="$(basename "$f" | sed 's/^0*//; s/_.*//')"
-      [ "$v" -gt "$MAXAPPLIED" ] 2>/dev/null || continue
-      git -C "$SRC" show "FETCH_HEAD:$f" 2>/dev/null \
-        | grep -inE '\b(drop[[:space:]]+(table|column|index)|delete[[:space:]]+from|truncate|rename[[:space:]]+to)\b' \
-        | sed "s|^|$(basename "$f"):|"
-    done)"
+  DESTRUCTIVE=""
+  REBUILDS=""
+  for f in $(git -C "$SRC" ls-tree -r --name-only FETCH_HEAD music-hub/migrations); do
+    v="$(basename "$f" | sed 's/^0*//; s/_.*//')"
+    [ "$v" -gt "$MAXAPPLIED" ] 2>/dev/null || continue
+    body="$(git -C "$SRC" show "FETCH_HEAD:$f" 2>/dev/null)"
+    hits="$(printf '%s\n' "$body" \
+      | grep -inE '\b(drop[[:space:]]+(table|column|index)|delete[[:space:]]+from|truncate|rename[[:space:]]+to)\b' \
+      | sed "s|^|$(basename "$f"):|")"
+    [ -n "$hits" ] || continue
+    # SQLite-Rebuild-Muster: neue Tabelle anlegen, Daten kopieren, alte droppen,
+    # umbenennen. Das ist der einzige Weg, Constraints zu aendern, und er erhaelt
+    # die Daten — deshalb kein Blocker (nur eine Log-Zeile).
+    if printf '%s\n' "$body" | grep -qiE 'create[[:space:]]+table[[:space:]]+[a-z_]+_new' \
+       && printf '%s\n' "$body" | grep -qiE 'insert[[:space:]]+into[[:space:]]+[a-z_]+_new'; then
+      REBUILDS="$REBUILDS $(basename "$f")"
+      continue
+    fi
+    DESTRUCTIVE="$DESTRUCTIVE
+$hits"
+  done
+  if [ -n "$REBUILDS" ]; then
+    log "REBUILD erlaubt (neue Tabelle + Kopie vor Drop):$REBUILDS"
+  fi
   if [ -n "$DESTRUCTIVE" ] && [ "${HUB_DEPLOY_ALLOW_DESTRUCTIVE:-0}" != "1" ]; then
     log "BLOCKIERT — neue Migration mit zerstörendem SQL (Binary-Rollback deckt das nicht ab):"
     printf '%s\n' "$DESTRUCTIVE" | head -10
